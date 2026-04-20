@@ -1,0 +1,80 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# BrainFlow v5 — central configuration (single source of truth)
+# ══════════════════════════════════════════════════════════════════════════════
+
+distribution:
+  backend: auto                 # auto | nccl | gloo
+  init_method: "env://"
+
+data:
+  hf_repo: "pscotti/mindeyev2"
+  data_dir: "./mindeyev2_cache"
+  tensor_cache: "all_subjects_tensors.pt"
+  clip_cache: "all_subjects_clip.pt"
+  latent_cache: "all_subjects_latents.pt"
+  subjects: [1, 2, 3, 4, 5, 6, 7, 8]   # train on ALL subjects
+  img_size: 256
+  max_train: 8859
+  max_test: 982
+  download_threads: 4
+  force_rebuild: false
+
+dataloader:
+  batch_size_per_gpu: 16
+  num_workers: 4
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+  drop_last_train: true
+  drop_last_test: false
+
+model:
+  enc_hidden: 1024
+  enc_blocks: 4
+  enc_drop: 0.25
+  n_tokens: 16
+  brain_dim: 768
+  token_drop_prob: 0.1
+  stochastic_depth: 0.1
+  unet_base_ch: 128
+  attn_heads: 8
+  time_emb_dim: 512
+  latent_ch: 4
+  latent_res: 32
+  clip_dim: 768
+
+training:
+  num_epochs: 150
+  grad_accum: 4
+  lr: 2.0e-4
+  warmup_epochs: 10
+  min_lr: 1.0e-5
+  grad_clip: 0.5
+  weight_decay: 0.05
+  infonce_temp: 0.07
+  lambda_align: 0.1
+  lambda_cfm: 1.0
+  sigma_min: 1.0e-4
+  cfg_drop_prob: 0.20
+  cfg_scale: 2.0
+  fmri_noise_std: 0.05
+  fmri_mask_prob: 0.05
+  mixup_alpha: 0.2
+  ema_decay: 0.9995
+  ema_start: 200
+  eval_freq: 5
+  eval_batches: 8
+  patience: 25
+  min_epochs: 60
+  log_every_n_steps: 50
+
+inference:
+  ode_steps: 20
+
+output:
+  output_dir: "./outputs"
+
+wandb:
+  wandb_project: "brainflow-v5"
+  wandb_run_name: "v5-multisubject"
+  wandb_mode: "online"          # online | offline | disabled
