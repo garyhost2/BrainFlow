@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Data / caches
+mindeyev2_cache/
+outputs/
+logs/
+wandb/
+*.pt
+*.hdf5
+*.h5
+*.tar
+hf_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
