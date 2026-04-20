@@ -1,9 +1,9 @@
 #!/bin/bash -l
 # One-shot CPU job to download + cache MindEyeV2 (run before training).
 #SBATCH -J brainflow_prep
-#SBATCH -o logs/prep_%j.out
-#SBATCH -e logs/prep_%j.err
-#SBATCH -p gpu-short
+#SBATCH -o %x_%j.out
+#SBATCH -e %x_%j.err
+#SBATCH -p gpu-all
 #SBATCH --gres=gpu:1                  # need 1 GPU for CLIP+VAE precompute
 #SBATCH -c 8
 #SBATCH --mem=64G
