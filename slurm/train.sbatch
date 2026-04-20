@@ -4,8 +4,8 @@
 # Submit:    sbatch slurm/train.sbatch
 # ─────────────────────────────────────────────────────────────────────────────
 #SBATCH -J brainflow_v5
-#SBATCH -o logs/train_%j.out
-#SBATCH -e logs/train_%j.err
+#SBATCH -o %x_%j.out
+#SBATCH -e %x_%j.err
 #SBATCH -p gpu-all
 #SBATCH --gres=gpu:v100_16GB:4        # 4 V100s (max 8 per Panther policy)
 #SBATCH -c 16                          # 4 CPUs per GPU
