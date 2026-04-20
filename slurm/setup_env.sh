@@ -16,8 +16,13 @@ else
     exit 1
 fi
 
-# Load CUDA module (Panther provides cuda10.1; for newer PyTorch we use the bundled CUDA runtime via pip wheels)
-module load cuda10.1/toolkit || true
+# Try to load any available CUDA module (PyTorch wheels carry their own runtime,
+# so this is best-effort).
+for m in cuda12.1/toolkit/12.1.1 cuda11.8/toolkit/11.8.0 cuda12.4/toolkit/12.4.1 cuda12.6/toolkit/12.6.2; do
+    if module load "$m" 2>/dev/null; then
+        echo "Loaded module: $m"; break
+    fi
+done
 
 if conda env list | grep -q "^${ENV_NAME} "; then
     echo "Env '${ENV_NAME}' already exists — activating."
