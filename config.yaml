@@ -14,8 +14,8 @@ data:
   latent_cache: "all_subjects_latents.pt"
   subjects: [1, 2, 3, 4, 5, 6, 7, 8]   # train on ALL subjects
   img_size: 256
-  max_train: 8859
-  max_test: 982
+  max_train: 999999
+  max_test: 999999
   download_threads: 4
   force_rebuild: false
 
@@ -56,7 +56,7 @@ training:
   lambda_cfm: 1.0
   sigma_min: 1.0e-4
   cfg_drop_prob: 0.20
-  cfg_scale: 2.0
+  cfg_scale: 1.0
   fmri_noise_std: 0.05
   fmri_mask_prob: 0.05
   mixup_alpha: 0.2
@@ -69,7 +69,7 @@ training:
   log_every_n_steps: 50
 
 inference:
-  ode_steps: 20
+  ode_steps: 1
 
 output:
   output_dir: "./outputs"
