@@ -49,27 +49,27 @@ training:
   lr: 2.0e-4
   warmup_epochs: 10
   min_lr: 1.0e-5
-  grad_clip: 0.5
+  grad_clip: 1.0
   weight_decay: 0.05
   infonce_temp: 0.07
-  lambda_align: 0.1
+  lambda_align: 0.5
   lambda_cfm: 1.0
   sigma_min: 1.0e-4
   cfg_drop_prob: 0.20
-  cfg_scale: 1.0
+  cfg_scale: 2.0
   fmri_noise_std: 0.05
   fmri_mask_prob: 0.05
   mixup_alpha: 0.2
   ema_decay: 0.9995
   ema_start: 200
   eval_freq: 5
-  eval_batches: 8
+  eval_batches: 9999
   patience: 25
   min_epochs: 60
   log_every_n_steps: 50
 
 inference:
-  ode_steps: 1
+  ode_steps: 20
 
 output:
   output_dir: "./outputs"

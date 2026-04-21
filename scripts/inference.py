@@ -24,13 +24,18 @@ def main():
                     help="Path to .pt; defaults to outputs/best_pc_v5.pt")
     ap.add_argument("--n-samples", type=int, default=8)
     ap.add_argument("--out-prefix", type=str, default="inference_v5")
+    ap.add_argument("--cfg-scale", type=float, default=None,
+                    help="CFG scale for NFE sweep (defaults to cfg.cfg_scale)")
+    ap.add_argument("--max-batches", type=int, default=None,
+                    help="Cap number of batches per sweep (None = full eval set)")
     args = ap.parse_args()
 
     cfg = load_config()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_loader, test_loader, _, voxels = build_dataloaders(cfg)
+    # Use the unsharded eval_loader so we always evaluate the full test set
+    train_loader, test_loader, eval_loader, _, voxels = build_dataloaders(cfg)
     test_ds = test_loader.dataset
 
     model = BrainFlowV5(cfg, voxels).to(device).eval()
@@ -70,45 +75,55 @@ def main():
                                  color="green" if pc > 0.15 else "red")
             axes[2, i].imshow(np.abs(gt - pr), cmap="hot", vmin=0, vmax=0.5)
             axes[2, i].axis("off")
-            torch.cuda.empty_cache()
+            # Do NOT call torch.cuda.empty_cache() here — forces device sync each iteration
     plt.tight_layout()
     out_png = cfg.output_dir / f"{args.out_prefix}.png"
     plt.savefig(out_png, bbox_inches="tight", dpi=200)
     print(f"mean PC={np.mean(pcs):.4f} ± {np.std(pcs):.4f} | best={np.max(pcs):.4f}")
     print(f"Saved: {out_png}")
 
+    # CFG sweep — use cfg.ode_steps (not hardcoded 20), iterate full eval_loader
     print("\nCFG sweep:")
     for s in [0.0, 1.0, 1.5, 2.0, 3.0, 5.0]:
         pcs2, sss2 = [], []
+        n_samples_total = 0
         t0 = time.time()
         with torch.no_grad():
-            for batch in test_loader:
+            for bi, batch in enumerate(eval_loader):
+                if args.max_batches is not None and bi >= args.max_batches:
+                    break
                 fmri = batch["fmri"].to(device)
                 subject = batch["subject"].to(device)
                 images = batch["image"]
                 tokens, _ = model.encode_fmri(fmri, subject)
-                pl = model.sample(tokens, n_steps=20, cfg_scale=s)
+                pl = model.sample(tokens, n_steps=cfg.ode_steps, cfg_scale=s)
                 pi = vae.decode(pl)
                 pcs2.append(pixel_correlation(pi, images.to(device)))
                 sss2.append(ssim_pytorch(pi.cpu(), images))
-                if len(pcs2) >= 5: break
+                n_samples_total += fmri.shape[0]
+        elapsed_ms = (time.time() - t0) * 1000
+        ms_per_sample = elapsed_ms / max(1, n_samples_total)
         print(f"  CFG={s:.1f} | PC={np.mean(pcs2):.3f} SSIM={np.mean(sss2):.3f} "
-              f"| {(time.time()-t0)*1000/max(1,sum(len(b['fmri']) for b in [batch])):.1f}ms")
+              f"| {ms_per_sample:.1f}ms/sample")
 
-    print("\nNFE sweep:")
+    # NFE sweep — use args.cfg_scale (or cfg.cfg_scale), iterate full eval_loader
+    nfe_cfg_scale = args.cfg_scale if args.cfg_scale is not None else cfg.cfg_scale
+    print(f"\nNFE sweep (cfg_scale={nfe_cfg_scale:.1f}):")
     for nfe in [1, 2, 3, 5, 10, 20, 50]:
         pcs3, sss3 = [], []
         with torch.no_grad():
-            for batch in test_loader:
+            for bi, batch in enumerate(eval_loader):
+                if args.max_batches is not None and bi >= args.max_batches:
+                    break
                 fmri = batch["fmri"].to(device)
                 subject = batch["subject"].to(device)
                 images = batch["image"]
                 tokens, _ = model.encode_fmri(fmri, subject)
-                pl = model.sample(tokens, n_steps=nfe, cfg_scale=cfg.cfg_scale)
+                pl = model.sample(tokens, n_steps=nfe, cfg_scale=nfe_cfg_scale)
                 pi = vae.decode(pl)
                 pcs3.append(pixel_correlation(pi, images.to(device)))
                 sss3.append(ssim_pytorch(pi.cpu(), images))
-                if len(pcs3) >= 5: break
+        # Report actual NFE (midpoint = 1 NFE/step, heun = 2 NFE/step)
         print(f"  NFE={nfe:3d} | PC={np.mean(pcs3):.3f} SSIM={np.mean(sss3):.3f}")
 
 

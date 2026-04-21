@@ -29,6 +29,25 @@ frozen SD-VAE decoder  →  256×256 image
 - **Tensor / CLIP / VAE-latent caches** so you only download once.
 - **Slurm scripts** prewired for the QCRI **Panther** cluster.
 
+### Phase 1 bugfix patch (expected: PC 0.10→~0.18, SSIM 0.30→~0.40, latency 1.5s→~250ms)
+
+Seven critical pipeline bugs identified and fixed:
+
+| ID | Bug | Fix |
+|----|-----|-----|
+| B1 | Test fMRI z-scored with test-set statistics (data leak) | `NSDDataset` now accepts `fmri_mu`/`fmri_std`; train stats passed to test set via `build_dataloaders` |
+| B3 | `find_unused_parameters=True` in DDP (throughput/correctness) | Set `False` + `broadcast_buffers=False` + `_set_static_graph()` |
+| B4 | No NSD trial averaging on test set (3 reps treated separately) | Average betas across repetitions of same `coco_id` in `load_subject` |
+| B5 | Token dropout zeros tokens; conditional path noisier than unconditional | Replaced with `null_tokens` substitution, moved to `training_step` after CFG drop |
+| B6 | Forward Euler evaluates velocity at interval start | Midpoint Euler default; optional Heun solver (`solver="heun"`) |
+| B7 | `cfg_scale=1.0` (CFG off) and `ode_steps=1` as defaults | `cfg_scale: 2.0`, `ode_steps: 20` |
+| — | Mixup mixes VAE latents (off-manifold) | Mix fMRI only; latent target unchanged |
+
+Additional fixes: `lambda_align` 0.1→0.5, `grad_clip` 0.5→1.0, `eval_batches` 8→9999,
+unsharded eval loader for accurate rank-0 metrics, CLIP singleton (no reload per eval),
+VAE fp16 inference, flash-attention via `F.scaled_dot_product_attention`,
+fused AdamW, bf16 autocast on Ampere+, stochastic depth on-device bernoulli.
+
 ---
 
 ## Repository layout
