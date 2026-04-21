@@ -7,6 +7,7 @@
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
 #SBATCH -p gpu-H200
+#SBATCH -q h200_qos_8_gpus
 #SBATCH --gres=gpu:H200_141GB:8       # 8× H200 141GB (max per Panther policy)
 #SBATCH -c 32                          # 4 CPUs per GPU
 #SBATCH --mem=480G
