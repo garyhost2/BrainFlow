@@ -6,12 +6,11 @@
 #SBATCH -J brainflow_v5
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
-#SBATCH -p gpu-H200
-#SBATCH -q h200_qos_8_gpus
-#SBATCH --gres=gpu:H200_141GB:8       # 8× H200 141GB (max per Panther policy)
-#SBATCH -c 32                          # 4 CPUs per GPU
-#SBATCH --mem=480G
-#SBATCH -t 3-00:00:00                  # 3 days (gpu-H200 max)
+#SBATCH -p gpu-all
+#SBATCH --gres=gpu:v100nv_32GB:2      # 2× V100 32GB SXM (NVLink, all on 1 node)
+#SBATCH -c 16                          # 8 CPUs per GPU
+#SBATCH --mem=180G
+#SBATCH -t 3-00:00:00                  # 3 days
 
 set -euo pipefail
 

@@ -20,7 +20,7 @@ data:
   force_rebuild: false
 
 dataloader:
-  batch_size_per_gpu: 96
+  batch_size_per_gpu: 48
   num_workers: 4
   prefetch_factor: 2
   pin_memory: true
@@ -45,7 +45,7 @@ model:
 
 training:
   num_epochs: 150
-  grad_accum: 1
+  grad_accum: 2
   lr: 2.0e-4
   warmup_epochs: 10
   min_lr: 1.0e-5
