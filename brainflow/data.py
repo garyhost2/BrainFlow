@@ -120,13 +120,12 @@ def load_subject(subject: int, coco_h5: Path, cfg: Config) -> dict:
     # B4: Average test betas across repetitions of the same coco_id
     # NSD shows each test image 3× per subject; average for cleaner signal
     n_before = len(te_coco)
-    unique_coco, first_inv = np.unique(te_coco, return_index=True)
-    # Build averaged fmri and deduplicated images per unique coco_id
-    te_coco_list = te_coco.tolist()
+    unique_coco = np.unique(te_coco)
+    # Build averaged fmri and deduplicated images per unique coco_id (te_coco is already a numpy array)
     avg_fmri_rows = []
     avg_img_rows = []
     for uid in unique_coco:
-        mask = np.array(te_coco_list) == uid
+        mask = te_coco == uid
         avg_fmri_rows.append(fmri_test_raw[mask].mean(0))
         avg_img_rows.append(imgs_test_raw[mask][0])
     fmri_test = torch.stack(avg_fmri_rows)
