@@ -111,6 +111,9 @@ def load_subject(subject: int, coco_h5: Path, cfg: Config) -> dict:
     if imgs.shape[-1] != cfg.img_size:
         imgs = F.interpolate(imgs, cfg.img_size, mode="bilinear",
                              align_corners=False).clamp(0, 1)
+    # Store images as uint8 to keep cache small (~4× smaller than float32).
+    # Decoded back to float in NSDDataset / CLIP / VAE encoders.
+    imgs = (imgs * 255.0).round().clamp(0, 255).to(torch.uint8)
 
     fmri_train = torch.tensor(fmri[:n_tr], dtype=torch.float32)
     fmri_test_raw = torch.tensor(fmri[n_tr:], dtype=torch.float32)
@@ -202,7 +205,10 @@ def compute_or_load_clip(tensors: dict, cfg: Config) -> dict:
     def _enc(imgs, bs=32):
         out = []
         for i in tqdm(range(0, len(imgs), bs), desc="CLIP", leave=False):
-            b = F.interpolate(imgs[i:i+bs], 224, mode="bilinear",
+            chunk = imgs[i:i+bs]
+            if chunk.dtype == torch.uint8:
+                chunk = chunk.float() / 255.0
+            b = F.interpolate(chunk, 224, mode="bilinear",
                               align_corners=False).to(device)
             e = F.normalize(m.encode_image(b).float(), dim=-1).cpu()
             out.append(e)
@@ -239,7 +245,10 @@ def compute_or_load_latents(tensors: dict, cfg: Config) -> dict:
     def _enc(imgs, bs=16):
         out = []
         for i in tqdm(range(0, len(imgs), bs), desc="VAE", leave=False):
-            out.append(vae.encode(imgs[i:i+bs].to(device)).cpu())
+            chunk = imgs[i:i+bs]
+            if chunk.dtype == torch.uint8:
+                chunk = chunk.float() / 255.0
+            out.append(vae.encode(chunk.to(device)).cpu())
         return torch.cat(out)
 
     res = {}
@@ -262,7 +271,8 @@ class NSDDataset(Dataset):
         assert len(fmri) == len(latents) == len(images) == len(clip_embs)
         self.fmri = fmri.float()
         self.latents = latents.float()
-        self.images = images.float()
+        # Keep images as uint8 in RAM (decode to float on __getitem__)
+        self.images = images if images.dtype == torch.uint8 else images.float()
         self.clip_embs = clip_embs.float()
         self.subject_id = int(subject_id)
         self.augment = augment
@@ -287,10 +297,13 @@ class NSDDataset(Dataset):
             if random.random() < 0.5:
                 mask = torch.rand_like(f) > self.cfg.fmri_mask_prob
                 f = f * mask
+        img = self.images[i]
+        if img.dtype == torch.uint8:
+            img = img.float() / 255.0
         return {
             "fmri": f,
             "latent": self.latents[i],
-            "image": self.images[i],
+            "image": img,
             "clip_emb": self.clip_embs[i],
             "subject": self.subject_id,
         }
