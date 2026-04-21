@@ -87,7 +87,8 @@ def main():
                     find_unused_parameters=False, broadcast_buffers=False)
         try:
             model._set_static_graph()
-        except Exception:
+        except (AttributeError, RuntimeError):
+            # _set_static_graph() not available on this PyTorch version; continue without it
             pass
     raw_model = model.module if hasattr(model, "module") else model
 
@@ -101,7 +102,7 @@ def main():
                          betas=(0.9, 0.999), eps=1e-8)
     try:
         optimizer = AdamW(model.parameters(), fused=True, **_optim_kwargs)
-    except TypeError:
+    except (TypeError, RuntimeError):
         optimizer = AdamW(model.parameters(), **_optim_kwargs)
 
     def lr_lambda(epoch):
