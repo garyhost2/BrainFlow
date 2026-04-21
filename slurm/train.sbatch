@@ -10,7 +10,7 @@
 #SBATCH --gres=gpu:v100_16GB:4        # 4 V100s (max 8 per Panther policy)
 #SBATCH -c 16                          # 4 CPUs per GPU
 #SBATCH --mem=120G
-#SBATCH -t 7-00:00:00                  # 7 days
+#SBATCH -t 3-00:00:00                  # 3 days (gpu-H200 max)
 
 set -euo pipefail
 
