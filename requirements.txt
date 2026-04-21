@@ -13,11 +13,3 @@ pyyaml
 python-dotenv
 wandb
 matplotlib
-torch 
-torchvision 
-huggingface_hub 
-webdataset 
-h5py 
-numpy 
-tqdm
-python-dotenv

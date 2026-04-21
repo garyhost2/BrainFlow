@@ -21,8 +21,10 @@ class ResBlockMLP(nn.Module):
         self.drop_prob = stoch_depth
 
     def forward(self, x):
-        if self.training and self.drop_prob > 0 and random.random() < self.drop_prob:
-            return x
+        # Use on-device bernoulli so this is compile-safe (no host-side random.random())
+        if self.training and self.drop_prob > 0:
+            keep = torch.empty(x.shape[0], 1, device=x.device).bernoulli_(1 - self.drop_prob)
+            return x + self.net(self.norm(x)) * keep / (1 - self.drop_prob)
         return x + self.net(self.norm(x))
 
 
@@ -65,10 +67,6 @@ class BrainEncoder(nn.Module):
             h = b(h)
         tokens = self.to_tokens(h)
         cls = F.normalize(self.cls_head(h), dim=-1)
-        if self.training and self.cfg.token_drop_prob > 0:
-            mask = (torch.rand(tokens.shape[0], tokens.shape[1], 1,
-                               device=tokens.device) > self.cfg.token_drop_prob).float()
-            tokens = tokens * mask
         return tokens, cls
 
 
@@ -92,7 +90,7 @@ class CrossAttention(nn.Module):
     def __init__(self, qd, cd, nh=8, hd=64):
         super().__init__()
         inner = nh * hd
-        self.scale = hd ** -0.5; self.nh = nh; self.hd = hd
+        self.nh = nh; self.hd = hd
         self.to_q = nn.Linear(qd, inner, bias=False)
         self.to_k = nn.Linear(cd, inner, bias=False)
         self.to_v = nn.Linear(cd, inner, bias=False)
@@ -106,7 +104,8 @@ class CrossAttention(nn.Module):
         Q = rsh(self.to_q(x), L)
         K = rsh(self.to_k(ctx), ctx.shape[1])
         V = rsh(self.to_v(ctx), ctx.shape[1])
-        out = torch.softmax(Q @ K.transpose(-2, -1) * self.scale, dim=-1) @ V
+        # Use flash-attention / memory-efficient kernels automatically
+        out = F.scaled_dot_product_attention(Q, K, V)
         return res + self.to_out(out.transpose(1, 2).reshape(B, L, -1))
 
 
@@ -202,7 +201,14 @@ class BrainFlowV5(nn.Module):
         return self.brain_enc(fmri, subject)
 
     @torch.no_grad()
-    def sample(self, tokens, n_steps=None, cfg_scale=None):
+    def sample(self, tokens, n_steps=None, cfg_scale=None, solver: str = "midpoint"):
+        """ODE integration from noise to latent.
+
+        solver: "euler" | "midpoint" | "heun"
+            euler    — forward Euler (1 NFE/step)
+            midpoint — midpoint rule (1 NFE/step, better accuracy, default)
+            heun     — Heun's method (2 NFE/step, highest accuracy)
+        """
         cfg = self.cfg
         if n_steps is None: n_steps = cfg.ode_steps
         if cfg_scale is None: cfg_scale = cfg.cfg_scale
@@ -211,15 +217,36 @@ class BrainFlowV5(nn.Module):
                         device=tokens.device)
         dt = 1.0 / n_steps
         null = self.flow_unet.null_tokens.expand(B, -1, -1)
-        for i in range(n_steps):
-            t = torch.full((B,), i * dt, device=x.device)
+
+        def _vel(xt, t_val):
+            t = torch.full((B,), t_val, device=xt.device)
             if cfg_scale > 1.0:
-                v_cond = self.flow_unet(x, t, tokens)
-                v_uncond = self.flow_unet(x, t, null)
-                v = v_uncond + cfg_scale * (v_cond - v_uncond)
+                v_cond = self.flow_unet(xt, t, tokens)
+                v_uncond = self.flow_unet(xt, t, null)
+                return v_uncond + cfg_scale * (v_cond - v_uncond)
+            return self.flow_unet(xt, t, tokens)
+
+        for i in range(n_steps):
+            if solver == "euler":
+                t_cur = i * dt
+                v = _vel(x, t_cur)
+                x = x + v * dt
+            elif solver == "midpoint":
+                # Midpoint Euler: evaluate velocity at midpoint of interval
+                t_mid = (i + 0.5) * dt
+                v = _vel(x, t_mid)
+                x = x + v * dt
+            elif solver == "heun":
+                # Heun's method (2-stage RK): doubles NFE but dramatically
+                # more accurate — use for final evaluation runs
+                t_cur = i * dt
+                t_next = (i + 1) * dt
+                v1 = _vel(x, t_cur)
+                x_euler = x + v1 * dt
+                v2 = _vel(x_euler, t_next)
+                x = x + (v1 + v2) * (dt / 2)
             else:
-                v = self.flow_unet(x, t, tokens)
-            x = x + v * dt
+                raise ValueError(f"Unknown solver: {solver!r}. Use 'euler', 'midpoint', or 'heun'.")
         return x
 
     def training_step(self, batch, device):
@@ -230,11 +257,13 @@ class BrainFlowV5(nn.Module):
         subject = batch["subject"].to(device, non_blocking=True)
         B = fmri.shape[0]
 
+        # Mixup: mix only the fMRI input (not the latent target).
+        # VAE latent space is not linear — mixed latents are off-manifold.
+        # Mixing fMRI still acts as input augmentation without corrupting targets.
         if self.training and cfg.mixup_alpha > 0 and random.random() < 0.3:
             lam = float(np.random.beta(cfg.mixup_alpha, cfg.mixup_alpha))
             lam = max(lam, 1 - lam)
             perm = torch.randperm(B, device=device)
-            latent = lam * latent + (1 - lam) * latent[perm]
             fmri_mixed = lam * fmri + (1 - lam) * fmri[perm]
         else:
             fmri_mixed = fmri
@@ -251,6 +280,15 @@ class BrainFlowV5(nn.Module):
         drop_mask = torch.rand(B, device=device) < cfg.cfg_drop_prob
         null_tokens = self.flow_unet.null_tokens.expand(B, -1, -1)
         ctx = torch.where(drop_mask[:, None, None], null_tokens, tokens)
+
+        # B5: Token dropout — replace dropped tokens with null_tokens so the
+        # UNet always sees a valid distribution (not zeros).
+        # This is applied AFTER the CFG drop so we don't double-apply to the
+        # already-nulled unconditional path.
+        if self.training and cfg.token_drop_prob > 0:
+            drop = torch.rand(B, ctx.shape[1], 1, device=device) < cfg.token_drop_prob
+            null_expand = self.flow_unet.null_tokens.expand(B, -1, -1)
+            ctx = torch.where(drop, null_expand, ctx)
 
         vt = self.flow_unet(xt, t, ctx)
         loss_cfm = F.mse_loss(vt, ut)

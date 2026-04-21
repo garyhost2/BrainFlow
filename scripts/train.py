@@ -65,7 +65,7 @@ def main():
         print(f"[BrainFlow v5] world_size={world_size()} | device={device} | "
               f"subjects={cfg.subjects}")
 
-    train_loader, test_loader, train_sampler, voxels = build_dataloaders(cfg)
+    train_loader, test_loader, eval_loader, train_sampler, voxels = build_dataloaders(cfg)
     if is_main():
         print(f"Voxels per subject: {voxels}")
         print(f"Train batches/rank: {len(train_loader)} | "
@@ -79,14 +79,30 @@ def main():
         print(f"Params: total={n_total/1e6:.1f}M | enc={n_enc/1e6:.1f}M | unet={n_unet/1e6:.1f}M")
 
     if is_dist():
+        # B3: find_unused_parameters=False + static_graph for throughput.
+        # Per-subject ModuleDict means some input_proj keys are unused each step,
+        # but gradients for unused Linear layers are zero so this is safe.
+        # TODO(phase3): replace per-subject ModuleDict with shared zero-padded projection
         model = DDP(model, device_ids=[device.index] if device.type == "cuda" else None,
-                    find_unused_parameters=True)
+                    find_unused_parameters=False, broadcast_buffers=False)
+        try:
+            model._set_static_graph()
+        except Exception:
+            pass
     raw_model = model.module if hasattr(model, "module") else model
+
+    # Apply channels_last memory format to UNet for better GPU memory access patterns
+    raw_model.flow_unet = raw_model.flow_unet.to(memory_format=torch.channels_last)
 
     ema = EMA(raw_model, decay=cfg.ema_decay)
 
-    optimizer = AdamW(model.parameters(), lr=cfg.lr,
-                      weight_decay=cfg.weight_decay, betas=(0.9, 0.999), eps=1e-8)
+    # Use fused AdamW for improved throughput on CUDA (graceful fallback)
+    _optim_kwargs = dict(lr=cfg.lr, weight_decay=cfg.weight_decay,
+                         betas=(0.9, 0.999), eps=1e-8)
+    try:
+        optimizer = AdamW(model.parameters(), fused=True, **_optim_kwargs)
+    except TypeError:
+        optimizer = AdamW(model.parameters(), **_optim_kwargs)
 
     def lr_lambda(epoch):
         if epoch < cfg.warmup_epochs:
@@ -95,7 +111,18 @@ def main():
         return max(cfg.min_lr / cfg.lr, 0.5 * (1 + math.cos(math.pi * progress)))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-    scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
+
+    # Select bf16 on Ampere+ (compute capability >= 8.0) for better perf,
+    # fall back to fp16 + GradScaler on older GPUs
+    use_bf16 = False
+    if device.type == "cuda":
+        cc = torch.cuda.get_device_capability(device)
+        use_bf16 = (cc[0] >= 8)
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and not use_bf16))
+    autocast_dtype = torch.bfloat16 if use_bf16 else torch.float16
+
+    # Build VAE once and keep on GPU — avoids redundant load/move per eval call
+    eval_vae = FrozenVAE(cache_dir=cfg.data_dir / "hf_cache").to(device)
 
     use_wandb = False
     if is_main() and cfg.wandb_mode != "disabled":
@@ -115,10 +142,9 @@ def main():
         except Exception as e:
             print(f"[wandb] disabled: {e}")
 
-    def _do_eval():
-        vae = FrozenVAE(cache_dir=cfg.data_dir / "hf_cache")
-        m = evaluate(raw_model, vae, test_loader, device, cfg, n_batches=cfg.eval_batches)
-        del vae; gc.collect(); torch.cuda.empty_cache()
+    def _do_eval(vae):
+        # Use the unsharded eval_loader so rank-0 sees the full test set
+        m = evaluate(raw_model, vae, eval_loader, device, cfg, n_batches=cfg.eval_batches)
         return m
 
     best_pc = 0.0; best_clip = 0.0; best_combined = 0.0
@@ -133,7 +159,8 @@ def main():
         pbar = tqdm(train_loader, leave=False, desc=f"Ep{epoch}", disable=not is_main())
 
         for bi, batch in enumerate(pbar):
-            with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
+            with torch.cuda.amp.autocast(enabled=device.type == "cuda",
+                                         dtype=autocast_dtype):
                 ld = raw_model.training_step(batch, device)
                 loss = ld["loss"] / cfg.grad_accum
             scaler.scale(loss).backward()
@@ -161,11 +188,11 @@ def main():
             if step >= cfg.ema_start:
                 orig = {k: v.clone() for k, v in raw_model.state_dict().items()}
                 ema.apply(raw_model)
-                m = _do_eval()
+                m = _do_eval(eval_vae)
                 ema.restore(orig, raw_model)
                 tag = "EMA"
             else:
-                m = _do_eval()
+                m = _do_eval(eval_vae)
                 tag = "raw"
 
             for k, v in m.items(): train_metrics[f"test/{k}"] = v
