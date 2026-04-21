@@ -89,6 +89,7 @@ def load_subject(subject: int, coco_h5: Path, cfg: Config) -> dict:
     all_trial = np.concatenate([tr[:, 5].astype(int), te[:, 5].astype(int)])
     all_coco = np.concatenate([tr[:, 0].astype(int), te[:, 0].astype(int)])
     n_tr = len(tr)
+    te_coco = te[:, 0].astype(int)
 
     with h5py.File(beta_path, "r", rdcc_nbytes=256 * 1024 * 1024) as f:
         key = list(f.keys())[0]
@@ -111,13 +112,41 @@ def load_subject(subject: int, coco_h5: Path, cfg: Config) -> dict:
         imgs = F.interpolate(imgs, cfg.img_size, mode="bilinear",
                              align_corners=False).clamp(0, 1)
 
+    fmri_train = torch.tensor(fmri[:n_tr], dtype=torch.float32)
+    fmri_test_raw = torch.tensor(fmri[n_tr:], dtype=torch.float32)
+    imgs_train = imgs[:n_tr]
+    imgs_test_raw = imgs[n_tr:]
+
+    # B4: Average test betas across repetitions of the same coco_id
+    # NSD shows each test image 3× per subject; average for cleaner signal
+    n_before = len(te_coco)
+    unique_coco, first_inv = np.unique(te_coco, return_index=True)
+    # Build averaged fmri and deduplicated images per unique coco_id
+    te_coco_list = te_coco.tolist()
+    avg_fmri_rows = []
+    avg_img_rows = []
+    for uid in unique_coco:
+        mask = np.array(te_coco_list) == uid
+        avg_fmri_rows.append(fmri_test_raw[mask].mean(0))
+        avg_img_rows.append(imgs_test_raw[mask][0])
+    fmri_test = torch.stack(avg_fmri_rows)
+    imgs_test = torch.stack(avg_img_rows)
+    n_after = len(fmri_test)
+    print(f"  subj{subject:02d}: test trials averaged {n_before} → {n_after} unique images")
+
+    # Compute train fMRI statistics (used to normalise test set in NSDDataset)
+    fmri_mu = fmri_train.mean(0)
+    fmri_std = fmri_train.std(0).clamp(1e-6)
+
     return {
         "subject": subject,
         "n_voxels": n_vox,
-        "fmri_train": torch.tensor(fmri[:n_tr], dtype=torch.float32),
-        "fmri_test": torch.tensor(fmri[n_tr:], dtype=torch.float32),
-        "images_train": imgs[:n_tr],
-        "images_test": imgs[n_tr:],
+        "fmri_train": fmri_train,
+        "fmri_test": fmri_test,
+        "images_train": imgs_train,
+        "images_test": imgs_test,
+        "fmri_mu": fmri_mu,
+        "fmri_std": fmri_std,
     }
 
 
@@ -135,7 +164,7 @@ def build_or_load_tensors(cfg: Config) -> dict:
 
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     coco = dl_hf("coco_images_224_float16.hdf5", cfg.data_dir, cfg.hf_repo)
-    out = {"voxels": {}}
+    out = {"voxels": {}, "fmri_stats": {}}
     for subj in tqdm(cfg.subjects, desc="Loading subjects"):
         d = load_subject(subj, coco, cfg)
         out[f"fmri_train_{subj}"] = d["fmri_train"]
@@ -143,6 +172,7 @@ def build_or_load_tensors(cfg: Config) -> dict:
         out[f"imgs_train_{subj}"] = d["images_train"]
         out[f"imgs_test_{subj}"] = d["images_test"]
         out["voxels"][subj] = d["n_voxels"]
+        out["fmri_stats"][subj] = {"mu": d["fmri_mu"], "std": d["fmri_std"]}
         print(f"  subj{subj:02d}: train={tuple(d['fmri_train'].shape)} "
               f"test={tuple(d['fmri_test'].shape)} voxels={d['n_voxels']}")
     print(f"\nSaving tensor cache → {cache}")
@@ -228,7 +258,8 @@ def compute_or_load_latents(tensors: dict, cfg: Config) -> dict:
 
 class NSDDataset(Dataset):
     def __init__(self, fmri, latents, images, clip_embs, subject_id,
-                 augment=False, cfg: Config | None = None):
+                 augment=False, cfg: Config | None = None,
+                 fmri_mu=None, fmri_std=None):
         assert len(fmri) == len(latents) == len(images) == len(clip_embs)
         self.fmri = fmri.float()
         self.latents = latents.float()
@@ -237,10 +268,16 @@ class NSDDataset(Dataset):
         self.subject_id = int(subject_id)
         self.augment = augment
         self.cfg = cfg
-        # Z-score normalise fMRI per-subject
-        mu = self.fmri.mean(0, keepdim=True)
-        std = self.fmri.std(0, keepdim=True).clamp(1e-6)
-        self.fmri = (self.fmri - mu) / std
+        # B1: Z-score normalise fMRI per-subject using train statistics.
+        # If fmri_mu/fmri_std are provided (test set), use them to avoid
+        # data leak from normalising with test-set statistics.
+        if fmri_mu is not None and fmri_std is not None:
+            self.fmri_mu = fmri_mu
+            self.fmri_std = fmri_std
+        else:
+            self.fmri_mu = self.fmri.mean(0)
+            self.fmri_std = self.fmri.std(0).clamp(1e-6)
+        self.fmri = (self.fmri - self.fmri_mu) / self.fmri_std
 
     def __len__(self): return len(self.fmri)
 
@@ -326,25 +363,40 @@ class SubjectBatchSampler(Sampler):
 
 
 def build_dataloaders(cfg: Config):
-    """Returns (train_loader, test_loader, train_sampler, voxels_per_subject)."""
+    """Returns (train_loader, test_loader, eval_loader, train_sampler, voxels_per_subject).
+
+    eval_loader is identical to test_loader but NOT sharded across DDP ranks
+    (num_replicas=1, rank=0) so rank-0 evaluation sees the full test set.
+    """
     tensors = build_or_load_tensors(cfg)
     clips = compute_or_load_clip(tensors, cfg)
     lats = compute_or_load_latents(tensors, cfg)
 
+    fmri_stats = tensors.get("fmri_stats", {})
     train_sets, test_sets = [], []
     voxels = tensors.get("voxels", {})
     for subj in cfg.subjects:
         if subj not in voxels:
             voxels[subj] = tensors[f"fmri_train_{subj}"].shape[1]
-        train_sets.append(NSDDataset(
+        # Build train dataset first so we can read its normalisation stats
+        tr_ds = NSDDataset(
             tensors[f"fmri_train_{subj}"], lats[f"lat_train_{subj}"],
             tensors[f"imgs_train_{subj}"], clips[f"clip_train_{subj}"],
             subject_id=subj, augment=True, cfg=cfg,
-        ))
+        )
+        train_sets.append(tr_ds)
+        # B1: Pass train fmri stats to test dataset to avoid data leak
+        if subj in fmri_stats:
+            te_mu = fmri_stats[subj]["mu"]
+            te_std = fmri_stats[subj]["std"]
+        else:
+            te_mu = tr_ds.fmri_mu
+            te_std = tr_ds.fmri_std
         test_sets.append(NSDDataset(
             tensors[f"fmri_test_{subj}"], lats[f"lat_test_{subj}"],
             tensors[f"imgs_test_{subj}"], clips[f"clip_test_{subj}"],
             subject_id=subj, augment=False, cfg=cfg,
+            fmri_mu=te_mu, fmri_std=te_std,
         ))
 
     train_set = ConcatDataset(train_sets)
@@ -359,6 +411,12 @@ def build_dataloaders(cfg: Config):
         [len(d) for d in test_sets], cfg.batch_size_per_gpu,
         shuffle=False, drop_last=cfg.drop_last_test,
         num_replicas=world_size(), rank=rank(),
+    )
+    # Eval sampler: always rank=0, num_replicas=1 → full test set on rank-0
+    eval_sampler = SubjectBatchSampler(
+        [len(d) for d in test_sets], cfg.batch_size_per_gpu,
+        shuffle=False, drop_last=False,
+        num_replicas=1, rank=0,
     )
 
     pf = cfg.prefetch_factor if cfg.num_workers > 0 else None
@@ -376,4 +434,10 @@ def build_dataloaders(cfg: Config):
         persistent_workers=persistent, prefetch_factor=pf,
         collate_fn=variable_collate,
     )
-    return train_loader, test_loader, train_sampler, voxels
+    eval_loader = DataLoader(
+        test_set, batch_sampler=eval_sampler,
+        num_workers=cfg.num_workers, pin_memory=cfg.pin_memory,
+        persistent_workers=persistent, prefetch_factor=pf,
+        collate_fn=variable_collate,
+    )
+    return train_loader, test_loader, eval_loader, train_sampler, voxels

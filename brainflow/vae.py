@@ -6,7 +6,8 @@ from diffusers import AutoencoderKL
 
 
 class FrozenVAE(nn.Module):
-    def __init__(self, cache_dir: Path | str | None = None):
+    def __init__(self, cache_dir: Path | str | None = None,
+                 dtype: torch.dtype = torch.float16):
         super().__init__()
         kwargs = {"torch_dtype": torch.float32}
         if cache_dir is not None:
@@ -18,11 +19,16 @@ class FrozenVAE(nn.Module):
         for p in self.vae.parameters():
             p.requires_grad_(False)
         self.scale = 0.18215
+        self.dtype = dtype
 
     @torch.no_grad()
     def encode(self, x):
-        return self.vae.encode(x * 2 - 1).latent_dist.sample() * self.scale
+        # Cast to target dtype for faster inference; output back to fp32
+        return (self.vae.encode((x * 2 - 1).to(self.dtype))
+                .latent_dist.sample().float() * self.scale)
 
     @torch.no_grad()
     def decode(self, z):
-        return (self.vae.decode(z / self.scale).sample.clamp(-1, 1) + 1) / 2
+        # Cast to target dtype for faster inference; output back to fp32
+        return ((self.vae.decode((z / self.scale).to(self.dtype))
+                 .sample.float().clamp(-1, 1) + 1) / 2)

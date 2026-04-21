@@ -29,14 +29,27 @@ def ssim_pytorch(pred, target, ws=11, sigma=1.5):
                   ((mx ** 2 + my ** 2 + C1) * (sx + sy + C2))).mean())
 
 
+# Module-level CLIP singleton — loaded once and kept on GPU for all eval calls
+_CLIP_ENC = None
+
+
+def _get_clip(device):
+    global _CLIP_ENC
+    if _CLIP_ENC is None:
+        import open_clip
+        m, _, _ = open_clip.create_model_and_transforms("ViT-L-14", pretrained="openai")
+        m = m.eval().to(device)
+        for p in m.parameters():
+            p.requires_grad_(False)
+        _CLIP_ENC = m
+    return _CLIP_ENC
+
+
 @torch.no_grad()
-def evaluate(model, vae, loader, device, cfg, n_batches=8):
-    import open_clip
+def evaluate(model, vae, loader, device, cfg, n_batches=9999):
     model.eval(); vae.to(device)
+    clip_enc = _get_clip(device)
     pcs, sss, css = [], [], []
-    clip_enc, _, _ = open_clip.create_model_and_transforms("ViT-L-14", pretrained="openai")
-    clip_enc = clip_enc.eval().to(device)
-    for p in clip_enc.parameters(): p.requires_grad_(False)
 
     for i, batch in enumerate(loader):
         if i >= n_batches: break
@@ -55,7 +68,7 @@ def evaluate(model, vae, loader, device, cfg, n_batches=8):
         et = F.normalize(clip_enc.encode_image(gt_r).float(), dim=-1)
         css.append(float((ep * et).sum(-1).mean()))
 
-    del clip_enc; vae.cpu(); gc.collect(); torch.cuda.empty_cache()
+    # Keep clip_enc and vae on GPU for next eval call (no del / vae.cpu())
     model.train()
     return {
         "PixCorr": float(np.mean(pcs)) if pcs else 0.0,
