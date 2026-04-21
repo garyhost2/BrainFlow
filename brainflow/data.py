@@ -49,7 +49,7 @@ def dl_hf(fname: str, data_dir: Path, repo: str) -> Path:
 def prefetch_subject_files(subject: int, cfg: Config) -> dict:
     s = f"0{subject}"
     tasks = [f"betas_all_subj{s}_fp32_renorm.hdf5"]
-    for split, n in [("train", 8), ("test", 1)]:
+    for split, n in [("train", 64), ("test", 8)]:
         for i in range(n):
             tasks.append(f"wds/subj{s}/{split}/{i}.tar")
     results = {}
@@ -71,7 +71,7 @@ def load_subject(subject: int, coco_h5: Path, cfg: Config) -> dict:
     beta_path = file_map.get(beta_key) or dl_hf(beta_key, cfg.data_dir, cfg.hf_repo)
 
     shards = []
-    for split, n in [("train", 8), ("test", 1)]:
+    for split, n in [("train", 64), ("test", 8)]:
         for i in range(n):
             k = f"wds/subj{s}/{split}/{i}.tar"
             if k in file_map and file_map[k].exists():
