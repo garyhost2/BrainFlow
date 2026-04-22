@@ -47,6 +47,7 @@ nvidia-smi || true
 export OMP_NUM_THREADS=4
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
+export NCCL_TIMEOUT=1800  # 30 min timeout for slow NFS operations
 
 torchrun \
     --standalone \
