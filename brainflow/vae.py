@@ -9,7 +9,7 @@ class FrozenVAE(nn.Module):
     def __init__(self, cache_dir: Path | str | None = None,
                  dtype: torch.dtype = torch.float16):
         super().__init__()
-        kwargs = {"torch_dtype": torch.float32}
+        kwargs = {"torch_dtype": dtype}
         if cache_dir is not None:
             kwargs["cache_dir"] = str(cache_dir)
         self.vae = AutoencoderKL.from_pretrained(
