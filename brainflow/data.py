@@ -158,7 +158,9 @@ def build_or_load_tensors(cfg: Config) -> dict:
     if cache.exists() and not cfg.force_rebuild:
         if is_main():
             print(f"✓ Loading tensor cache: {cache}")
-        return torch.load(cache, map_location="cpu")
+        out = torch.load(cache, map_location="cpu")
+        if is_dist(): dist.barrier()
+        return out
 
     if not is_main():
         if is_dist(): dist.barrier()
@@ -189,7 +191,9 @@ def compute_or_load_clip(tensors: dict, cfg: Config) -> dict:
     if cache.exists() and not cfg.force_rebuild:
         if is_main():
             print(f"✓ Loading CLIP cache: {cache}")
-        return torch.load(cache, map_location="cpu")
+        out = torch.load(cache, map_location="cpu")
+        if is_dist(): dist.barrier()
+        return out
     if not is_main():
         if is_dist(): dist.barrier()
         return torch.load(cache, map_location="cpu")
@@ -233,7 +237,9 @@ def compute_or_load_latents(tensors: dict, cfg: Config) -> dict:
     if cache.exists() and not cfg.force_rebuild:
         if is_main():
             print(f"✓ Loading VAE latent cache: {cache}")
-        return torch.load(cache, map_location="cpu")
+        out = torch.load(cache, map_location="cpu")
+        if is_dist(): dist.barrier()
+        return out
     if not is_main():
         if is_dist(): dist.barrier()
         return torch.load(cache, map_location="cpu")
