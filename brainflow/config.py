@@ -61,6 +61,8 @@ class Config:
     infonce_temp: float = 0.07
     lambda_align: float = 0.1
     lambda_cfm: float = 1.0
+    lambda_percep: float = 0.1
+    percep_loss: str = "none"
     sigma_min: float = 1e-4
     cfg_drop_prob: float = 0.20
     cfg_scale: float = 2.0
@@ -80,6 +82,7 @@ class Config:
 
     # Output
     output_dir: Path = Path("./outputs")
+    experiment_name: str = "baseline"
 
     # WandB
     wandb_project: str = "brainflow-v5"
