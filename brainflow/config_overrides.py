@@ -12,7 +12,10 @@ def apply_env_overrides(cfg):
         EXPERIMENT_NAME: baseline | lpips | l1 | v6
         PERCEP_LOSS: none | lpips | l1
         LAMBDA_PERCEP: float (e.g., "0.1")
-        USE_V6: "1" to enable V6 enhancements
+        BATCH_SIZE_PER_GPU: int (e.g., "32")
+        GRAD_ACCUM: int (e.g., "6")
+        N_TOKENS: int (e.g., "64")
+        USE_V6: "1" to enable V6 enhancements (64 tokens + LPIPS)
     """
     # Experiment name
     if "EXPERIMENT_NAME" in os.environ:
@@ -32,13 +35,18 @@ def apply_env_overrides(cfg):
     if "GRAD_ACCUM" in os.environ:
         cfg.grad_accum = int(os.environ["GRAD_ACCUM"])
     
-    # V6 enhancements - stronger alignment and perceptual supervision
+    # Number of tokens override
+    if "N_TOKENS" in os.environ:
+        cfg.n_tokens = int(os.environ["N_TOKENS"])
+    
+    # V6 enhancements - more tokens + perceptual supervision
     if "USE_V6" in os.environ and os.environ["USE_V6"] == "1":
-        # V6-lite: Enhanced loss weights for better reconstruction
-        cfg.lambda_align = 1.0  # Increase alignment loss (was 0.5)
-        cfg.lambda_percep = 0.15  # Stronger perceptual loss (was 0.1)
+        # V6: More expressive tokens + perceptual quality
+        cfg.n_tokens = 64  # Increase from 16 to 64 for richer representation
+        cfg.lambda_align = 0.1  # Keep baseline alignment weight
+        cfg.lambda_percep = 0.15  # Stronger perceptual loss
         cfg.percep_loss = "lpips"  # Always use LPIPS for V6
-        cfg.mixup_alpha = 0.1  # Reduce mixup (was 0.2) for cleaner gradients
+        cfg.mixup_alpha = 0.1  # Reduce mixup for cleaner gradients
         if not cfg.experiment_name.startswith("v6"):
             cfg.experiment_name = f"v6"
     
