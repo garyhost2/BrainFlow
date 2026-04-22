@@ -21,11 +21,13 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from brainflow.config import load_config
+from brainflow.config_overrides import apply_env_overrides
 from brainflow.data import build_dataloaders, is_dist, is_main, rank, world_size
 from brainflow.models import BrainFlowV5
 from brainflow.ema import EMA
 from brainflow.vae import FrozenVAE
 from brainflow.metrics import evaluate
+from brainflow.perceptual_loss import build_perceptual_loss
 
 load_dotenv()
 
@@ -62,12 +64,24 @@ def set_seed(seed=42):
 def main():
     set_seed(42)
     cfg = load_config()
+    
+    # Apply environment variable overrides for experiments
+    cfg = apply_env_overrides(cfg)
+    
+    # Create experiment-specific output directory
+    cfg.output_dir = cfg.output_dir / cfg.experiment_name
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Update wandb run name with experiment
+    if cfg.experiment_name != "baseline":
+        cfg.wandb_run_name = f"{cfg.wandb_run_name}-{cfg.experiment_name}"
 
     device = setup_ddp(cfg.backend, cfg.init_method)
     if is_main():
-        print(f"[BrainFlow v5] world_size={world_size()} | device={device} | "
+        print(f"[BrainFlow v5 - {cfg.experiment_name.upper()}] world_size={world_size()} | device={device} | "
               f"subjects={cfg.subjects}")
+        if cfg.percep_loss != "none":
+            print(f"Perceptual loss: {cfg.percep_loss} (lambda={cfg.lambda_percep})")
 
     train_loader, test_loader, eval_loader, train_sampler, voxels = build_dataloaders(cfg)
     if is_main():
@@ -128,6 +142,15 @@ def main():
 
     # Build VAE once and keep on GPU — avoids redundant load/move per eval call
     eval_vae = FrozenVAE(cache_dir=cfg.data_dir / "hf_cache").to(device)
+    
+    # Build perceptual loss module if enabled
+    percep_loss_fn = None
+    if cfg.percep_loss != "none" and cfg.lambda_percep > 0:
+        percep_loss_fn = build_perceptual_loss(cfg.percep_loss)
+        if percep_loss_fn is not None:
+            percep_loss_fn = percep_loss_fn.to(device)
+            if is_main():
+                print(f"Using perceptual loss: {cfg.percep_loss} (weight={cfg.lambda_percep})")
 
     use_wandb = False
     if is_main() and cfg.wandb_mode != "disabled":
@@ -166,7 +189,7 @@ def main():
         for bi, batch in enumerate(pbar):
             with torch.cuda.amp.autocast(enabled=device.type == "cuda",
                                          dtype=autocast_dtype):
-                ld = raw_model.training_step(batch, device)
+                ld = raw_model.training_step(batch, device, vae=eval_vae, percep_loss_fn=percep_loss_fn)
                 loss = ld["loss"] / cfg.grad_accum
             scaler.scale(loss).backward()
 
@@ -179,7 +202,12 @@ def main():
 
             for k, v in ld.items(): losses[k].append(v.item())
             if is_main():
-                pbar.set_postfix(c=f"{ld['cfm'].item():.3f}", a=f"{ld['align'].item():.3f}")
+                if cfg.lambda_percep > 0 and "percep" in ld:
+                    pbar.set_postfix(c=f"{ld['cfm'].item():.3f}", 
+                                    a=f"{ld['align'].item():.3f}",
+                                    p=f"{ld['percep'].item():.3f}")
+                else:
+                    pbar.set_postfix(c=f"{ld['cfm'].item():.3f}", a=f"{ld['align'].item():.3f}")
 
         scheduler.step()
 

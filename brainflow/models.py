@@ -249,7 +249,7 @@ class BrainFlowV5(nn.Module):
                 raise ValueError(f"Unknown solver: {solver!r}. Use 'euler', 'midpoint', or 'heun'.")
         return x
 
-    def training_step(self, batch, device):
+    def training_step(self, batch, device, vae=None, percep_loss_fn=None):
         cfg = self.cfg
         fmri = batch["fmri"].to(device, non_blocking=True)
         latent = batch["latent"].to(device, non_blocking=True)
@@ -302,5 +302,23 @@ class BrainFlowV5(nn.Module):
         loss_align = (F.cross_entropy(logits, labels) +
                       F.cross_entropy(logits.T, labels)) / 2
 
-        total = cfg.lambda_cfm * loss_cfm + cfg.lambda_align * loss_align
-        return {"loss": total, "cfm": loss_cfm, "align": loss_align}
+        # Compute perceptual loss if enabled
+        loss_percep = torch.tensor(0.0, device=device)
+        if percep_loss_fn is not None and vae is not None and cfg.lambda_percep > 0:
+            # Decode predicted and target latents to pixel space
+            with torch.no_grad():
+                gt_imgs = batch["image"].to(device, non_blocking=True)
+                # Normalize to [-1, 1] for VAE
+                gt_imgs = gt_imgs * 2.0 - 1.0
+            
+            # Decode predicted latent (use the predicted velocity to get final latent)
+            # For training, we sample at a random time step, so we approximate
+            # the final latent using: latent ≈ xt + vt * (1 - t)
+            pred_latent = xt + vt * (1 - t_expand)
+            pred_imgs = vae.decode(pred_latent)
+            
+            # Compute perceptual loss in pixel space
+            loss_percep = percep_loss_fn(pred_imgs, gt_imgs)
+
+        total = cfg.lambda_cfm * loss_cfm + cfg.lambda_align * loss_align + cfg.lambda_percep * loss_percep
+        return {"loss": total, "cfm": loss_cfm, "align": loss_align, "percep": loss_percep}
