@@ -9,13 +9,16 @@ def apply_env_overrides(cfg):
     This allows launching different experiments without modifying config.yaml.
     
     Environment variables:
-        EXPERIMENT_NAME: baseline | lpips | l1 | v6
+        EXPERIMENT_NAME: baseline | lpips | l1 | v6 | v7
         PERCEP_LOSS: none | lpips | l1
         LAMBDA_PERCEP: float (e.g., "0.1")
         BATCH_SIZE_PER_GPU: int (e.g., "32")
         GRAD_ACCUM: int (e.g., "6")
         N_TOKENS: int (e.g., "64")
+        UNET_BASE_CH: int (e.g., "192")
+        N_ENC_BLOCKS: int (e.g., "6")
         USE_V6: "1" to enable V6 enhancements (64 tokens + LPIPS)
+        USE_V7: "1" to enable V7 enhancements (compact model: 64 tokens, 192 base_ch, 6 enc blocks)
     """
     # Experiment name
     if "EXPERIMENT_NAME" in os.environ:
@@ -39,6 +42,12 @@ def apply_env_overrides(cfg):
     if "N_TOKENS" in os.environ:
         cfg.n_tokens = int(os.environ["N_TOKENS"])
     
+    # UNet architecture overrides
+    if "UNET_BASE_CH" in os.environ:
+        cfg.unet_base_ch = int(os.environ["UNET_BASE_CH"])
+    if "N_ENC_BLOCKS" in os.environ:
+        cfg.n_enc_blocks = int(os.environ["N_ENC_BLOCKS"])
+    
     # V6 enhancements - more tokens + perceptual supervision
     if "USE_V6" in os.environ and os.environ["USE_V6"] == "1":
         # V6: More expressive tokens + perceptual quality
@@ -49,5 +58,18 @@ def apply_env_overrides(cfg):
         cfg.mixup_alpha = 0.1  # Reduce mixup for cleaner gradients
         if not cfg.experiment_name.startswith("v6"):
             cfg.experiment_name = f"v6"
+    
+    # V7 enhancements - compact model with more tokens
+    if "USE_V7" in os.environ and os.environ["USE_V7"] == "1":
+        # V7: Compact architecture with richer representation
+        cfg.n_tokens = 64  # More tokens for better representation
+        cfg.lambda_align = 0.1  # Keep baseline alignment weight
+        cfg.lambda_percep = 0.1  # Moderate perceptual loss
+        cfg.percep_loss = "lpips"  # Use LPIPS for perceptual quality
+        cfg.unet_base_ch = 192  # Smaller UNet (vs 256 baseline)
+        cfg.n_enc_blocks = 6  # Fewer encoder blocks (vs 8 baseline)
+        cfg.batch_size_per_gpu = 32  # Smaller batch for single GPU
+        if not cfg.experiment_name.startswith("v7"):
+            cfg.experiment_name = f"v7"
     
     return cfg

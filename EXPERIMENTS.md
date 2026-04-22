@@ -7,7 +7,8 @@ This guide explains how to run multiple BrainFlow experiments in parallel to com
 1. **baseline** - Current configuration (CFM + InfoNCE only)
 2. **lpips** - Baseline + LPIPS perceptual loss (weight=0.1)
 3. **l1** - Baseline + L1 pixel loss (weight=0.05)
-4. **v6** - Enhanced architecture with LPIPS + stronger alignment
+4. **v6** - Enhanced architecture: 64 tokens + LPIPS (weight=0.15)
+5. **v7** - Compact model: 64 tokens + smaller UNet (192 base_ch, 6 enc blocks)
 
 ## Prerequisites
 
@@ -44,6 +45,7 @@ cd ~/BrainFlow
 ./launch_experiment.sh lpips
 ./launch_experiment.sh l1
 ./launch_experiment.sh v6
+./launch_experiment.sh v7
 ```
 
 The script automatically:
@@ -90,15 +92,30 @@ sbatch slurm/train.sbatch
 - **Speed**: ~5% slower per epoch
 
 ### V6 Experiment
-- **Loss**: CFM + InfoNCE (1.0×) + LPIPS (0.15×), reduced mixup
-- **Architecture**: Same as V5 with enhanced loss balance
-- **Goal**: Maximum reconstruction quality with current architecture
+- **Loss**: CFM + InfoNCE (0.1×) + LPIPS (0.15×), reduced mixup
+- **Architecture**: 64 tokens (4× baseline), same UNet
+- **Goal**: Richer representation with more tokens + perceptual quality
 - **Changes from baseline**:
-  - λ_align: 0.5 → 1.0 (stronger semantic alignment)
-  - λ_percep: 0.1 → 0.15 (stronger perceptual quality)
+  - n_tokens: 16 → 64 (4× more expressive capacity)
+  - λ_align: 0.1 (baseline level, not increased)
+  - λ_percep: 0.15 (strong perceptual guidance)
   - mixup_alpha: 0.2 → 0.1 (cleaner gradients)
-- **Note**: This is "V6-lite" - full SDXL-unclip would require major rewrite
-- **Expected**: Best overall quality, potential +0.03-0.07 improvement over LPIPS
+- **Expected**: Best quality with current data, +0.03-0.07 improvement
+
+### V7 Experiment
+- **Loss**: CFM + InfoNCE (0.1×) + LPIPS (0.1×)
+- **Architecture**: Compact model with richer representation
+- **Goal**: Faster training with efficient architecture, test if smaller UNet works
+- **Changes from baseline**:
+  - n_tokens: 16 → 64 (4× more tokens)
+  - unet_base_ch: 256 → 192 (25% fewer UNet params)
+  - n_enc_blocks: 8 → 6 (25% fewer encoder layers)
+  - batch_size_per_gpu: 48 → 32 (fits better on single GPU)
+  - λ_align: 0.1 (baseline level)
+  - λ_percep: 0.1 (moderate perceptual guidance)
+- **Params**: ~180M (vs 231M baseline, 22% smaller)
+- **Expected**: Faster training (~20% speedup), comparable or better quality if tokens are key
+- **Strategy**: Test hypothesis that more tokens > bigger UNet
 
 ## Monitoring Experiments
 
