@@ -26,6 +26,12 @@ def apply_env_overrides(cfg):
     if "LAMBDA_PERCEP" in os.environ:
         cfg.lambda_percep = float(os.environ["LAMBDA_PERCEP"])
     
+    # Batch size and grad accumulation overrides for different GPU configs
+    if "BATCH_SIZE_PER_GPU" in os.environ:
+        cfg.batch_size_per_gpu = int(os.environ["BATCH_SIZE_PER_GPU"])
+    if "GRAD_ACCUM" in os.environ:
+        cfg.grad_accum = int(os.environ["GRAD_ACCUM"])
+    
     # V6 enhancements - stronger alignment and perceptual supervision
     if "USE_V6" in os.environ and os.environ["USE_V6"] == "1":
         # V6-lite: Enhanced loss weights for better reconstruction

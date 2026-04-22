@@ -7,9 +7,9 @@
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
 #SBATCH -p gpu-all
-#SBATCH --gres=gpu:T4_16G:2           # 2× T4 16GB
-#SBATCH -c 16
-#SBATCH --mem=160G
+#SBATCH --gres=gpu:T4_16G:1           # 1× T4 16GB (single GPU)
+#SBATCH -c 8
+#SBATCH --mem=80G
 #SBATCH -t 3-00:00:00
 
 set -euo pipefail
