@@ -6,6 +6,7 @@
 from __future__ import annotations
 import os, sys, math, gc, random
 from collections import defaultdict
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -40,7 +41,10 @@ def setup_ddp(backend_cfg: str, init_method: str) -> torch.device:
     else:
         backend = "gloo" if backend_cfg == "auto" else backend_cfg
         device = torch.device("cpu")
-    dist.init_process_group(backend=backend, init_method=init_method)
+    # Increase timeout for slow NFS operations during model init
+    timeout_sec = int(os.environ.get("DDP_TIMEOUT", "1800"))  # 30 min default
+    dist.init_process_group(backend=backend, init_method=init_method,
+                            timeout=timedelta(seconds=timeout_sec))
     return device
 
 
