@@ -1,24 +1,24 @@
 #!/bin/bash
 # Experiment launcher for BrainFlow v5 variants
 # Usage: ./launch_experiment.sh <experiment_name>
-# Where experiment_name is: baseline | lpips | l1 | v6 | v7
+# Where experiment_name is: baseline | lpips | l1 | v6 | v7 | v8
 
 set -e
 
 EXPERIMENT=$1
 if [ -z "$EXPERIMENT" ]; then
     echo "Usage: $0 <experiment_name>"
-    echo "Available experiments: baseline, lpips, l1, v6, v7"
+    echo "Available experiments: baseline, lpips, l1, v6, v7, v8"
     exit 1
 fi
 
 # Validate experiment name
 case $EXPERIMENT in
-    baseline|lpips|l1|v6|v7)
+    baseline|lpips|l1|v6|v7|v8)
         ;;
     *)
         echo "Error: Unknown experiment '$EXPERIMENT'"
-        echo "Available experiments: baseline, lpips, l1, v6, v7"
+        echo "Available experiments: baseline, lpips, l1, v6, v7, v8"
         exit 1
         ;;
 esac
@@ -26,6 +26,9 @@ esac
 echo "========================================="
 echo "Launching experiment: $EXPERIMENT"
 echo "========================================="
+
+# A.8: Prevent OpenMP thread oversubscription which can slow down data workers
+export OMP_NUM_THREADS=1
 
 # Set experiment-specific environment variables
 export EXPERIMENT_NAME=$EXPERIMENT
@@ -49,6 +52,11 @@ case $EXPERIMENT in
         export PERCEP_LOSS="lpips"
         export LAMBDA_PERCEP="0.1"
         export USE_V7="1"
+        ;;
+    v8)
+        export PERCEP_LOSS="none"
+        export LAMBDA_PERCEP="0.0"
+        export USE_V8="1"
         ;;
     baseline)
         export PERCEP_LOSS="none"
