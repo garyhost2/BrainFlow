@@ -7,9 +7,9 @@
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
 #SBATCH -p gpu-all
-#SBATCH --gres=gpu:T4_16G              # T4 nodes appear to be single-GPU on this cluster
-#SBATCH -c 8
-#SBATCH --mem=80G
+#SBATCH --gres=gpu:T4_16GB:2           # 2× T4 16GB (nodes have 3)
+#SBATCH -c 16
+#SBATCH --mem=120G
 #SBATCH -t 3-00:00:00
 
 set -euo pipefail
@@ -39,7 +39,7 @@ if [ -f "${REPO_DIR}/.env" ]; then
     set -a; source "${REPO_DIR}/.env"; set +a
 fi
 
-# ── Launch (single GPU) ──
+# ── Distributed launch (single-node, 2× T4) ──
 NGPUS=$(nvidia-smi -L | wc -l)
 echo "Node: $(hostname) | GPUs visible: ${NGPUS}"
 nvidia-smi || true
@@ -49,16 +49,16 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 export DDP_TIMEOUT=1800
 
-# ── MB experiment knobs (T4 16GB, single-GPU) ──
+# ── MB experiment knobs (T4 16GB, 2-GPU) ──
 export METHOD=hrf
 export SUBJECTS=1,2,3,4,5,6,7,8
 export EXPERIMENT_NAME=mb_hrf_full
 export PERCEP_LOSS=lpips
 export LAMBDA_PERCEP=0.10
-# 1× T4 16GB. Per-GPU batch = 8; grad_accum = 12
-# Effective batch = 8 * 1 GPU * 12 = 96 (matches V100 mb_hrf_full default)
+# 2× T4 16GB. Per-GPU batch = 8; grad_accum = 6
+# Effective batch = 8 * 2 GPUs * 6 = 96 (matches V100 mb_hrf_full default)
 export BATCH_SIZE_PER_GPU=8
-export GRAD_ACCUM=12
+export GRAD_ACCUM=6
 
 torchrun \
     --standalone \
