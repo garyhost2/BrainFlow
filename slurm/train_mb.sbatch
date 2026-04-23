@@ -8,9 +8,9 @@
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
 #SBATCH -p gpu-all
-#SBATCH --gres=gpu:v100nv_32GB:2
-#SBATCH -c 16
-#SBATCH --mem=180G
+#SBATCH --gres=gpu:v100nv_32GB:1     # 1 GPU → starts immediately on a partially-free node
+#SBATCH -c 8
+#SBATCH --mem=90G
 #SBATCH -t 3-00:00:00
 
 set -euo pipefail
@@ -52,9 +52,9 @@ export DDP_TIMEOUT=1800
 
 # ── MB experiment knobs (overrides via brainflow/config_overrides.py) ──
 export METHOD=hrf
-export SUBJECTS=1                       # single subject for focused MB run
-export EXPERIMENT_NAME=mb_hrf_subj1
-export PERCEP_LOSS=lpips                # SSIM-friendly perceptual supervision
+export SUBJECTS=1,2,3,4,5,6,7,8          # full dataset (all 8 subjects)
+export EXPERIMENT_NAME=mb_hrf_full
+export PERCEP_LOSS=lpips                 # SSIM-friendly perceptual supervision
 export LAMBDA_PERCEP=0.10
 # Optional: shorter run for smoke test → uncomment next line
 # export NUM_EPOCHS=2
