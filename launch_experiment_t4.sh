@@ -26,6 +26,9 @@ echo "========================================="
 
 export EXPERIMENT_NAME=$EXPERIMENT
 
+# A.8: Prevent OpenMP thread oversubscription which can slow down data workers
+export OMP_NUM_THREADS=1
+
 # Single GPU: reduce batch size to fit in 16GB, increase grad_accum to maintain effective batch size
 export BATCH_SIZE_PER_GPU=32
 export GRAD_ACCUM=6  # effective_bs = 32*6 = 192 (same as 2×V100 with 48*2*2)

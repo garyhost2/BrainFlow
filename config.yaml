@@ -20,7 +20,7 @@ data:
   force_rebuild: false
 
 dataloader:
-  batch_size_per_gpu: 48
+  batch_size_per_gpu: 96   # was 48; doubled to halve iterations per epoch
   num_workers: 4
   prefetch_factor: 2
   pin_memory: true
@@ -45,33 +45,36 @@ model:
 
 training:
   num_epochs: 150
-  grad_accum: 2
-  lr: 2.0e-4
+  grad_accum: 1            # was 2; set to 1 since batch_size_per_gpu doubled
+  lr: 2.5e-4               # √2 scaled from 2.0e-4
   warmup_epochs: 10
   min_lr: 1.0e-5
   grad_clip: 1.0
   weight_decay: 0.05
   infonce_temp: 0.07
-  lambda_align: 0.5
+  lambda_align: 0.2        # was 0.5 — InfoNCE was dominating
   lambda_cfm: 1.0
   lambda_percep: 0.1           # weight for LPIPS/L1 loss (0.0 = disabled)
   percep_loss: "none"          # none | lpips | l1
   sigma_min: 1.0e-4
-  cfg_drop_prob: 0.20
+  cfg_drop_prob: 0.10      # was 0.20
   cfg_scale: 2.0
   fmri_noise_std: 0.05
-  fmri_mask_prob: 0.05
-  mixup_alpha: 0.2
-  ema_decay: 0.9995
-  ema_start: 200
+  fmri_mask_prob: 0.0      # was 0.05
+  mixup_alpha: 0.0         # was 0.2 (mixup is incompatible with hrf source; disabled globally)
+  ema_decay: 0.999         # was 0.9995 (faster ramp-up)
+  ema_start: 4000          # was 200 (wait ~2 epochs before EMA)
   eval_freq: 5
-  eval_batches: 9999
+  eval_batches: 32         # was 9999 — cap training-time eval; full eval at last epoch
+  stochastic_depth: 0.05   # was 0.1
   patience: 25
   min_epochs: 60
   log_every_n_steps: 50
 
 inference:
   ode_steps: 20
+  eval_ode_steps: 10       # faster eval during training (10-step Euler)
+  eval_solver: "euler"     # euler | midpoint | heun (midpoint/heun for inference.py)
 
 output:
   output_dir: "./outputs"
@@ -80,4 +83,4 @@ output:
 wandb:
   wandb_project: "brainflow-v5"
   wandb_run_name: "v5-multisubject"
-  wandb_mode: "online"          # online | offline | disabled
+  wandb_mode: "offline"         # offline by default; run `wandb sync` after training
