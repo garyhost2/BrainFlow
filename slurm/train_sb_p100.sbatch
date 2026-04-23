@@ -7,7 +7,7 @@
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
 #SBATCH -p gpu-all
-#SBATCH --gres=gpu:p100_1
+#SBATCH --gres=gpu:P100_16GB:1
 #SBATCH -c 8
 #SBATCH --mem=80G
 #SBATCH -t 3-00:00:00
