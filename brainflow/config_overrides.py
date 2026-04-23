@@ -71,5 +71,19 @@ def apply_env_overrides(cfg):
         cfg.batch_size_per_gpu = 32  # Smaller batch for single GPU
         if not cfg.experiment_name.startswith("v7"):
             cfg.experiment_name = f"v7"
-    
+
+    # ── Method selection (NeurIPS experiments) ──
+    # METHOD=baseline | hrf
+    if "METHOD" in os.environ:
+        cfg.method = os.environ["METHOD"].strip().lower()
+
+    # SUBJECTS=1            (single subject)
+    # SUBJECTS=1,2,5,7      (multi-subject)
+    if "SUBJECTS" in os.environ:
+        cfg.subjects = [int(s) for s in os.environ["SUBJECTS"].split(",") if s.strip()]
+
+    # NUM_EPOCHS override (e.g., for smoke test)
+    if "NUM_EPOCHS" in os.environ:
+        cfg.num_epochs = int(os.environ["NUM_EPOCHS"])
+
     return cfg

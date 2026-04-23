@@ -10,6 +10,18 @@ import torch.nn.functional as F
 from .config import Config
 
 
+def _double_gamma_hrf(length: int, peak: float = 6.0, undershoot: float = 16.0,
+                      ratio: float = 6.0, dt: float = 1.0) -> torch.Tensor:
+    """Standard SPM-style double-gamma HRF, normalized to unit L1.
+    Used by the HRF brain-manifold flow (cfg.method == "hrf")."""
+    t = np.arange(length, dtype=np.float64) * dt + dt / 2
+    def gamma_pdf(t, k):
+        return np.exp((k - 1) * np.log(t + 1e-12) - t - math.lgamma(k))
+    h = gamma_pdf(t, peak) - gamma_pdf(t, undershoot) / ratio
+    h = h / (np.abs(h).sum() + 1e-12)
+    return torch.tensor(h, dtype=torch.float32)
+
+
 class ResBlockMLP(nn.Module):
     def __init__(self, dim, drop=0.1, mult=4, stoch_depth=0.0):
         super().__init__()
@@ -166,6 +178,44 @@ class FlowUNet(nn.Module):
         self.op = nn.Conv2d(bc, ic, 3, padding=1)
         nn.init.zeros_(self.op.weight); nn.init.zeros_(self.op.bias)
 
+        # ── Optional HRF velocity bias (cfg.method == "hrf") ──
+        # Projects HRF-convolved brain tokens → per-channel velocity bias map,
+        # gated by sin(pi*t). Enabled lazily so baseline checkpoints stay compatible.
+        self._hrf_enabled = (getattr(cfg, "method", "baseline") == "hrf")
+        if self._hrf_enabled:
+            hrf_len = int(getattr(cfg, "hrf_len", cfg.n_tokens))
+            self.register_buffer(
+                "hrf_kernel",
+                _double_gamma_hrf(hrf_len).view(1, 1, hrf_len),
+                persistent=False,
+            )
+            # ctx: (B, n_tokens, brain_dim) → bias map: (B, ic, latent_res, latent_res)
+            self.hrf_proj = nn.Sequential(
+                nn.LayerNorm(bd),
+                nn.Linear(bd, ic * cfg.latent_res),  # rows
+                nn.GELU(),
+            )
+            self.hrf_to_map = nn.Linear(cfg.n_tokens, cfg.latent_res, bias=False)
+            nn.init.zeros_(self.hrf_to_map.weight)  # zero-init → identity at start
+
+    def _hrf_bias(self, ctx: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Compute sin(pi*t) * HRF-convolved velocity bias. ctx: (B, N, D)."""
+        B, N, D = ctx.shape
+        # HRF-convolve along token axis (treat tokens as a 1D temporal signal)
+        x = ctx.transpose(1, 2)                                  # (B, D, N)
+        kernel = self.hrf_kernel.expand(D, 1, -1)                # (D, 1, L)
+        pad = kernel.shape[-1] // 2
+        x = F.conv1d(x, kernel, padding=pad, groups=D)[:, :, :N] # (B, D, N)
+        x = x.transpose(1, 2)                                    # (B, N, D)
+        rows = self.hrf_proj(x)                                  # (B, N, ic*H)
+        ic_x_H = rows.shape[-1]
+        H = self.cfg.latent_res
+        ic = ic_x_H // H
+        rows = rows.view(B, N, ic, H).permute(0, 2, 3, 1)        # (B, ic, H, N)
+        bias = self.hrf_to_map(rows)                             # (B, ic, H, W)
+        gate = torch.sin(math.pi * t).clamp(min=0.0)[:, None, None, None]
+        return gate * bias
+
     def forward(self, x, t, ctx):
         te = self.te(t); h = self.ip(x); sk = []
         for res, attn, dn in zip(self.eb, self.ea, self.ed):
@@ -186,7 +236,10 @@ class FlowUNet(nn.Module):
             B, C, H, W = h.shape
             h = attn(h.permute(0, 2, 3, 1).reshape(B, H * W, C), ctx) \
                 .reshape(B, H, W, C).permute(0, 3, 1, 2)
-        return self.op(F.silu(self.on(h)))
+        out = self.op(F.silu(self.on(h)))
+        if self._hrf_enabled:
+            out = out + self._hrf_bias(ctx, t)
+        return out
 
 
 
@@ -196,25 +249,49 @@ class BrainFlowV5(nn.Module):
         self.cfg = cfg
         self.brain_enc = BrainEncoder(cfg, voxels_per_subject)
         self.flow_unet = FlowUNet(cfg)
+        # Brain-manifold source projector (cfg.method == "hrf"):
+        # maps the CLS embedding into the VAE latent space to serve as a
+        # structured starting point for the flow (zero-init = pure-noise start).
+        if getattr(cfg, "method", "baseline") == "hrf":
+            self.cls_to_latent = nn.Linear(
+                cfg.brain_dim, cfg.latent_ch * cfg.latent_res * cfg.latent_res
+            )
+            nn.init.zeros_(self.cls_to_latent.weight)
+            nn.init.zeros_(self.cls_to_latent.bias)
+        else:
+            self.cls_to_latent = None
 
     def encode_fmri(self, fmri, subject):
         return self.brain_enc(fmri, subject)
 
+    def _source_from_cls(self, cls: torch.Tensor) -> torch.Tensor:
+        """Brain-manifold starting point: projected CLS + 0.1 * noise."""
+        cfg = self.cfg
+        B = cls.shape[0]
+        proj = self.cls_to_latent(cls).view(B, cfg.latent_ch, cfg.latent_res, cfg.latent_res)
+        return proj + 0.1 * torch.randn_like(proj)
+
     @torch.no_grad()
-    def sample(self, tokens, n_steps=None, cfg_scale=None, solver: str = "midpoint"):
-        """ODE integration from noise to latent.
+    def sample(self, tokens, n_steps=None, cfg_scale=None, solver: str = "midpoint",
+               cls: torch.Tensor | None = None):
+        """ODE integration from source distribution → VAE latent.
+
+        For cfg.method == "hrf", `cls` MUST be provided so the source distribution
+        can be initialized as projected_CLS + 0.1*noise (brain-manifold flow).
+        For baseline, source = pure Gaussian noise.
 
         solver: "euler" | "midpoint" | "heun"
-            euler    — forward Euler (1 NFE/step)
-            midpoint — midpoint rule (1 NFE/step, better accuracy, default)
-            heun     — Heun's method (2 NFE/step, highest accuracy)
         """
         cfg = self.cfg
         if n_steps is None: n_steps = cfg.ode_steps
         if cfg_scale is None: cfg_scale = cfg.cfg_scale
         B = tokens.shape[0]
-        x = torch.randn(B, cfg.latent_ch, cfg.latent_res, cfg.latent_res,
-                        device=tokens.device)
+        if getattr(cfg, "method", "baseline") == "hrf":
+            assert cls is not None, "HRF method requires cls embedding for sampling"
+            x = self._source_from_cls(cls)
+        else:
+            x = torch.randn(B, cfg.latent_ch, cfg.latent_res, cfg.latent_res,
+                            device=tokens.device)
         dt = 1.0 / n_steps
         null = self.flow_unet.null_tokens.expand(B, -1, -1)
 
@@ -271,7 +348,11 @@ class BrainFlowV5(nn.Module):
 
         tokens, cls_emb = self.encode_fmri(fmri_mixed, subject)
 
-        x0 = torch.randn_like(latent)
+        # Source distribution: brain-manifold (HRF) or pure noise (baseline)
+        if getattr(cfg, "method", "baseline") == "hrf":
+            x0 = self._source_from_cls(cls_emb)
+        else:
+            x0 = torch.randn_like(latent)
         t = torch.rand(B, device=device)
         t_expand = t[:, None, None, None]
         xt = (1 - t_expand) * x0 + t_expand * latent
