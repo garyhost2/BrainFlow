@@ -79,6 +79,14 @@ class Config:
 
     # Inference
     ode_steps: int = 20
+    eval_ode_steps: int = 10      # ODE steps for training-time eval (faster)
+    eval_solver: str = "euler"    # solver for training-time eval: euler | midpoint | heun
+
+    # C.1 CLIP Prior head (use_clip_prior)
+    use_clip_prior: bool = False
+
+    # C.2 Pixel-space L1 loss
+    lambda_pixel: float = 0.0
 
     # Method (formulation): "baseline" | "hrf" | "sb" | "dit"
     #   baseline — standard CFM from Gaussian noise → VAE latent
@@ -98,7 +106,7 @@ class Config:
     dit_depth: int = 12
     dit_heads: int = 8
     dit_patch: int = 4
-    lambda_prior: float = 0.2    # weight of the diffusion prior loss
+    lambda_prior: float = 0.2    # weight of the diffusion prior loss (also used by CLIPPriorHead)
     prior_ode_steps: int = 10    # sampling steps for the CLIP prior
 
     # Output

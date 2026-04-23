@@ -42,16 +42,17 @@ class ResBlockMLP(nn.Module):
 
 class BrainEncoder(nn.Module):
     """fMRI → (B, N_TOKENS, BRAIN_DIM) tokens + (B, BRAIN_DIM) cls.
-    Per-subject input projection keyed by integer subject id."""
+    Shared input projection with zero-padding for variable-voxel subjects.
+    A single Linear(max_vox → enc_hidden) replaces per-subject ModuleDict
+    to eliminate the DDP allreduce overhead from 7/8 zero-gradient projections."""
     def __init__(self, cfg: Config, voxels_per_subject: Dict[int, int]):
         super().__init__()
         self.cfg = cfg
         self.subjects = sorted(voxels_per_subject.keys())
-        # Per-subject input projection
-        self.input_proj = nn.ModuleDict({
-            str(s): nn.Linear(voxels_per_subject[s], cfg.enc_hidden)
-            for s in self.subjects
-        })
+        # A.4: shared projection; pad shorter subjects' fmri with zeros on-the-fly
+        self.voxels_per_subject = dict(voxels_per_subject)
+        self.max_vox = max(voxels_per_subject.values())
+        self.input_proj = nn.Linear(self.max_vox, cfg.enc_hidden)
         self.stem_norm = nn.LayerNorm(cfg.enc_hidden)
         self.stem_act = nn.GELU()
         self.stem_drop = nn.Dropout(0.3)
@@ -73,8 +74,10 @@ class BrainEncoder(nn.Module):
 
     def forward(self, fmri: torch.Tensor, subject: torch.Tensor):
         sid = int(subject[0].item())
-        proj = self.input_proj[str(sid)]
-        h = self.stem_drop(self.stem_act(self.stem_norm(proj(fmri))))
+        v = self.voxels_per_subject[sid]
+        if v < self.max_vox:
+            fmri = F.pad(fmri, (0, self.max_vox - v))
+        h = self.stem_drop(self.stem_act(self.stem_norm(self.input_proj(fmri))))
         for b in self.blocks:
             h = b(h)
         tokens = self.to_tokens(h)
@@ -202,11 +205,12 @@ class FlowUNet(nn.Module):
     def _hrf_bias(self, ctx: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """Compute sin(pi*t) * HRF-convolved velocity bias. ctx: (B, N, D)."""
         B, N, D = ctx.shape
-        # HRF-convolve along token axis (treat tokens as a 1D temporal signal)
+        # HRF-convolve along token axis (treat tokens as a 1D temporal signal).
+        # B.3: causal (left-only) padding so future tokens don't leak into past.
         x = ctx.transpose(1, 2)                                  # (B, D, N)
         kernel = self.hrf_kernel.expand(D, 1, -1)                # (D, 1, L)
-        pad = kernel.shape[-1] // 2
-        x = F.conv1d(x, kernel, padding=pad, groups=D)[:, :, :N] # (B, D, N)
+        x = F.pad(x, (kernel.shape[-1] - 1, 0))                 # left-pad only
+        x = F.conv1d(x, kernel, groups=D)                       # (B, D, N)
         x = x.transpose(1, 2)                                    # (B, N, D)
         rows = self.hrf_proj(x)                                  # (B, N, ic*H)
         ic_x_H = rows.shape[-1]
@@ -401,6 +405,70 @@ class CLIPPrior(nn.Module):
 
 
 
+def migrate_input_proj(state_dict: dict, new_max_vox: int) -> dict:
+    """Migrate a checkpoint with per-subject ModuleDict input_proj to the new
+    shared zero-padded Linear format (A.4).
+
+    If the state_dict already has the new format (brain_enc.input_proj.weight),
+    this is a no-op. If it has the old format (brain_enc.input_proj.<sid>.weight),
+    the largest subject's weight is used to initialise the new projection (other
+    subjects' weights have different voxel counts and cannot be reused directly).
+
+    A warning is always printed when migration occurs so future regressions are
+    visible. A hard crash is never raised — worst case the projection is random
+    and training resumes from that starting point.
+    """
+    new_key = "brain_enc.input_proj.weight"
+    if new_key in state_dict:
+        return state_dict  # already new format
+
+    # Find old per-subject keys and pick the largest weight
+    import re
+    old_keys = {k for k in state_dict if re.match(r"brain_enc\.input_proj\.\d+\.(weight|bias)", k)}
+    if not old_keys:
+        return state_dict  # no input_proj at all — return unchanged
+
+    print("[migrate_input_proj] Detected old per-subject input_proj. Migrating to shared Linear…")
+    # Find subject with most voxels (largest weight matrix)
+    weight_keys = sorted(
+        [k for k in old_keys if k.endswith(".weight")],
+        key=lambda k: state_dict[k].shape[1],  # sort by in_features
+        reverse=True,
+    )
+    best_w_key = weight_keys[0]
+    best_b_key = best_w_key.replace(".weight", ".bias")
+    best_w = state_dict[best_w_key]   # (enc_hidden, old_max_vox)
+    old_vox = best_w.shape[1]
+
+    out = {k: v for k, v in state_dict.items() if k not in old_keys}
+    # Pad or truncate to new_max_vox
+    if old_vox <= new_max_vox:
+        padded = F.pad(best_w, (0, new_max_vox - old_vox))
+    else:
+        padded = best_w[:, :new_max_vox]
+    out[new_key] = padded
+    out["brain_enc.input_proj.bias"] = state_dict.get(best_b_key, torch.zeros(best_w.shape[0]))
+    print(f"[migrate_input_proj] Done. Initialised from '{best_w_key}' (vox={old_vox} → {new_max_vox}).")
+    return out
+
+
+class CLIPPriorHead(nn.Module):
+    """Two-stage CLIP prior head (C.1, MindEye-v2 style).
+    Maps brain CLS embedding → predicted L2-normalised CLIP embedding.
+    Used when cfg.use_clip_prior is True. Added as a single extra token
+    to the cross-attention context — avoids broadcasting over all N tokens."""
+    def __init__(self, brain_dim: int, clip_dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(brain_dim, 1024), nn.LayerNorm(1024), nn.GELU(), nn.Dropout(0.1),
+            nn.Linear(1024, 1024), nn.GELU(), nn.Dropout(0.1),
+            nn.Linear(1024, clip_dim),
+        )
+
+    def forward(self, cls: torch.Tensor) -> torch.Tensor:
+        return F.normalize(self.net(cls), dim=-1)
+
+
 class BrainFlowV5(nn.Module):
     def __init__(self, cfg: Config, voxels_per_subject: Dict[int, int]):
         super().__init__()
@@ -422,15 +490,26 @@ class BrainFlowV5(nn.Module):
             self.flow_unet = FlowUNet(cfg)
         # Brain-manifold source projector (cfg.method == "hrf"):
         # maps the CLS embedding into the VAE latent space to serve as a
-        # structured starting point for the flow (zero-init = pure-noise start).
+        # structured starting point for the flow.
+        # B.2: initialise with small non-zero weights (not zeros) so the source
+        # distribution is not trivially degenerate from the first step.
         if method == "hrf":
             self.cls_to_latent = nn.Linear(
                 cfg.brain_dim, cfg.latent_ch * cfg.latent_res * cfg.latent_res
             )
-            nn.init.zeros_(self.cls_to_latent.weight)
+            nn.init.normal_(self.cls_to_latent.weight, std=0.02)
             nn.init.zeros_(self.cls_to_latent.bias)
         else:
             self.cls_to_latent = None
+
+        # C.1: optional CLIP prior head — maps CLS → predicted CLIP embedding,
+        # appended as a single extra token to the cross-attention context.
+        if getattr(cfg, "use_clip_prior", False):
+            self.clip_prior_head = CLIPPriorHead(cfg.brain_dim, cfg.clip_dim)
+            self.clip_to_brain = nn.Linear(cfg.clip_dim, cfg.brain_dim)
+        else:
+            self.clip_prior_head = None
+            self.clip_to_brain = None
 
     def encode_fmri(self, fmri, subject):
         return self.brain_enc(fmri, subject)
@@ -442,11 +521,17 @@ class BrainFlowV5(nn.Module):
         return self.flow_unet
 
     def _source_from_cls(self, cls: torch.Tensor) -> torch.Tensor:
-        """Brain-manifold starting point: projected CLS + 0.1 * noise."""
+        """Brain-manifold starting point: projected CLS + unit-variance noise.
+
+        B.1: detach cls so the encoder cannot cheat by driving x0 → latent
+        (which would collapse CFM loss to 0 trivially). Unit-variance noise
+        keeps the source distribution well-spread, making the flow non-trivial.
+        """
         cfg = self.cfg
         B = cls.shape[0]
-        proj = self.cls_to_latent(cls).view(B, cfg.latent_ch, cfg.latent_res, cfg.latent_res)
-        return proj + 0.1 * torch.randn_like(proj)
+        cls_d = cls.detach()  # B.1: stop encoder from collapsing the source
+        proj = self.cls_to_latent(cls_d).view(B, cfg.latent_ch, cfg.latent_res, cfg.latent_res)
+        return proj + torch.randn_like(proj)  # B.1: unit-variance noise (was 0.1×)
 
     @torch.no_grad()
     def sample(self, tokens, n_steps=None, cfg_scale=None, solver: str = "midpoint",
@@ -454,7 +539,7 @@ class BrainFlowV5(nn.Module):
         """ODE integration from source distribution → VAE latent.
 
         For cfg.method == "hrf", `cls` MUST be provided so the source distribution
-        can be initialized as projected_CLS + 0.1*noise (brain-manifold flow).
+        can be initialized as projected_CLS + noise (brain-manifold flow).
         For cfg.method == "dit", `cls` MUST be provided to drive the CLIP prior,
         whose sampled embedding is appended to the cross-attention context.
         For baseline/sb, source = pure Gaussian noise.
@@ -467,11 +552,22 @@ class BrainFlowV5(nn.Module):
         B = tokens.shape[0]
         method = getattr(cfg, "method", "baseline")
 
-        # ── Build cross-attention context (+ prior token for DiT) ──
+        # B.4: For HRF, the source x_0 is already conditional on cls — using CFG
+        # on top of that is meaningless (and hurts PC). Force cfg_scale=1.0.
+        if method == "hrf":
+            cfg_scale = 1.0
+
+        # ── Build cross-attention context (+ prior token for DiT / CLIPPriorHead) ──
         if method == "dit":
             assert cls is not None, "DiT method requires cls for the CLIP prior"
             clip_pred = self.clip_prior.sample(cls, n_steps=cfg.prior_ode_steps)
             prior_tok = self.clip_to_token(clip_pred).unsqueeze(1)      # (B,1,bd)
+            tokens = torch.cat([tokens, prior_tok], dim=1)
+
+        # C.1: CLIPPriorHead — append predicted CLIP token to cross-attention context
+        if self.clip_prior_head is not None and cls is not None:
+            clip_pred = self.clip_prior_head(cls)                        # (B, clip_dim)
+            prior_tok = self.clip_to_brain(clip_pred).unsqueeze(1)       # (B, 1, brain_dim)
             tokens = torch.cat([tokens, prior_tok], dim=1)
 
         # ── Source distribution ──
@@ -483,7 +579,15 @@ class BrainFlowV5(nn.Module):
                             device=tokens.device)
         dt = 1.0 / n_steps
         flow = self._flow()
-        null = flow.null_tokens.expand(B, -1, -1)
+        # Expand null_tokens to match context width (handles +1 from CLIPPriorHead)
+        n_ctx = tokens.shape[1]
+        base_null = flow.null_tokens  # (1, base_n_tokens, bd)
+        if n_ctx > base_null.shape[1]:
+            pad = torch.zeros(1, n_ctx - base_null.shape[1], base_null.shape[2],
+                              device=base_null.device, dtype=base_null.dtype)
+            null = torch.cat([base_null, pad], dim=1).expand(B, -1, -1)
+        else:
+            null = base_null.expand(B, -1, -1)
 
         def _vel(xt, t_val):
             t = torch.full((B,), t_val, device=xt.device)
@@ -532,11 +636,15 @@ class BrainFlowV5(nn.Module):
         clip_emb = batch["clip_emb"].to(device, non_blocking=True)
         subject = batch["subject"].to(device, non_blocking=True)
         B = fmri.shape[0]
+        method = getattr(cfg, "method", "baseline")
 
         # Mixup: mix only the fMRI input (not the latent target).
         # VAE latent space is not linear — mixed latents are off-manifold.
         # Mixing fMRI still acts as input augmentation without corrupting targets.
-        if self.training and cfg.mixup_alpha > 0 and random.random() < 0.3:
+        # B.6: Disable mixup entirely for HRF method — mixed fMRI → mixed cls_emb
+        # → mixed x0, but latent target is NOT mixed → inconsistent (x0, latent)
+        # pairs on 30% of steps sabotage the flow objective.
+        if self.training and cfg.mixup_alpha > 0 and method != "hrf" and random.random() < 0.3:
             lam = float(np.random.beta(cfg.mixup_alpha, cfg.mixup_alpha))
             lam = max(lam, 1 - lam)
             perm = torch.randperm(B, device=device)
@@ -546,7 +654,6 @@ class BrainFlowV5(nn.Module):
             lam = 1.0
 
         tokens, cls_emb = self.encode_fmri(fmri_mixed, subject)
-        method = getattr(cfg, "method", "baseline")
 
         # DiT: teacher-force the CLIP prior token onto the context.
         # Using the TRUE (L2-normalized) CLIP embedding at train-time avoids
@@ -555,9 +662,29 @@ class BrainFlowV5(nn.Module):
             prior_tok = self.clip_to_token(clip_emb).unsqueeze(1)        # (B,1,bd)
             tokens = torch.cat([tokens, prior_tok], dim=1)
 
+        # C.1: CLIPPriorHead — teacher-force true CLIP embedding at train time
+        # as a single extra token (don't broadcast over all N tokens).
+        loss_clip_prior = torch.tensor(0.0, device=device)
+        if self.clip_prior_head is not None:
+            clip_pred = self.clip_prior_head(cls_emb)                   # (B, clip_dim)
+            prior_tok = self.clip_to_brain(clip_pred).unsqueeze(1)       # (B, 1, brain_dim)
+            tokens = torch.cat([tokens, prior_tok], dim=1)
+            # Prior loss: 1 - cosine similarity with true CLIP embedding
+            loss_clip_prior = 1.0 - (clip_pred * clip_emb).sum(-1).mean()
+
         # Source distribution: brain-manifold (HRF) or pure noise (baseline/sb/dit)
         if method == "hrf":
             x0 = self._source_from_cls(cls_emb)
+            # B.7: Sanity guard — warn if source has collapsed (x0 ≈ latent)
+            with torch.no_grad():
+                src_mse = (latent - x0).pow(2).mean(dim=[1, 2, 3])
+                collapse_frac = (src_mse < 0.05).float().mean().item()
+                if collapse_frac > 0.5:
+                    print(
+                        f"[HRF WARNING] source_collapse_warn=1 "
+                        f"(collapse_frac={collapse_frac:.2f}, src_mse={src_mse.mean().item():.4f}). "
+                        f"Consider bumping noise scale or checking cls_to_latent init."
+                    )
         else:
             x0 = torch.randn_like(latent)
         t = torch.rand(B, device=device)
@@ -571,18 +698,25 @@ class BrainFlowV5(nn.Module):
             xt = xt + sigma_t * torch.randn_like(xt)
 
         flow = self._flow()
+        # Expand null_tokens to match context width (handles +1 from CLIPPriorHead)
+        n_ctx = tokens.shape[1]
+        base_null = flow.null_tokens  # (1, base_n_tokens, bd)
+        if n_ctx > base_null.shape[1]:
+            pad = torch.zeros(1, n_ctx - base_null.shape[1], base_null.shape[2],
+                              device=base_null.device, dtype=base_null.dtype)
+            null_tokens = torch.cat([base_null, pad], dim=1).expand(B, -1, -1)
+        else:
+            null_tokens = base_null.expand(B, -1, -1)
+
         drop_mask = torch.rand(B, device=device) < cfg.cfg_drop_prob
-        null_tokens = flow.null_tokens.expand(B, -1, -1)
         ctx = torch.where(drop_mask[:, None, None], null_tokens, tokens)
 
-        # B5: Token dropout — replace dropped tokens with null_tokens so the
+        # Token dropout — replace dropped tokens with null_tokens so the
         # UNet always sees a valid distribution (not zeros).
-        # This is applied AFTER the CFG drop so we don't double-apply to the
-        # already-nulled unconditional path.
+        # Applied AFTER CFG drop so we don't double-apply to already-nulled path.
         if self.training and cfg.token_drop_prob > 0:
             drop = torch.rand(B, ctx.shape[1], 1, device=device) < cfg.token_drop_prob
-            null_expand = flow.null_tokens.expand(B, -1, -1)
-            ctx = torch.where(drop, null_expand, ctx)
+            ctx = torch.where(drop, null_tokens, ctx)
 
         vt = flow(xt, t, ctx)
         loss_cfm = F.mse_loss(vt, ut)
@@ -619,9 +753,25 @@ class BrainFlowV5(nn.Module):
             # Compute perceptual loss in pixel space
             loss_percep = percep_loss_fn(pred_imgs, gt_imgs)
 
+        # C.2: Pixel-space L1 loss — only at t > 0.85 where the approximation
+        # pred_lat ≈ xt + vt*(1-t) is valid (velocity ≈ constant near t=1).
+        loss_pixel = torch.tensor(0.0, device=device)
+        lambda_pixel = getattr(cfg, "lambda_pixel", 0.0)
+        if lambda_pixel > 0 and vae is not None:
+            mask = t > 0.85
+            if mask.any():
+                pred_lat = xt + vt * (1 - t_expand)
+                pred_imgs_px = vae.decode(pred_lat[mask])
+                with torch.no_grad():
+                    gt_imgs_px = batch["image"].to(device, non_blocking=True) * 2 - 1
+                    gt_imgs_px = gt_imgs_px[mask]
+                loss_pixel = F.l1_loss(pred_imgs_px, gt_imgs_px)
+
+        lambda_prior_w = getattr(cfg, "lambda_prior", 0.0)
         total = (cfg.lambda_cfm * loss_cfm
                  + cfg.lambda_align * loss_align
                  + cfg.lambda_percep * loss_percep
-                 + getattr(cfg, "lambda_prior", 0.0) * loss_prior)
+                 + lambda_prior_w * (loss_prior + loss_clip_prior)
+                 + lambda_pixel * loss_pixel)
         return {"loss": total, "cfm": loss_cfm, "align": loss_align,
                 "percep": loss_percep, "prior": loss_prior}
