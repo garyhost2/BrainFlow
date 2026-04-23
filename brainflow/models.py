@@ -243,17 +243,187 @@ class FlowUNet(nn.Module):
         return out
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# DiT backbone + unCLIP-style diffusion prior (cfg.method == "dit")
+# ════════════════════════════════════════════════════════════════════════════
+
+class DiTBlock(nn.Module):
+    """DiT block with adaLN-zero time conditioning, self-attn, cross-attn to
+    brain tokens (+ optional CLIP prior token), and MLP. Zero-init gates so
+    the block starts as identity → stable training from scratch."""
+    def __init__(self, d: int, nh: int, brain_dim: int, td: int):
+        super().__init__()
+        self.n1 = nn.LayerNorm(d, elementwise_affine=False)
+        self.attn = nn.MultiheadAttention(d, nh, batch_first=True, dropout=0.0)
+        self.cattn = CrossAttention(d, brain_dim, nh)
+        self.n3 = nn.LayerNorm(d, elementwise_affine=False)
+        self.mlp = nn.Sequential(
+            nn.Linear(d, d * 4), nn.GELU(), nn.Linear(d * 4, d),
+        )
+        # adaLN-zero: 6 modulation params (shift/scale for attn+mlp, gate for each)
+        self.ada = nn.Sequential(nn.SiLU(), nn.Linear(td, 6 * d))
+        nn.init.zeros_(self.ada[-1].weight)
+        nn.init.zeros_(self.ada[-1].bias)
+
+    def forward(self, x, te, ctx):
+        shift_a, scale_a, gate_a, shift_m, scale_m, gate_m = \
+            self.ada(te).chunk(6, dim=-1)
+        # self-attention with adaLN-zero
+        h = self.n1(x) * (1 + scale_a[:, None]) + shift_a[:, None]
+        h_out, _ = self.attn(h, h, h, need_weights=False)
+        x = x + gate_a[:, None] * h_out
+        # cross-attention to brain tokens (has its own LayerNorm)
+        x = self.cattn(x, ctx)
+        # MLP with adaLN-zero
+        h = self.n3(x) * (1 + scale_m[:, None]) + shift_m[:, None]
+        x = x + gate_m[:, None] * self.mlp(h)
+        return x
+
+
+class FlowDiT(nn.Module):
+    """Diffusion Transformer flow denoiser. Replaces FlowUNet.
+
+    Input:  x (B, C, H, W) latent + t (B,) + ctx (B, N, brain_dim)
+    Output: velocity v (B, C, H, W)
+
+    Note: the cross-attention context carries (n_tokens + 1) entries when
+    method == 'dit' — the +1 is the CLIP prior token. null_tokens matches."""
+    def __init__(self, cfg: Config):
+        super().__init__()
+        ic = cfg.latent_ch
+        res = cfg.latent_res
+        p = cfg.dit_patch
+        assert res % p == 0, f"latent_res {res} not divisible by patch {p}"
+        gs = res // p                   # grid side, e.g. 32/4 = 8
+        self.patch = p
+        self.grid = gs
+        self.num_patches = gs * gs
+        d = cfg.dit_dim
+        nh = cfg.dit_heads
+        depth = cfg.dit_depth
+        bd = cfg.brain_dim
+        td = cfg.time_emb_dim
+        ic_ = ic
+
+        self.te = SinusoidalTimeEmbedding(td)
+        self.patch_embed = nn.Conv2d(ic, d, p, stride=p)
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, d))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+        self.blocks = nn.ModuleList([DiTBlock(d, nh, bd, td) for _ in range(depth)])
+
+        self.final_norm = nn.LayerNorm(d, elementwise_affine=False)
+        self.final_ada = nn.Sequential(nn.SiLU(), nn.Linear(td, 2 * d))
+        nn.init.zeros_(self.final_ada[-1].weight)
+        nn.init.zeros_(self.final_ada[-1].bias)
+        self.final_proj = nn.Linear(d, ic_ * p * p)
+        nn.init.zeros_(self.final_proj.weight)
+        nn.init.zeros_(self.final_proj.bias)
+
+        # Context length = n_tokens + 1 (last slot is the CLIP prior token)
+        self.null_tokens = nn.Parameter(torch.randn(1, cfg.n_tokens + 1, bd) * 0.01)
+
+        # Stash sizes for unpatchify
+        self._ic = ic_
+
+    def forward(self, x, t, ctx):
+        B = x.shape[0]
+        te = self.te(t)
+        h = self.patch_embed(x)                   # (B, d, gs, gs)
+        h = h.flatten(2).transpose(1, 2)          # (B, P, d)
+        h = h + self.pos_embed
+        for blk in self.blocks:
+            h = blk(h, te, ctx)
+        shift, scale = self.final_ada(te).chunk(2, dim=-1)
+        h = self.final_norm(h) * (1 + scale[:, None]) + shift[:, None]
+        h = self.final_proj(h)                    # (B, P, ic*p*p)
+        p = self.patch; ic = self._ic; gs = self.grid
+        h = h.view(B, gs, gs, ic, p, p)
+        h = h.permute(0, 3, 1, 4, 2, 5).contiguous()
+        h = h.view(B, ic, gs * p, gs * p)
+        return h
+
+
+class CLIPPrior(nn.Module):
+    """Flow-matching diffusion prior in CLIP-embedding space (unCLIP-style).
+    Given fMRI CLS, learns to denoise CLIP embeddings via CFM.
+    At training, also provides the predicted CLIP token to condition the
+    latent-space flow (true CLIP is teacher-forced; prior supervises itself).
+    At inference, ODE-samples a predicted CLIP embedding."""
+    def __init__(self, cfg: Config):
+        super().__init__()
+        cd = cfg.clip_dim
+        bd = cfg.brain_dim
+        d = 512
+        td = 128
+        self.cd = cd
+        self.te = SinusoidalTimeEmbedding(td)
+        self.in_proj = nn.Linear(cd, d)
+        self.cond_proj = nn.Linear(bd, d)
+        self.time_proj = nn.Linear(td, d)
+        self.blocks = nn.Sequential(
+            nn.LayerNorm(d), nn.Linear(d, d * 2), nn.GELU(), nn.Linear(d * 2, d),
+            nn.LayerNorm(d), nn.Linear(d, d * 2), nn.GELU(), nn.Linear(d * 2, d),
+            nn.LayerNorm(d), nn.Linear(d, d * 2), nn.GELU(), nn.Linear(d * 2, d),
+        )
+        self.out_proj = nn.Linear(d, cd)
+        nn.init.zeros_(self.out_proj.weight)
+        nn.init.zeros_(self.out_proj.bias)
+
+    def forward(self, clip_t: torch.Tensor, t: torch.Tensor, cls: torch.Tensor) -> torch.Tensor:
+        """Predict velocity v = (clip_clean - clip_noise). Shapes: (B, cd)."""
+        te = self.te(t)
+        h = self.in_proj(clip_t) + self.cond_proj(cls) + self.time_proj(te)
+        h = h + self.blocks(h)
+        return self.out_proj(h)
+
+    def flow_loss(self, clip_gt: torch.Tensor, cls: torch.Tensor) -> torch.Tensor:
+        """CFM loss: x_t = (1-t) noise + t * clip_gt, target v = clip_gt - noise."""
+        B = clip_gt.shape[0]
+        x0 = torch.randn_like(clip_gt)
+        t = torch.rand(B, device=clip_gt.device)
+        xt = (1 - t)[:, None] * x0 + t[:, None] * clip_gt
+        vt_pred = self.forward(xt, t, cls)
+        vt_tgt = clip_gt - x0
+        return F.mse_loss(vt_pred, vt_tgt)
+
+    @torch.no_grad()
+    def sample(self, cls: torch.Tensor, n_steps: int = 10) -> torch.Tensor:
+        """Midpoint-Euler ODE sample → L2-normalized CLIP embedding."""
+        B = cls.shape[0]
+        x = torch.randn(B, self.cd, device=cls.device)
+        dt = 1.0 / n_steps
+        for i in range(n_steps):
+            t = torch.full((B,), (i + 0.5) * dt, device=cls.device)
+            v = self.forward(x, t, cls)
+            x = x + v * dt
+        return F.normalize(x, dim=-1)
+
+
 
 class BrainFlowV5(nn.Module):
     def __init__(self, cfg: Config, voxels_per_subject: Dict[int, int]):
         super().__init__()
         self.cfg = cfg
         self.brain_enc = BrainEncoder(cfg, voxels_per_subject)
-        self.flow_unet = FlowUNet(cfg)
+        method = getattr(cfg, "method", "baseline")
+        # Flow backbone: DiT when method=="dit", else UNet
+        if method == "dit":
+            self.flow_dit = FlowDiT(cfg)
+            self.clip_prior = CLIPPrior(cfg)
+            # Project (predicted or true) CLIP embedding → brain-token dim so
+            # it can be concatenated to the cross-attention context.
+            self.clip_to_token = nn.Sequential(
+                nn.LayerNorm(cfg.clip_dim),
+                nn.Linear(cfg.clip_dim, cfg.brain_dim),
+            )
+            self.flow_unet = None
+        else:
+            self.flow_unet = FlowUNet(cfg)
         # Brain-manifold source projector (cfg.method == "hrf"):
         # maps the CLS embedding into the VAE latent space to serve as a
         # structured starting point for the flow (zero-init = pure-noise start).
-        if getattr(cfg, "method", "baseline") == "hrf":
+        if method == "hrf":
             self.cls_to_latent = nn.Linear(
                 cfg.brain_dim, cfg.latent_ch * cfg.latent_res * cfg.latent_res
             )
@@ -264,6 +434,12 @@ class BrainFlowV5(nn.Module):
 
     def encode_fmri(self, fmri, subject):
         return self.brain_enc(fmri, subject)
+
+    def _flow(self):
+        """Dispatch to the active flow backbone (DiT or UNet)."""
+        if self.cfg.method == "dit":
+            return self.flow_dit
+        return self.flow_unet
 
     def _source_from_cls(self, cls: torch.Tensor) -> torch.Tensor:
         """Brain-manifold starting point: projected CLS + 0.1 * noise."""
@@ -279,7 +455,9 @@ class BrainFlowV5(nn.Module):
 
         For cfg.method == "hrf", `cls` MUST be provided so the source distribution
         can be initialized as projected_CLS + 0.1*noise (brain-manifold flow).
-        For baseline, source = pure Gaussian noise.
+        For cfg.method == "dit", `cls` MUST be provided to drive the CLIP prior,
+        whose sampled embedding is appended to the cross-attention context.
+        For baseline/sb, source = pure Gaussian noise.
 
         solver: "euler" | "midpoint" | "heun"
         """
@@ -287,22 +465,33 @@ class BrainFlowV5(nn.Module):
         if n_steps is None: n_steps = cfg.ode_steps
         if cfg_scale is None: cfg_scale = cfg.cfg_scale
         B = tokens.shape[0]
-        if getattr(cfg, "method", "baseline") == "hrf":
+        method = getattr(cfg, "method", "baseline")
+
+        # ── Build cross-attention context (+ prior token for DiT) ──
+        if method == "dit":
+            assert cls is not None, "DiT method requires cls for the CLIP prior"
+            clip_pred = self.clip_prior.sample(cls, n_steps=cfg.prior_ode_steps)
+            prior_tok = self.clip_to_token(clip_pred).unsqueeze(1)      # (B,1,bd)
+            tokens = torch.cat([tokens, prior_tok], dim=1)
+
+        # ── Source distribution ──
+        if method == "hrf":
             assert cls is not None, "HRF method requires cls embedding for sampling"
             x = self._source_from_cls(cls)
         else:
             x = torch.randn(B, cfg.latent_ch, cfg.latent_res, cfg.latent_res,
                             device=tokens.device)
         dt = 1.0 / n_steps
-        null = self.flow_unet.null_tokens.expand(B, -1, -1)
+        flow = self._flow()
+        null = flow.null_tokens.expand(B, -1, -1)
 
         def _vel(xt, t_val):
             t = torch.full((B,), t_val, device=xt.device)
             if cfg_scale > 1.0:
-                v_cond = self.flow_unet(xt, t, tokens)
-                v_uncond = self.flow_unet(xt, t, null)
+                v_cond = flow(xt, t, tokens)
+                v_uncond = flow(xt, t, null)
                 return v_uncond + cfg_scale * (v_cond - v_uncond)
-            return self.flow_unet(xt, t, tokens)
+            return flow(xt, t, tokens)
 
         for i in range(n_steps):
             if solver == "euler":
@@ -357,9 +546,17 @@ class BrainFlowV5(nn.Module):
             lam = 1.0
 
         tokens, cls_emb = self.encode_fmri(fmri_mixed, subject)
+        method = getattr(cfg, "method", "baseline")
 
-        # Source distribution: brain-manifold (HRF) or pure noise (baseline/sb)
-        if getattr(cfg, "method", "baseline") == "hrf":
+        # DiT: teacher-force the CLIP prior token onto the context.
+        # Using the TRUE (L2-normalized) CLIP embedding at train-time avoids
+        # the prior's early-training noise leaking into the flow backbone.
+        if method == "dit":
+            prior_tok = self.clip_to_token(clip_emb).unsqueeze(1)        # (B,1,bd)
+            tokens = torch.cat([tokens, prior_tok], dim=1)
+
+        # Source distribution: brain-manifold (HRF) or pure noise (baseline/sb/dit)
+        if method == "hrf":
             x0 = self._source_from_cls(cls_emb)
         else:
             x0 = torch.randn_like(latent)
@@ -369,12 +566,13 @@ class BrainFlowV5(nn.Module):
         ut = latent - x0
 
         # SB noisy-bridge interpolant: add σ(t)·ε to xt (velocity target unchanged)
-        if getattr(cfg, "method", "baseline") == "sb":
+        if method == "sb":
             sigma_t = cfg.sb_sigma_max * torch.sqrt((t_expand * (1 - t_expand)).clamp(min=0))
             xt = xt + sigma_t * torch.randn_like(xt)
 
+        flow = self._flow()
         drop_mask = torch.rand(B, device=device) < cfg.cfg_drop_prob
-        null_tokens = self.flow_unet.null_tokens.expand(B, -1, -1)
+        null_tokens = flow.null_tokens.expand(B, -1, -1)
         ctx = torch.where(drop_mask[:, None, None], null_tokens, tokens)
 
         # B5: Token dropout — replace dropped tokens with null_tokens so the
@@ -383,10 +581,10 @@ class BrainFlowV5(nn.Module):
         # already-nulled unconditional path.
         if self.training and cfg.token_drop_prob > 0:
             drop = torch.rand(B, ctx.shape[1], 1, device=device) < cfg.token_drop_prob
-            null_expand = self.flow_unet.null_tokens.expand(B, -1, -1)
+            null_expand = flow.null_tokens.expand(B, -1, -1)
             ctx = torch.where(drop, null_expand, ctx)
 
-        vt = self.flow_unet(xt, t, ctx)
+        vt = flow(xt, t, ctx)
         loss_cfm = F.mse_loss(vt, ut)
 
         if lam < 1.0:
@@ -397,6 +595,11 @@ class BrainFlowV5(nn.Module):
         labels = torch.arange(B, device=device)
         loss_align = (F.cross_entropy(logits, labels) +
                       F.cross_entropy(logits.T, labels)) / 2
+
+        # DiT: diffusion-prior flow-matching loss on CLIP embeddings
+        loss_prior = torch.tensor(0.0, device=device)
+        if method == "dit":
+            loss_prior = self.clip_prior.flow_loss(clip_emb, cls_clean)
 
         # Compute perceptual loss if enabled
         loss_percep = torch.tensor(0.0, device=device)
@@ -416,5 +619,9 @@ class BrainFlowV5(nn.Module):
             # Compute perceptual loss in pixel space
             loss_percep = percep_loss_fn(pred_imgs, gt_imgs)
 
-        total = cfg.lambda_cfm * loss_cfm + cfg.lambda_align * loss_align + cfg.lambda_percep * loss_percep
-        return {"loss": total, "cfm": loss_cfm, "align": loss_align, "percep": loss_percep}
+        total = (cfg.lambda_cfm * loss_cfm
+                 + cfg.lambda_align * loss_align
+                 + cfg.lambda_percep * loss_percep
+                 + getattr(cfg, "lambda_prior", 0.0) * loss_prior)
+        return {"loss": total, "cfm": loss_cfm, "align": loss_align,
+                "percep": loss_percep, "prior": loss_prior}
