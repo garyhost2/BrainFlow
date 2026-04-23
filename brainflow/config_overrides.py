@@ -72,6 +72,18 @@ def apply_env_overrides(cfg):
         if not cfg.experiment_name.startswith("v7"):
             cfg.experiment_name = f"v7"
 
+    # V8 enhancements - MindEye-v2 quality target: CLIP prior + larger token budget
+    # Activate with: USE_V8=1 ./launch_experiment.sh v8
+    if "USE_V8" in os.environ and os.environ["USE_V8"] == "1":
+        cfg.n_tokens = 32          # More tokens for richer representation
+        cfg.use_clip_prior = True  # C.1: CLIPPriorHead for CLIP prior injection
+        cfg.lambda_prior = 0.3     # Stronger prior supervision
+        cfg.lambda_pixel = 0.3     # C.2: Pixel-space L1 loss (t > 0.85 guard)
+        cfg.lambda_align = 0.2     # Balanced alignment
+        cfg.method = "baseline"    # CLIP prior + bigger tokens, standard Gaussian source
+        if not cfg.experiment_name.startswith("v8"):
+            cfg.experiment_name = "v8"
+
     # ── Method selection (NeurIPS experiments) ──
     # METHOD=baseline | hrf
     if "METHOD" in os.environ:

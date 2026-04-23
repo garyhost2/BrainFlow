@@ -46,9 +46,19 @@ def _get_clip(device):
 
 
 @torch.no_grad()
-def evaluate(model, vae, loader, device, cfg, n_batches=9999):
+def evaluate(model, vae, loader, device, cfg, n_batches=9999,
+             n_steps=None, solver=None):
+    """Evaluate model on loader.
+
+    n_steps: ODE steps (defaults to cfg.ode_steps)
+    solver:  ODE solver (defaults to "midpoint")
+    """
     model.eval(); vae.to(device)
     clip_enc = _get_clip(device)
+    if n_steps is None:
+        n_steps = cfg.ode_steps
+    if solver is None:
+        solver = "midpoint"
     pcs, sss, css = [], [], []
 
     for i, batch in enumerate(loader):
@@ -56,9 +66,10 @@ def evaluate(model, vae, loader, device, cfg, n_batches=9999):
         fmri = batch["fmri"].to(device)
         images = batch["image"].to(device)
         subject = batch["subject"].to(device)
-        tokens, cls = (model.module if hasattr(model, "module") else model).encode_fmri(fmri, subject)
-        pl = (model.module if hasattr(model, "module") else model).sample(
-            tokens, n_steps=cfg.ode_steps, cfg_scale=cfg.cfg_scale, cls=cls)
+        raw = model.module if hasattr(model, "module") else model
+        tokens, cls = raw.encode_fmri(fmri, subject)
+        pl = raw.sample(tokens, n_steps=n_steps, cfg_scale=cfg.cfg_scale,
+                        solver=solver, cls=cls)
         pi = vae.decode(pl)
         pcs.append(pixel_correlation(pi, images))
         sss.append(ssim_pytorch(pi.cpu(), images.cpu()))

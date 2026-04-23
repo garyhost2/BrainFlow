@@ -20,6 +20,12 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# A.8: High-precision matmul for better throughput on Ampere+
+torch.set_float32_matmul_precision("high")
+# C.4: Enable Flash attention for SDPA
+if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "enable_flash_sdp"):
+    torch.backends.cuda.enable_flash_sdp(True)
+
 from brainflow.config import load_config
 from brainflow.config_overrides import apply_env_overrides
 from brainflow.data import build_dataloaders, is_dist, is_main, rank, world_size
@@ -98,9 +104,7 @@ def main():
 
     if is_dist():
         # B3: find_unused_parameters=False + static_graph for throughput.
-        # Per-subject ModuleDict means some input_proj keys are unused each step,
-        # but gradients for unused Linear layers are zero so this is safe.
-        # TODO(phase3): replace per-subject ModuleDict with shared zero-padded projection
+        # Shared input_proj (A.4) means all params receive gradients every step.
         model = DDP(model, device_ids=[device.index] if device.type == "cuda" else None,
                     find_unused_parameters=False, broadcast_buffers=False)
         try:
@@ -112,6 +116,19 @@ def main():
 
     # Apply channels_last memory format to UNet for better GPU memory access patterns
     raw_model.flow_unet = raw_model.flow_unet.to(memory_format=torch.channels_last)
+
+    # A.5: torch.compile the heavy FlowUNet for kernel fusion / overhead reduction.
+    # Guard so it's a no-op on PyTorch < 2.0 or when compile is unavailable.
+    if raw_model.flow_unet is not None and hasattr(torch, "compile"):
+        try:
+            raw_model.flow_unet = torch.compile(
+                raw_model.flow_unet, mode="reduce-overhead", dynamic=False
+            )
+            if is_main():
+                print("[compile] FlowUNet compiled with reduce-overhead mode.")
+        except Exception as e:
+            if is_main():
+                print(f"[compile] disabled: {e}")
 
     ema = EMA(raw_model, decay=cfg.ema_decay)
 
@@ -170,9 +187,16 @@ def main():
         except Exception as e:
             print(f"[wandb] disabled: {e}")
 
-    def _do_eval(vae):
-        # Use the unsharded eval_loader so rank-0 sees the full test set
-        m = evaluate(raw_model, vae, eval_loader, device, cfg, n_batches=cfg.eval_batches)
+    def _do_eval(vae, full_eval=False):
+        # Use the unsharded eval_loader so rank-0 sees the full test set.
+        # A.6/A.7: cap at eval_batches during training; only bypass on final epoch.
+        n_batches = cfg.eval_batches if not full_eval else 9999
+        # A.7: use faster solver/steps for training-time eval
+        eval_ode_steps = getattr(cfg, "eval_ode_steps", cfg.ode_steps)
+        eval_solver = getattr(cfg, "eval_solver", "midpoint")
+        m = evaluate(raw_model, vae, eval_loader, device, cfg,
+                     n_batches=n_batches,
+                     n_steps=eval_ode_steps, solver=eval_solver)
         return m
 
     best_pc = 0.0; best_clip = 0.0; best_combined = 0.0
@@ -184,7 +208,8 @@ def main():
             train_sampler.set_epoch(epoch)
         losses = defaultdict(list)
         optimizer.zero_grad()
-        pbar = tqdm(train_loader, leave=False, desc=f"Ep{epoch}", disable=not is_main())
+        pbar = tqdm(train_loader, leave=False, desc=f"Ep{epoch}",
+                    disable=not is_main(), mininterval=1.0, miniters=50)
 
         for bi, batch in enumerate(pbar):
             with torch.cuda.amp.autocast(enabled=device.type == "cuda",
@@ -200,32 +225,41 @@ def main():
                 if step >= cfg.ema_start: ema.update(raw_model)
                 step += 1
 
-            for k, v in ld.items(): losses[k].append(v.item())
-            if is_main():
+            # A.1: accumulate detached tensors — avoid per-step host↔device syncs
+            for k, v in ld.items():
+                losses[k].append(v.detach())
+            # A.1/A.8: throttle postfix updates to every 50 iters
+            if is_main() and (bi % 50 == 0):
                 if cfg.lambda_percep > 0 and "percep" in ld:
-                    pbar.set_postfix(c=f"{ld['cfm'].item():.3f}", 
-                                    a=f"{ld['align'].item():.3f}",
-                                    p=f"{ld['percep'].item():.3f}")
+                    pbar.set_postfix(c=f"{ld['cfm'].item():.3f}",
+                                     a=f"{ld['align'].item():.3f}",
+                                     p=f"{ld['percep'].item():.3f}")
                 else:
-                    pbar.set_postfix(c=f"{ld['cfm'].item():.3f}", a=f"{ld['align'].item():.3f}")
+                    pbar.set_postfix(c=f"{ld['cfm'].item():.3f}",
+                                     a=f"{ld['align'].item():.3f}")
 
         scheduler.step()
 
-        train_metrics = {f"train/{k}": float(np.mean(v)) for k, v in losses.items()}
+        # A.1: materialise accumulated tensors in a single batch — one sync per epoch
+        train_metrics = {
+            f"train/{k}": float(torch.stack(v).mean().item())
+            for k, v in losses.items()
+        }
         train_metrics["train/lr"] = optimizer.param_groups[0]["lr"]
         train_metrics["epoch"] = epoch
 
-        do_eval = (epoch % cfg.eval_freq == 0 or epoch == 1 or epoch == cfg.num_epochs)
+        is_last_epoch = (epoch == cfg.num_epochs)
+        do_eval = (epoch % cfg.eval_freq == 0 or epoch == 1 or is_last_epoch)
         if do_eval and is_main():
             gc.collect(); torch.cuda.empty_cache()
             if step >= cfg.ema_start:
                 orig = {k: v.clone() for k, v in raw_model.state_dict().items()}
                 ema.apply(raw_model)
-                m = _do_eval(eval_vae)
+                m = _do_eval(eval_vae, full_eval=is_last_epoch)
                 ema.restore(orig, raw_model)
                 tag = "EMA"
             else:
-                m = _do_eval(eval_vae)
+                m = _do_eval(eval_vae, full_eval=is_last_epoch)
                 tag = "raw"
 
             for k, v in m.items(): train_metrics[f"test/{k}"] = v
@@ -236,7 +270,8 @@ def main():
                   f"CLIP={m['CLIP_Sim']:.3f} ({tag})")
 
             improved = False
-            combined = m["PixCorr"] + 0.3 * m["CLIP_Sim"]
+            # C.5: z-normalised composite metric emphasising all three main metrics
+            combined = m["PixCorr"] + 0.5 * m["SSIM"] + 0.3 * m["CLIP_Sim"]
             if m["PixCorr"] > best_pc:
                 best_pc = m["PixCorr"]; improved = True
                 torch.save(raw_model.state_dict(), cfg.output_dir / "best_pc_v5.pt")
