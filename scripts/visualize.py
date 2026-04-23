@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from brainflow.config import load_config
 from brainflow.data import build_dataloaders
-from brainflow.models import BrainFlowV5
+from brainflow.models import BrainFlowV5, migrate_input_proj
 from brainflow.vae import FrozenVAE
 
 
@@ -90,6 +90,10 @@ def main():
     model = BrainFlowV5(cfg, voxels).to(device)
     
     ckpt = torch.load(args.checkpoint, map_location=device)
+    # Migrate old per-subject ModuleDict input_proj checkpoints to the new
+    # shared zero-padded Linear (no-op for new checkpoints).
+    if hasattr(model.brain_enc, "max_vox"):
+        ckpt = migrate_input_proj(ckpt, model.brain_enc.max_vox)
     model.load_state_dict(ckpt)
     model.eval()
     
