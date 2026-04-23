@@ -80,12 +80,16 @@ class Config:
     # Inference
     ode_steps: int = 20
 
-    # Method (formulation): "baseline" | "hrf"
+    # Method (formulation): "baseline" | "hrf" | "sb"
     #   baseline — standard CFM from Gaussian noise → VAE latent
     #   hrf      — Brain-manifold flow: source = projected CLS + small noise,
     #              + fixed double-gamma HRF velocity bias gated by sin(pi*t)
+    #   sb       — I²SB-style noisy-bridge interpolant:
+    #              xt = (1-t)x0 + t*z + σ(t)·ε, σ(t) = σ_max·√(t(1-t))
+    #              Stochastic Euler-Maruyama sampler → uncertainty via K samples.
     method: str = "baseline"
     hrf_len: int = 16            # HRF kernel length (matches n_tokens)
+    sb_sigma_max: float = 0.5    # SB peak noise scale at t=0.5
 
     # Output
     output_dir: Path = Path("./outputs")
