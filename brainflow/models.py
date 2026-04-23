@@ -184,6 +184,7 @@ class FlowUNet(nn.Module):
         self._hrf_enabled = (getattr(cfg, "method", "baseline") == "hrf")
         if self._hrf_enabled:
             hrf_len = int(getattr(cfg, "hrf_len", cfg.n_tokens))
+            self._latent_res = cfg.latent_res
             self.register_buffer(
                 "hrf_kernel",
                 _double_gamma_hrf(hrf_len).view(1, 1, hrf_len),
@@ -209,7 +210,7 @@ class FlowUNet(nn.Module):
         x = x.transpose(1, 2)                                    # (B, N, D)
         rows = self.hrf_proj(x)                                  # (B, N, ic*H)
         ic_x_H = rows.shape[-1]
-        H = self.cfg.latent_res
+        H = self._latent_res
         ic = ic_x_H // H
         rows = rows.view(B, N, ic, H).permute(0, 2, 3, 1)        # (B, ic, H, N)
         bias = self.hrf_to_map(rows)                             # (B, ic, H, W)
@@ -324,6 +325,15 @@ class BrainFlowV5(nn.Module):
                 x = x + (v1 + v2) * (dt / 2)
             else:
                 raise ValueError(f"Unknown solver: {solver!r}. Use 'euler', 'midpoint', or 'heun'.")
+
+            # SB stochastic sampler: add σ(t)·√dt·ε at each step (Euler-Maruyama).
+            # σ(t) = σ_max·√(t(1-t)) peaks at t=0.5, vanishes at endpoints so the
+            # final sample is deterministic given the velocity field.
+            if getattr(cfg, "method", "baseline") == "sb":
+                t_next = (i + 1) * dt
+                sigma_t = cfg.sb_sigma_max * math.sqrt(max(t_next * (1 - t_next), 0.0))
+                if sigma_t > 0:
+                    x = x + sigma_t * math.sqrt(dt) * torch.randn_like(x)
         return x
 
     def training_step(self, batch, device, vae=None, percep_loss_fn=None):
@@ -348,7 +358,7 @@ class BrainFlowV5(nn.Module):
 
         tokens, cls_emb = self.encode_fmri(fmri_mixed, subject)
 
-        # Source distribution: brain-manifold (HRF) or pure noise (baseline)
+        # Source distribution: brain-manifold (HRF) or pure noise (baseline/sb)
         if getattr(cfg, "method", "baseline") == "hrf":
             x0 = self._source_from_cls(cls_emb)
         else:
@@ -357,6 +367,11 @@ class BrainFlowV5(nn.Module):
         t_expand = t[:, None, None, None]
         xt = (1 - t_expand) * x0 + t_expand * latent
         ut = latent - x0
+
+        # SB noisy-bridge interpolant: add σ(t)·ε to xt (velocity target unchanged)
+        if getattr(cfg, "method", "baseline") == "sb":
+            sigma_t = cfg.sb_sigma_max * torch.sqrt((t_expand * (1 - t_expand)).clamp(min=0))
+            xt = xt + sigma_t * torch.randn_like(xt)
 
         drop_mask = torch.rand(B, device=device) < cfg.cfg_drop_prob
         null_tokens = self.flow_unet.null_tokens.expand(B, -1, -1)
