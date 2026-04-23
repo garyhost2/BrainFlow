@@ -56,9 +56,9 @@ def evaluate(model, vae, loader, device, cfg, n_batches=9999):
         fmri = batch["fmri"].to(device)
         images = batch["image"].to(device)
         subject = batch["subject"].to(device)
-        tokens, _ = (model.module if hasattr(model, "module") else model).encode_fmri(fmri, subject)
+        tokens, cls = (model.module if hasattr(model, "module") else model).encode_fmri(fmri, subject)
         pl = (model.module if hasattr(model, "module") else model).sample(
-            tokens, n_steps=cfg.ode_steps, cfg_scale=cfg.cfg_scale)
+            tokens, n_steps=cfg.ode_steps, cfg_scale=cfg.cfg_scale, cls=cls)
         pi = vae.decode(pl)
         pcs.append(pixel_correlation(pi, images))
         sss.append(ssim_pytorch(pi.cpu(), images.cpu()))

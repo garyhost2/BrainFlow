@@ -80,6 +80,13 @@ class Config:
     # Inference
     ode_steps: int = 20
 
+    # Method (formulation): "baseline" | "hrf"
+    #   baseline — standard CFM from Gaussian noise → VAE latent
+    #   hrf      — Brain-manifold flow: source = projected CLS + small noise,
+    #              + fixed double-gamma HRF velocity bias gated by sin(pi*t)
+    method: str = "baseline"
+    hrf_len: int = 16            # HRF kernel length (matches n_tokens)
+
     # Output
     output_dir: Path = Path("./outputs")
     experiment_name: str = "baseline"
