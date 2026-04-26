@@ -127,10 +127,11 @@ def main():
             subject = batch["subject"].to(device)
             
             # Encode fMRI to tokens
-            tokens, _ = model.encode_fmri(fmri, subject)
+            tokens, cls = model.encode_fmri(fmri, subject)
             
             # Sample latents via ODE
-            pred_latents = model.sample(tokens, n_steps=cfg.ode_steps, cfg_scale=cfg.cfg_scale)
+            pred_latents = model.sample(tokens, n_steps=cfg.ode_steps,
+                                        cfg_scale=cfg.cfg_scale, cls=cls)
             
             # Decode to images
             pred_imgs = vae.decode(pred_latents)
