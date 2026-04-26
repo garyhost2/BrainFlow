@@ -16,6 +16,7 @@ from tqdm.auto import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from brainflow.config import load_config
+from brainflow.config_overrides import apply_env_overrides
 from brainflow.data import build_dataloaders
 from brainflow.models import BrainFlowV5, migrate_input_proj
 from brainflow.vae import FrozenVAE
@@ -67,6 +68,7 @@ def main():
 
     # Load config
     cfg = load_config()
+    cfg = apply_env_overrides(cfg)
     cfg.cfg_scale = args.cfg_scale
     cfg.ode_steps = args.ode_steps
     
@@ -90,11 +92,17 @@ def main():
     model = BrainFlowV5(cfg, voxels).to(device)
     
     ckpt = torch.load(args.checkpoint, map_location=device)
+    # Strip torch.compile's "_orig_mod." prefix if present
+    ckpt = {k.replace("._orig_mod.", "."): v for k, v in ckpt.items()}
     # Migrate old per-subject ModuleDict input_proj checkpoints to the new
     # shared zero-padded Linear (no-op for new checkpoints).
     if hasattr(model.brain_enc, "max_vox"):
         ckpt = migrate_input_proj(ckpt, model.brain_enc.max_vox)
-    model.load_state_dict(ckpt)
+    missing, unexpected = model.load_state_dict(ckpt, strict=False)
+    if missing:
+        print(f"  [warn] missing keys: {len(missing)} (e.g. {missing[:3]})")
+    if unexpected:
+        print(f"  [warn] unexpected keys: {len(unexpected)} (e.g. {unexpected[:3]})")
     model.eval()
     
     n_params = sum(p.numel() for p in model.parameters())
