@@ -603,7 +603,13 @@ class BrainFlowV5(nn.Module):
         if n_ctx > base_null.shape[1]:
             # Use learned null_prior_token instead of zeros — zero is out-of-distribution
             # for the attention key space and makes the CFG unconditional path degenerate.
-            null_pad = self.null_prior_token.to(base_null.device, base_null.dtype)
+            # Fall back to zeros only if null_prior_token was not initialised (should not
+            # happen in normal usage, but avoids a hard crash if config is unusual).
+            if self.null_prior_token is not None:
+                null_pad = self.null_prior_token.to(base_null.device, base_null.dtype)
+            else:
+                null_pad = torch.zeros(1, n_ctx - base_null.shape[1], base_null.shape[2],
+                                       device=base_null.device, dtype=base_null.dtype)
             null = torch.cat([base_null, null_pad], dim=1).expand(B, -1, -1)
         else:
             null = base_null.expand(B, -1, -1)
@@ -730,7 +736,13 @@ class BrainFlowV5(nn.Module):
         if n_ctx > base_null.shape[1]:
             # Use learned null_prior_token instead of zeros — zero is out-of-distribution
             # for the attention key space and makes the CFG unconditional path degenerate.
-            null_pad = self.null_prior_token.to(base_null.device, base_null.dtype)
+            # Fall back to zeros only if null_prior_token was not initialised (should not
+            # happen in normal usage, but avoids a hard crash if config is unusual).
+            if self.null_prior_token is not None:
+                null_pad = self.null_prior_token.to(base_null.device, base_null.dtype)
+            else:
+                null_pad = torch.zeros(1, n_ctx - base_null.shape[1], base_null.shape[2],
+                                       device=base_null.device, dtype=base_null.dtype)
             null_tokens = torch.cat([base_null, null_pad], dim=1).expand(B, -1, -1)
         else:
             null_tokens = base_null.expand(B, -1, -1)
