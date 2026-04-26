@@ -9,8 +9,8 @@
 #SBATCH -e %x_%j.err
 #SBATCH -p gpu-all
 #SBATCH --gres=gpu:v100_16GB:2
-#SBATCH -c 16
-#SBATCH --mem=120G
+#SBATCH -c 8
+#SBATCH --mem=90G
 #SBATCH -t 3-00:00:00
 
 set -euo pipefail
