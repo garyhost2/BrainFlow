@@ -45,7 +45,11 @@ def apply_env_overrides(cfg):
     # UNet architecture overrides
     if "UNET_BASE_CH" in os.environ:
         cfg.unet_base_ch = int(os.environ["UNET_BASE_CH"])
+    # N_ENC_BLOCKS is kept for backwards compatibility; ENC_BLOCKS is canonical.
+    # If both are set simultaneously, ENC_BLOCKS wins and a warning is emitted.
     if "N_ENC_BLOCKS" in os.environ:
+        import warnings
+        warnings.warn("N_ENC_BLOCKS is deprecated; use ENC_BLOCKS instead.", DeprecationWarning)
         cfg.enc_blocks = int(os.environ["N_ENC_BLOCKS"])
 
     # Encoder scaling

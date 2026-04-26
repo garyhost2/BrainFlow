@@ -60,6 +60,7 @@ export LAMBDA_PERCEP=0.10
 # Effective batch = BATCH_SIZE_PER_GPU * NGPUS * GRAD_ACCUM = 24 * 2 * 2 = 96
 export BATCH_SIZE_PER_GPU=24
 export GRAD_ACCUM=2
+export PRIOR_ODE_STEPS=10
 export DISABLE_COMPILE=1                  # torch.compile flaky on V100/DiT
 # export NUM_EPOCHS=2                     # uncomment for smoke test
 

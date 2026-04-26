@@ -71,6 +71,7 @@ def evaluate(model, vae, loader, device, cfg, n_batches=9999,
         pl = raw.sample(tokens, n_steps=n_steps, cfg_scale=cfg.cfg_scale,
                         solver=solver, cls=cls)
         pi = vae.decode(pl)
+        pi = (pi * 0.5 + 0.5).clamp(0, 1)   # VAE outputs [-1,1]; convert to [0,1] for metrics
         pcs.append(pixel_correlation(pi, images))
         sss.append(ssim_pytorch(pi.cpu(), images.cpu()))
         pi_r = F.interpolate(pi.cpu(), 224, mode="bilinear", align_corners=False).to(device)
