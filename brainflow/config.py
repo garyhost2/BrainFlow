@@ -108,6 +108,8 @@ class Config:
     dit_patch: int = 4
     lambda_prior: float = 0.2    # weight of the diffusion prior loss (also used by CLIPPriorHead)
     prior_ode_steps: int = 10    # sampling steps for the CLIP prior
+    prior_dim: int = 512         # CLIPPrior hidden dim
+    prior_blocks: int = 3        # CLIPPrior residual block count
 
     # Output
     output_dir: Path = Path("./outputs")
