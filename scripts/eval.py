@@ -56,7 +56,13 @@ def main():
     model = BrainFlowV5(cfg, voxels).to(device)
     
     ckpt = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(ckpt)
+    # Strip torch.compile's "_orig_mod." prefix if present
+    ckpt = {k.replace("._orig_mod.", "."): v for k, v in ckpt.items()}
+    missing, unexpected = model.load_state_dict(ckpt, strict=False)
+    if missing:
+        print(f"  [warn] missing keys: {len(missing)} (e.g. {missing[:3]})")
+    if unexpected:
+        print(f"  [warn] unexpected keys: {len(unexpected)} (e.g. {unexpected[:3]})")
     model.eval()
     
     n_params = sum(p.numel() for p in model.parameters())
