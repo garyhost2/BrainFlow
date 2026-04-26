@@ -98,9 +98,11 @@ def main():
     model = BrainFlowV5(cfg, voxels).to(device)
     n_total = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_enc = sum(p.numel() for p in model.brain_enc.parameters())
-    n_unet = sum(p.numel() for p in model.flow_unet.parameters())
+    flow_module = model.flow_dit if cfg.method == "dit" else model.flow_unet
+    flow_label = "dit" if cfg.method == "dit" else "unet"
+    n_flow = sum(p.numel() for p in flow_module.parameters())
     if is_main():
-        print(f"Params: total={n_total/1e6:.1f}M | enc={n_enc/1e6:.1f}M | unet={n_unet/1e6:.1f}M")
+        print(f"Params: total={n_total/1e6:.1f}M | enc={n_enc/1e6:.1f}M | {flow_label}={n_flow/1e6:.1f}M")
 
     if is_dist():
         # B3: find_unused_parameters=False + static_graph for throughput.
@@ -115,17 +117,21 @@ def main():
     raw_model = model.module if hasattr(model, "module") else model
 
     # Apply channels_last memory format to UNet for better GPU memory access patterns
-    raw_model.flow_unet = raw_model.flow_unet.to(memory_format=torch.channels_last)
+    # (DiT is token-based, channels_last doesn't apply)
+    if cfg.method != "dit" and raw_model.flow_unet is not None:
+        raw_model.flow_unet = raw_model.flow_unet.to(memory_format=torch.channels_last)
 
-    # A.5: torch.compile the heavy FlowUNet for kernel fusion / overhead reduction.
+    # A.5: torch.compile the heavy flow backbone for kernel fusion / overhead reduction.
     # Guard so it's a no-op on PyTorch < 2.0 or when compile is unavailable.
-    if raw_model.flow_unet is not None and hasattr(torch, "compile"):
+    flow_attr = "flow_dit" if cfg.method == "dit" else "flow_unet"
+    flow_obj = getattr(raw_model, flow_attr, None)
+    if flow_obj is not None and hasattr(torch, "compile"):
         try:
-            raw_model.flow_unet = torch.compile(
-                raw_model.flow_unet, mode="reduce-overhead", dynamic=False
-            )
+            setattr(raw_model, flow_attr, torch.compile(
+                flow_obj, mode="reduce-overhead", dynamic=False
+            ))
             if is_main():
-                print("[compile] FlowUNet compiled with reduce-overhead mode.")
+                print(f"[compile] {flow_attr} compiled with reduce-overhead mode.")
         except Exception as e:
             if is_main():
                 print(f"[compile] disabled: {e}")
