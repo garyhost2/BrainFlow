@@ -58,17 +58,17 @@ export EXPERIMENT_NAME=mc_xl
 export PERCEP_LOSS=lpips
 export LAMBDA_PERCEP=0.10
 
-# Bigger encoder (≈ 4× wider, 2× deeper)
-export ENC_HIDDEN=4096
-export ENC_BLOCKS=8
+# Bigger encoder (2× wider, 1.5× deeper than baseline 1024×4)
+# 4096×8 OOMs on V100 16GB. 2048×6 fits with batch=16.
+export ENC_HIDDEN=2048
+export ENC_BLOCKS=6
 
-# Bigger CLIP prior (d 512→1024, blocks 3→8) + stronger supervision
+# Bigger CLIP prior (d 512→1024, blocks 3→6) + stronger supervision
 export PRIOR_DIM=1024
-export PRIOR_BLOCKS=8
+export PRIOR_BLOCKS=6
 export LAMBDA_PRIOR=0.4
 export PRIOR_ODE_STEPS=20
 
-# Compensate memory: smaller per-GPU batch, more grad_accum.
 # Effective batch = 16 * 2 GPUs * 3 = 96
 export BATCH_SIZE_PER_GPU=16
 export GRAD_ACCUM=3
