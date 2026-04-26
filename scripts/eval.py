@@ -13,6 +13,7 @@ from tqdm.auto import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from brainflow.config import load_config
+from brainflow.config_overrides import apply_env_overrides
 from brainflow.data import build_dataloaders
 from brainflow.models import BrainFlowV5
 from brainflow.vae import FrozenVAE
@@ -33,6 +34,7 @@ def main():
 
     # Load config
     cfg = load_config()
+    cfg = apply_env_overrides(cfg)
     cfg.cfg_scale = args.cfg_scale
     cfg.ode_steps = args.ode_steps
     
