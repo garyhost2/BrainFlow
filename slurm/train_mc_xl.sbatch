@@ -72,6 +72,7 @@ export PRIOR_ODE_STEPS=20
 # Effective batch = 16 * 2 GPUs * 3 = 96
 export BATCH_SIZE_PER_GPU=16
 export GRAD_ACCUM=3
+export DISABLE_COMPILE=1                  # torch.compile flaky on V100/DiT
 # export NUM_EPOCHS=2                     # uncomment for smoke test
 
 torchrun \
