@@ -226,7 +226,7 @@ def main():
         for bi, batch in enumerate(pbar):
             with torch.cuda.amp.autocast(enabled=device.type == "cuda",
                                          dtype=autocast_dtype):
-                ld = raw_model.training_step(batch, device, vae=eval_vae, percep_loss_fn=percep_loss_fn)
+                ld = raw_model.training_step(batch, device, vae=eval_vae, percep_loss_fn=percep_loss_fn, epoch=epoch)
                 loss = ld["loss"] / cfg.grad_accum
             scaler.scale(loss).backward()
 

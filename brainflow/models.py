@@ -521,6 +521,14 @@ class BrainFlowV5(nn.Module):
             self.clip_prior_head = None
             self.clip_to_brain = None
 
+        # Learned null embedding for the prior token slot — used instead of
+        # zero-padding when n_ctx > base_null.shape[1] (zero is out-of-distribution
+        # for the attention key space and makes CFG unconditional path degenerate).
+        if getattr(cfg, "use_clip_prior", False) or getattr(cfg, "method", "baseline") == "dit":
+            self.null_prior_token = nn.Parameter(torch.randn(1, 1, cfg.brain_dim) * 0.01)
+        else:
+            self.null_prior_token = None
+
     def encode_fmri(self, fmri, subject):
         return self.brain_enc(fmri, subject)
 
@@ -593,9 +601,16 @@ class BrainFlowV5(nn.Module):
         n_ctx = tokens.shape[1]
         base_null = flow.null_tokens  # (1, base_n_tokens, bd)
         if n_ctx > base_null.shape[1]:
-            pad = torch.zeros(1, n_ctx - base_null.shape[1], base_null.shape[2],
-                              device=base_null.device, dtype=base_null.dtype)
-            null = torch.cat([base_null, pad], dim=1).expand(B, -1, -1)
+            # Use learned null_prior_token instead of zeros — zero is out-of-distribution
+            # for the attention key space and makes the CFG unconditional path degenerate.
+            # Fall back to zeros only if null_prior_token was not initialised (should not
+            # happen in normal usage, but avoids a hard crash if config is unusual).
+            if self.null_prior_token is not None:
+                null_pad = self.null_prior_token.to(base_null.device, base_null.dtype)
+            else:
+                null_pad = torch.zeros(1, n_ctx - base_null.shape[1], base_null.shape[2],
+                                       device=base_null.device, dtype=base_null.dtype)
+            null = torch.cat([base_null, null_pad], dim=1).expand(B, -1, -1)
         else:
             null = base_null.expand(B, -1, -1)
 
@@ -639,7 +654,7 @@ class BrainFlowV5(nn.Module):
                     x = x + sigma_t * math.sqrt(dt) * torch.randn_like(x)
         return x
 
-    def training_step(self, batch, device, vae=None, percep_loss_fn=None):
+    def training_step(self, batch, device, vae=None, percep_loss_fn=None, epoch: int = 0):
         cfg = self.cfg
         fmri = batch["fmri"].to(device, non_blocking=True)
         latent = batch["latent"].to(device, non_blocking=True)
@@ -666,10 +681,17 @@ class BrainFlowV5(nn.Module):
         tokens, cls_emb = self.encode_fmri(fmri_mixed, subject)
 
         # DiT: teacher-force the CLIP prior token onto the context.
-        # Using the TRUE (L2-normalized) CLIP embedding at train-time avoids
-        # the prior's early-training noise leaking into the flow backbone.
+        # Curriculum exposure bias fix: ramp up prior-sample probability from 0 → 0.3
+        # over the first 30 epochs so the DiT learns to handle imperfect CLIP tokens
+        # that it will see at inference time (train/eval mismatch fix).
         if method == "dit":
-            prior_tok = self.clip_to_token(clip_emb).unsqueeze(1)        # (B,1,bd)
+            prior_sample_prob = min(0.3, (epoch / 30) * 0.3)
+            if self.training and random.random() < prior_sample_prob:
+                with torch.no_grad():
+                    clip_token_for_ctx = self.clip_prior.sample(cls_emb.detach(), n_steps=5)
+            else:
+                clip_token_for_ctx = clip_emb  # teacher-force true CLIP embedding
+            prior_tok = self.clip_to_token(clip_token_for_ctx).unsqueeze(1)        # (B,1,bd)
             tokens = torch.cat([tokens, prior_tok], dim=1)
 
         # C.1: CLIPPriorHead — teacher-force true CLIP embedding at train time
@@ -712,9 +734,16 @@ class BrainFlowV5(nn.Module):
         n_ctx = tokens.shape[1]
         base_null = flow.null_tokens  # (1, base_n_tokens, bd)
         if n_ctx > base_null.shape[1]:
-            pad = torch.zeros(1, n_ctx - base_null.shape[1], base_null.shape[2],
-                              device=base_null.device, dtype=base_null.dtype)
-            null_tokens = torch.cat([base_null, pad], dim=1).expand(B, -1, -1)
+            # Use learned null_prior_token instead of zeros — zero is out-of-distribution
+            # for the attention key space and makes the CFG unconditional path degenerate.
+            # Fall back to zeros only if null_prior_token was not initialised (should not
+            # happen in normal usage, but avoids a hard crash if config is unusual).
+            if self.null_prior_token is not None:
+                null_pad = self.null_prior_token.to(base_null.device, base_null.dtype)
+            else:
+                null_pad = torch.zeros(1, n_ctx - base_null.shape[1], base_null.shape[2],
+                                       device=base_null.device, dtype=base_null.dtype)
+            null_tokens = torch.cat([base_null, null_pad], dim=1).expand(B, -1, -1)
         else:
             null_tokens = base_null.expand(B, -1, -1)
 
@@ -746,22 +775,19 @@ class BrainFlowV5(nn.Module):
             loss_prior = self.clip_prior.flow_loss(clip_emb, cls_clean)
 
         # Compute perceptual loss if enabled
+        # Gate on t > 0.85: the approximation pred_latent ≈ xt + vt*(1-t) is only
+        # valid near t ≈ 1. At t < 0.5 xt is mostly noise, so decoded images are
+        # random — computing LPIPS against them injects chaotic gradients.
         loss_percep = torch.tensor(0.0, device=device)
         if percep_loss_fn is not None and vae is not None and cfg.lambda_percep > 0:
-            # Decode predicted and target latents to pixel space
-            with torch.no_grad():
-                gt_imgs = batch["image"].to(device, non_blocking=True)
-                # Normalize to [-1, 1] for VAE
-                gt_imgs = gt_imgs * 2.0 - 1.0
-            
-            # Decode predicted latent (use the predicted velocity to get final latent)
-            # For training, we sample at a random time step, so we approximate
-            # the final latent using: latent ≈ xt + vt * (1 - t)
-            pred_latent = xt + vt * (1 - t_expand)
-            pred_imgs = vae.decode(pred_latent)
-            
-            # Compute perceptual loss in pixel space
-            loss_percep = percep_loss_fn(pred_imgs, gt_imgs)
+            mask = t > 0.85
+            if mask.any():
+                pred_latent = (xt + vt * (1 - t_expand))[mask]
+                with torch.no_grad():
+                    pred_imgs = vae.decode(pred_latent)           # [-1, 1]
+                    gt_imgs_masked = batch["image"].to(device, non_blocking=True)[mask]
+                    gt_imgs_masked = gt_imgs_masked * 2.0 - 1.0  # [0,1] → [-1,1] for LPIPS
+                loss_percep = percep_loss_fn(pred_imgs, gt_imgs_masked)
 
         # C.2: Pixel-space L1 loss — only at t > 0.85 where the approximation
         # pred_lat ≈ xt + vt*(1-t) is valid (velocity ≈ constant near t=1).

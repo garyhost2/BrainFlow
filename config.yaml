@@ -75,6 +75,7 @@ inference:
   ode_steps: 20
   eval_ode_steps: 10       # faster eval during training (10-step Euler)
   eval_solver: "euler"     # euler | midpoint | heun (midpoint/heun for inference.py)
+  prior_ode_steps: 10      # ODE steps for CLIPPrior.sample() during inference
 
 output:
   output_dir: "./outputs"

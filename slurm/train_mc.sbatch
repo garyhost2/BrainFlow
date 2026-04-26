@@ -58,8 +58,9 @@ export PERCEP_LOSS=lpips
 export LAMBDA_PERCEP=0.10
 # DiT has self-attention → peak memory slightly higher than UNet at same batch.
 # Drop batch a touch, bump grad_accum to keep effective batch constant.
-export BATCH_SIZE_PER_GPU=12
+export BATCH_SIZE_PER_GPU=16
 export GRAD_ACCUM=6
+export PRIOR_ODE_STEPS=10
 # export NUM_EPOCHS=2                     # uncomment for smoke test
 
 torchrun \
