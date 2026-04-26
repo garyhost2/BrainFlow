@@ -186,7 +186,7 @@ def main():
                 project=cfg.wandb_project, name=cfg.wandb_run_name,
                 mode=cfg.wandb_mode,
                 config={**cfg.__dict__, "n_total": n_total,
-                        "n_enc": n_enc, "n_unet": n_unet,
+                        "n_enc": n_enc, f"n_{flow_label}": n_flow,
                         "voxels": voxels, "world_size": world_size()},
             )
             use_wandb = True
