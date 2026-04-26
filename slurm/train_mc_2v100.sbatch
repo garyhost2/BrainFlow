@@ -58,6 +58,7 @@ export PERCEP_LOSS=lpips
 export LAMBDA_PERCEP=0.10
 export BATCH_SIZE_PER_GPU=96
 export GRAD_ACCUM=1
+export PRIOR_ODE_STEPS=10
 # export NUM_EPOCHS=2                     # uncomment for smoke test
 
 torchrun \
