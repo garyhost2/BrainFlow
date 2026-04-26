@@ -125,16 +125,22 @@ def main():
     # Guard so it's a no-op on PyTorch < 2.0 or when compile is unavailable.
     flow_attr = "flow_dit" if cfg.method == "dit" else "flow_unet"
     flow_obj = getattr(raw_model, flow_attr, None)
-    if flow_obj is not None and hasattr(torch, "compile"):
+    _disable_compile = os.environ.get("DISABLE_COMPILE", "0") == "1"
+    if flow_obj is not None and hasattr(torch, "compile") and not _disable_compile:
+        # reduce-overhead uses CUDA Graphs which is fragile on V100/DDP.
+        # Use "default" for DiT, "reduce-overhead" for UNet.
+        _compile_mode = "default" if cfg.method == "dit" else "reduce-overhead"
         try:
             setattr(raw_model, flow_attr, torch.compile(
-                flow_obj, mode="reduce-overhead", dynamic=False
+                flow_obj, mode=_compile_mode, dynamic=False
             ))
             if is_main():
-                print(f"[compile] {flow_attr} compiled with reduce-overhead mode.")
+                print(f"[compile] {flow_attr} compiled with {_compile_mode} mode.")
         except Exception as e:
             if is_main():
                 print(f"[compile] disabled: {e}")
+    elif _disable_compile and is_main():
+        print(f"[compile] disabled by DISABLE_COMPILE=1")
 
     ema = EMA(raw_model, decay=cfg.ema_decay)
 
