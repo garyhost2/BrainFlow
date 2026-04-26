@@ -353,23 +353,32 @@ class CLIPPrior(nn.Module):
     Given fMRI CLS, learns to denoise CLIP embeddings via CFM.
     At training, also provides the predicted CLIP token to condition the
     latent-space flow (true CLIP is teacher-forced; prior supervises itself).
-    At inference, ODE-samples a predicted CLIP embedding."""
+    At inference, ODE-samples a predicted CLIP embedding.
+
+    Sized via cfg.prior_dim and cfg.prior_blocks for scaling experiments."""
     def __init__(self, cfg: Config):
         super().__init__()
         cd = cfg.clip_dim
         bd = cfg.brain_dim
-        d = 512
+        d = int(getattr(cfg, "prior_dim", 512))
+        n_blocks = int(getattr(cfg, "prior_blocks", 3))
         td = 128
         self.cd = cd
         self.te = SinusoidalTimeEmbedding(td)
         self.in_proj = nn.Linear(cd, d)
         self.cond_proj = nn.Linear(bd, d)
         self.time_proj = nn.Linear(td, d)
-        self.blocks = nn.Sequential(
-            nn.LayerNorm(d), nn.Linear(d, d * 2), nn.GELU(), nn.Linear(d * 2, d),
-            nn.LayerNorm(d), nn.Linear(d, d * 2), nn.GELU(), nn.Linear(d * 2, d),
-            nn.LayerNorm(d), nn.Linear(d, d * 2), nn.GELU(), nn.Linear(d * 2, d),
-        )
+        self.blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.LayerNorm(d),
+                nn.Linear(d, d * 2),
+                nn.GELU(),
+                nn.Dropout(0.05),
+                nn.Linear(d * 2, d),
+            )
+            for _ in range(n_blocks)
+        ])
+        self.out_norm = nn.LayerNorm(d)
         self.out_proj = nn.Linear(d, cd)
         nn.init.zeros_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
@@ -378,8 +387,9 @@ class CLIPPrior(nn.Module):
         """Predict velocity v = (clip_clean - clip_noise). Shapes: (B, cd)."""
         te = self.te(t)
         h = self.in_proj(clip_t) + self.cond_proj(cls) + self.time_proj(te)
-        h = h + self.blocks(h)
-        return self.out_proj(h)
+        for blk in self.blocks:
+            h = h + blk(h)
+        return self.out_proj(self.out_norm(h))
 
     def flow_loss(self, clip_gt: torch.Tensor, cls: torch.Tensor) -> torch.Tensor:
         """CFM loss: x_t = (1-t) noise + t * clip_gt, target v = clip_gt - noise."""

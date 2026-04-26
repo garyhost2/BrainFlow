@@ -46,7 +46,23 @@ def apply_env_overrides(cfg):
     if "UNET_BASE_CH" in os.environ:
         cfg.unet_base_ch = int(os.environ["UNET_BASE_CH"])
     if "N_ENC_BLOCKS" in os.environ:
-        cfg.n_enc_blocks = int(os.environ["N_ENC_BLOCKS"])
+        cfg.enc_blocks = int(os.environ["N_ENC_BLOCKS"])
+
+    # Encoder scaling
+    if "ENC_HIDDEN" in os.environ:
+        cfg.enc_hidden = int(os.environ["ENC_HIDDEN"])
+    if "ENC_BLOCKS" in os.environ:
+        cfg.enc_blocks = int(os.environ["ENC_BLOCKS"])
+
+    # CLIP prior scaling (method == "dit")
+    if "PRIOR_DIM" in os.environ:
+        cfg.prior_dim = int(os.environ["PRIOR_DIM"])
+    if "PRIOR_BLOCKS" in os.environ:
+        cfg.prior_blocks = int(os.environ["PRIOR_BLOCKS"])
+    if "LAMBDA_PRIOR" in os.environ:
+        cfg.lambda_prior = float(os.environ["LAMBDA_PRIOR"])
+    if "PRIOR_ODE_STEPS" in os.environ:
+        cfg.prior_ode_steps = int(os.environ["PRIOR_ODE_STEPS"])
     
     # V6 enhancements - more tokens + perceptual supervision
     if "USE_V6" in os.environ and os.environ["USE_V6"] == "1":
