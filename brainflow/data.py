@@ -269,11 +269,67 @@ def compute_or_load_latents(tensors: dict, cfg: Config) -> dict:
     return res
 
 
+# ─── CLIP patch token encoding (rank-0 only, cached) ──────────────────────────
+def compute_or_load_clip_patches(tensors: dict, cfg: Config) -> dict:
+    """Extract and cache ViT-L/14 patch tokens (196 → 256 zero-padded, fp16).
+
+    Returns dict with keys "clip_patch_train_{subj}" and "clip_patch_test_{subj}",
+    each a (N, 256, 1024) fp16 tensor stored on CPU.
+    """
+    cache = cfg.data_dir / cfg.clip_patch_cache
+    if cache.exists() and not cfg.force_rebuild:
+        if is_main():
+            print(f"✓ Loading CLIP patch cache: {cache}")
+        out = torch.load(cache, map_location="cpu")
+        if is_dist(): dist.barrier()
+        return out
+    if not is_main():
+        if is_dist(): dist.barrier()
+        return torch.load(cache, map_location="cpu")
+
+    import open_clip
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Loading CLIP ViT-L/14 for patch token extraction …")
+    m, _, _ = open_clip.create_model_and_transforms("ViT-L-14", pretrained="openai")
+    m = m.eval().to(device)
+    for p in m.parameters(): p.requires_grad_(False)
+
+    @torch.no_grad()
+    def _extract_patches(imgs, bs=16):
+        """imgs: (N, 3, H, W) uint8. Returns (N, 256, 1024) fp16."""
+        out = []
+        for i in tqdm(range(0, len(imgs), bs), desc="CLIP patches", leave=False):
+            chunk = imgs[i:i + bs]
+            if chunk.dtype == torch.uint8:
+                chunk = chunk.float() / 255.0
+            b = F.interpolate(chunk, 224, mode="bilinear",
+                              align_corners=False).to(device)
+            # output_tokens=True → (pooled_cls, patch_tokens: B × 196 × 1024)
+            _, patch_tok = m.visual(b, output_tokens=True)
+            # Zero-pad 196 → 256 along sequence dim so grid is exactly 16×16
+            padded = F.pad(patch_tok.float(), (0, 0, 0, 256 - patch_tok.shape[1]))
+            out.append(padded.cpu().half())
+        return torch.cat(out)  # (N, 256, 1024) fp16
+
+    res = {}
+    for subj in cfg.subjects:
+        print(f"CLIP patch extraction subj{subj:02d} …")
+        res[f"clip_patch_train_{subj}"] = _extract_patches(
+            tensors[f"imgs_train_{subj}"])
+        res[f"clip_patch_test_{subj}"] = _extract_patches(
+            tensors[f"imgs_test_{subj}"])
+    del m; gc.collect(); torch.cuda.empty_cache()
+    torch.save(res, cache)
+    print(f"✓ CLIP patch cache saved: {cache}")
+    if is_dist(): dist.barrier()
+    return res
+
 
 class NSDDataset(Dataset):
     def __init__(self, fmri, latents, images, clip_embs, subject_id,
                  augment=False, cfg: Config | None = None,
-                 fmri_mu=None, fmri_std=None):
+                 fmri_mu=None, fmri_std=None,
+                 clip_patches=None):
         assert len(fmri) == len(latents) == len(images) == len(clip_embs)
         self.fmri = fmri.float()
         self.latents = latents.float()
@@ -293,6 +349,8 @@ class NSDDataset(Dataset):
             self.fmri_mu = self.fmri.mean(0)
             self.fmri_std = self.fmri.std(0).clamp(1e-6)
         self.fmri = (self.fmri - self.fmri_mu) / self.fmri_std
+        # Phase 2: optional patch tokens (N, 256, 1024) fp16
+        self.clip_patches = clip_patches
 
     def __len__(self): return len(self.fmri)
 
@@ -306,24 +364,30 @@ class NSDDataset(Dataset):
         img = self.images[i]
         if img.dtype == torch.uint8:
             img = img.float() / 255.0
-        return {
+        result = {
             "fmri": f,
             "latent": self.latents[i],
             "image": img,
             "clip_emb": self.clip_embs[i],
             "subject": self.subject_id,
         }
+        if self.clip_patches is not None:
+            result["clip_patches"] = self.clip_patches[i].float()  # (256, 1024)
+        return result
 
 
 def variable_collate(batch):
     """Stack same-subject samples (subject grouping enforced by SubjectBatchSampler)."""
-    return {
+    result = {
         "fmri": torch.stack([b["fmri"] for b in batch]),
         "latent": torch.stack([b["latent"] for b in batch]),
         "image": torch.stack([b["image"] for b in batch]),
         "clip_emb": torch.stack([b["clip_emb"] for b in batch]),
         "subject": torch.tensor([b["subject"] for b in batch], dtype=torch.long),
     }
+    if "clip_patches" in batch[0]:
+        result["clip_patches"] = torch.stack([b["clip_patches"] for b in batch])
+    return result
 
 
 from torch.utils.data import Sampler
@@ -390,17 +454,25 @@ def build_dataloaders(cfg: Config):
     clips = compute_or_load_clip(tensors, cfg)
     lats = compute_or_load_latents(tensors, cfg)
 
+    # Phase 2: load CLIP patch token cache if needed
+    clip_patches_cache = None
+    if getattr(cfg, "training_stage", "").startswith("2"):
+        clip_patches_cache = compute_or_load_clip_patches(tensors, cfg)
+
     fmri_stats = tensors.get("fmri_stats", {})
     train_sets, test_sets = [], []
     voxels = tensors.get("voxels", {})
     for subj in cfg.subjects:
         if subj not in voxels:
             voxels[subj] = tensors[f"fmri_train_{subj}"].shape[1]
+        tr_cp = clip_patches_cache.get(f"clip_patch_train_{subj}") if clip_patches_cache else None
+        te_cp = clip_patches_cache.get(f"clip_patch_test_{subj}") if clip_patches_cache else None
         # Build train dataset first so we can read its normalisation stats
         tr_ds = NSDDataset(
             tensors[f"fmri_train_{subj}"], lats[f"lat_train_{subj}"],
             tensors[f"imgs_train_{subj}"], clips[f"clip_train_{subj}"],
             subject_id=subj, augment=True, cfg=cfg,
+            clip_patches=tr_cp,
         )
         train_sets.append(tr_ds)
         # B1: Pass train fmri stats to test dataset to avoid data leak
@@ -415,6 +487,7 @@ def build_dataloaders(cfg: Config):
             tensors[f"imgs_test_{subj}"], clips[f"clip_test_{subj}"],
             subject_id=subj, augment=False, cfg=cfg,
             fmri_mu=te_mu, fmri_std=te_std,
+            clip_patches=te_cp,
         ))
 
     train_set = ConcatDataset(train_sets)
