@@ -18,6 +18,7 @@ class Config:
     data_dir: Path = Path("./mindeyev2_cache")
     tensor_cache: str = "all_subjects_tensors.pt"
     clip_cache: str = "all_subjects_clip.pt"
+    clip_patch_cache: str = "all_subjects_clip_patches.pt"  # Phase 2: ViT-L/14 patch tokens
     latent_cache: str = "all_subjects_latents.pt"
     subjects: List[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6, 7, 8])
     img_size: int = 256
@@ -157,9 +158,10 @@ class Config:
 
 
 def load_config(path: str | os.PathLike | None = None) -> Config:
-    """Load config.yaml. If path is None, uses repo-root config.yaml."""
+    """Load config.yaml. If path is None, checks BRAINFLOW_CONFIG env var, then repo-root config.yaml."""
     if path is None:
-        path = Path(__file__).resolve().parent.parent / "config.yaml"
+        env_path = os.environ.get("BRAINFLOW_CONFIG", "").strip()
+        path = Path(env_path) if env_path else Path(__file__).resolve().parent.parent / "config.yaml"
     path = Path(path)
     with open(path) as f:
         raw = yaml.safe_load(f) or {}

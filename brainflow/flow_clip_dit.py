@@ -160,9 +160,10 @@ class FlowCLIPDiT(nn.Module):
 
     def __init__(self, cfg: Config):
         super().__init__()
-        d = cfg.dit_dim
-        nh = cfg.dit_heads
-        depth = cfg.dit_depth
+        # Use clip_dit_* fields; fall back to dit_* for backward compat
+        d = getattr(cfg, "clip_dit_dim", cfg.dit_dim)
+        nh = getattr(cfg, "clip_dit_heads", cfg.dit_heads)
+        depth = getattr(cfg, "clip_dit_depth", cfg.dit_depth)
         bd = cfg.brain_dim
         td = cfg.time_emb_dim
         self.d = d
