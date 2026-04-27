@@ -1,0 +1,94 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 2 — Stage 2C: Inference sweep (CFG × solver × NFE)
+# Not a training config — used by scripts/solver_sweep.py
+#
+# Sweeps:
+#   CFG scale:  [1.0, 1.5, 2.0, 2.5, 3.0]  (independently per flow)
+#   Solver:     [euler, midpoint, heun, dpm_pp_2m, adaptive_rk45]
+#   NFE:        [5, 10, 25, 50]
+#
+# Produces a markdown table in BENCHMARK_NOTES.md (appendix material).
+#
+# Usage:
+#   python scripts/solver_sweep.py \
+#     --config configs/phase2_stage2c_sweep.yaml \
+#     --checkpoint outputs/phase2_stage2b/best.pt
+#
+# Multi-subject evaluation (default). For subj-1:
+#   subject_filter: [1]
+# ══════════════════════════════════════════════════════════════════════════════
+
+distribution:
+  backend: auto
+  init_method: "env://"
+
+data:
+  hf_repo: "pscotti/mindeyev2"
+  data_dir: "./mindeyev2_cache"
+  tensor_cache: "all_subjects_tensors.pt"
+  clip_cache: "all_subjects_clip.pt"
+  latent_cache: "all_subjects_latents.pt"
+  subjects: [1, 2, 3, 4, 5, 6, 7, 8]
+  # subject_filter: [1]   # uncomment for subj-1 evaluation
+  img_size: 256
+  max_train: 999999
+  max_test: 999999
+  download_threads: 4
+  force_rebuild: false
+
+dataloader:
+  batch_size_per_gpu: 16
+  num_workers: 4
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: false
+  drop_last_train: false
+  drop_last_test: false
+
+model:
+  enc_hidden: 1024
+  enc_blocks: 4
+  enc_drop: 0.25
+  n_tokens: 16
+  brain_dim: 768
+  token_drop_prob: 0.0
+  stochastic_depth: 0.05
+  clip_dim: 1024
+  clip_dit_dim: 512
+  clip_dit_depth: 6
+  clip_dit_heads: 8
+  time_emb_dim: 512
+  unet_base_ch: 128
+  attn_heads: 8
+  latent_ch: 4
+  latent_res: 32
+
+training:
+  training_stage: "2c"
+
+# ── Sweep grid (read by solver_sweep.py) ─────────────────────────────────────
+sweep:
+  # CFG scales tested independently for each flow (Flow_CLIP + Flow_VAE)
+  cfg_scales: [1.0, 1.5, 2.0, 2.5, 3.0]
+
+  # Solvers
+  solvers: [euler, midpoint, heun, dpm_pp_2m, adaptive_rk45]
+
+  # Number of function evaluations (NFE = number of ODE steps)
+  nfe_values: [5, 10, 25, 50]
+
+  # Adaptive RK45 tolerances
+  rk45_rtol: 1.0e-4
+  rk45_atol: 1.0e-4
+
+  # Number of test batches to evaluate each (solver, NFE) combination
+  eval_batches: 4
+
+output:
+  output_dir: "./outputs/phase2_stage2c_sweep"
+  experiment_name: "phase2_stage2c_sweep"
+
+wandb:
+  wandb_project: "brainflow-phase2"
+  wandb_run_name: "stage2c-solver-sweep"
+  wandb_mode: "offline"
