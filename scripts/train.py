@@ -104,6 +104,27 @@ def main():
     if is_main():
         print(f"Params: total={n_total/1e6:.1f}M | enc={n_enc/1e6:.1f}M | {flow_label}={n_flow/1e6:.1f}M")
 
+    # Warm-start from a Stage-1 prior pretrain checkpoint (encoder + clip_prior weights).
+    # Strict=False so unrelated keys (flow_dit / flow_unet / cls_to_latent / etc.) are skipped.
+    init_from = os.environ.get("INIT_FROM", "").strip()
+    if init_from:
+        if not Path(init_from).is_file():
+            if is_main():
+                print(f"[INIT_FROM] file not found: {init_from} — skipping warm start.")
+        else:
+            ckpt = torch.load(init_from, map_location="cpu")
+            ckpt = {k.replace("._orig_mod.", "."): v for k, v in ckpt.items()}
+            missing, unexpected = model.load_state_dict(ckpt, strict=False)
+            if is_main():
+                loaded = len(ckpt) - len(unexpected)
+                print(f"[INIT_FROM] loaded {loaded}/{len(ckpt)} tensors from {init_from}")
+                if unexpected:
+                    print(f"[INIT_FROM]   unexpected (skipped): {len(unexpected)} keys "
+                          f"e.g. {unexpected[:3]}")
+                if missing:
+                    print(f"[INIT_FROM]   missing (kept random init): {len(missing)} keys "
+                          f"e.g. {missing[:3]}")
+
     if is_dist():
         # B3: find_unused_parameters=False + static_graph for throughput.
         # Shared input_proj (A.4) means all params receive gradients every step.
