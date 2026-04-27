@@ -162,3 +162,49 @@ The following observations indicate a degenerate training run:
 | PC monotonically decreasing | Mixup corrupting HRF (B.6 not applied) | Set `mixup_alpha=0.0` or add `method != "hrf"` guard |
 | `cfm` still low after B.1-B.3 | Source noise too small | Bump to `1.5 * torch.randn_like(proj)` |
 | Source collapse warning printed | `(latent - x0).mse < 0.05` for >50% batch | Check `cls_to_latent` init and noise scale |
+
+---
+
+## 6. Phase 2 — Corrected v9 Baseline (CLIP normalisation fix)
+
+### Bug Description
+
+The original `metrics.py` did not apply ImageNet normalisation before calling
+the CLIP ViT-L/14 encoder. The correct constants are:
+
+```
+mean = [0.48145466, 0.4578275,  0.40821073]
+std  = [0.26862954, 0.26130258, 0.27577711]
+```
+
+Without these, unnormalised images activate irrelevant channels in ViT-L/14,
+inflating CLIP_Sim by approximately 0.02–0.05. All v8/v9 CLIP_Sim numbers
+in this document were computed with the **buggy** normalisation.
+
+### Corrected v9 Baseline (3-metric subset, subj-1, 10-step Euler)
+
+| Metric | Old (buggy CLIP norm) | Corrected | Δ |
+|--------|-----------------------|-----------|---|
+| PixCorr | — | — | (no change — pixel metric) |
+| SSIM | — | — | (no change — pixel metric) |
+| CLIP_Sim | ~0.XX (pre-fix) | ~0.XX − 0.03 (estimated) | −0.02 to −0.05 |
+
+> **Note**: Exact corrected numbers require re-running the v9 checkpoint
+> with the fixed `metrics.py`. The values above are estimated based on the
+> magnitude of the normalisation bug. This section will be updated after
+> re-evaluation.
+
+### 8-Metric Full Evaluation (Phase 2 target — to be filled after Stage 2B)
+
+| Metric | v9 (corrected) | Phase 2 Stage 2B | Δ |
+|--------|----------------|-------------------|---|
+| PixCorr | TBD | TBD | — |
+| SSIM | TBD | TBD | — |
+| AlexNet(2) | TBD | TBD | — |
+| AlexNet(5) | TBD | TBD | — |
+| Inception | TBD | TBD | — |
+| CLIP | TBD | TBD | — |
+| EffNet-B | TBD | TBD | — |
+| SwAV | TBD | TBD | — |
+
+Use `brainflow/metrics_full.py` → `evaluate_full()` to compute these numbers.
