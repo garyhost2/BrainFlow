@@ -59,13 +59,13 @@ export PRIOR_BLOCKS=8
 export LAMBDA_ALIGN=1.0
 export LAMBDA_PRIOR=1.0
 
-# No VAE/UNet → can use a much larger batch
-export BATCH_SIZE_PER_GPU=128
+# No VAE/UNet → large batch is fine, but use fp32 for stability (V100 has no bf16,
+# fp16 + GradScaler diverged on the CLIP-space CFM).
+export BATCH_SIZE_PER_GPU=64
 export GRAD_ACCUM=1
 export NUM_EPOCHS=80         # prior typically converges fast
-
-# Slightly higher LR than full training (smaller model, no grad-clip pressure from VAE loss)
-# export LR=2e-4
+export USE_AMP=0             # disable AMP → fp32 forward/backward
+export LR=1e-4               # conservative LR matched to fp32
 
 torchrun \
     --standalone \

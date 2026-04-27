@@ -117,6 +117,11 @@ class PriorOnlyModel(nn.Module):
 
         loss_prior = self.clip_prior.flow_loss(clip_emb, cls_emb)
 
+        # Sanity: NaN guard on losses (kills the run cleanly instead of silently NaN'ing)
+        if not torch.isfinite(loss_prior) or not torch.isfinite(loss_align):
+            raise RuntimeError(
+                f"NaN/Inf in losses: align={loss_align.item()} prior={loss_prior.item()}")
+
         loss = self.lambda_align * loss_align + self.lambda_prior * loss_prior
         return {
             "loss": loss,
@@ -204,8 +209,13 @@ def main():
     if device.type == "cuda":
         cc = torch.cuda.get_device_capability(device)
         use_bf16 = (cc[0] >= 8)
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and not use_bf16))
+    # NaN-prone with fp16 + large batch on tiny CLIP-space CFM. Allow opt-out via env.
+    use_amp = os.environ.get("USE_AMP", "0") == "1"
+    scaler = torch.cuda.amp.GradScaler(
+        enabled=(use_amp and device.type == "cuda" and not use_bf16))
     autocast_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    if is_main():
+        print(f"AMP enabled={use_amp} bf16={use_bf16}")
 
     use_wandb = False
     if is_main() and cfg.wandb_mode != "disabled":
@@ -239,8 +249,9 @@ def main():
                     disable=not is_main(), mininterval=1.0, miniters=50)
 
         for bi, batch in enumerate(pbar):
-            with torch.cuda.amp.autocast(enabled=device.type == "cuda",
-                                         dtype=autocast_dtype):
+            with torch.cuda.amp.autocast(
+                    enabled=(use_amp and device.type == "cuda"),
+                    dtype=autocast_dtype):
                 ld = raw_model.training_step(batch, device)
                 loss = ld["loss"] / cfg.grad_accum
             scaler.scale(loss).backward()
