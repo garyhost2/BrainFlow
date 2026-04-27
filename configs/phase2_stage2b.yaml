@@ -1,0 +1,124 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 2 — Stage 2B: Joint fine-tune with ramped clip_sample_prob
+# ~25h budget on 2×V100 32GB
+#
+# Goal: Fine-tune the full hierarchical pipeline:
+#   BrainEncoder (unfrozen) → Flow_CLIP DiT → CLIP tokens → Flow_VAE UNet
+#
+# clip_sample_prob is linearly ramped from 0 → 0.5 over the first 30% of
+# epochs to mitigate exposure bias (the VAE flow must handle imperfect CLIP
+# tokens at inference time).
+#
+# Usage:
+#   python -m scripts.train --config configs/phase2_stage2b.yaml \
+#     --resume outputs/phase2_stage2a/best.pt
+#
+# Multi-subject training (default). For subj-1 specialist, uncomment:
+#   subject_filter: [1]
+# ══════════════════════════════════════════════════════════════════════════════
+
+distribution:
+  backend: auto
+  init_method: "env://"
+
+data:
+  hf_repo: "pscotti/mindeyev2"
+  data_dir: "./mindeyev2_cache"
+  tensor_cache: "all_subjects_tensors.pt"
+  clip_cache: "all_subjects_clip.pt"
+  latent_cache: "all_subjects_latents.pt"
+  subjects: [1, 2, 3, 4, 5, 6, 7, 8]
+  # subject_filter: [1]   # uncomment for subj-1 specialist fine-tuning
+  img_size: 256
+  max_train: 999999
+  max_test: 999999
+  download_threads: 4
+  force_rebuild: false
+
+dataloader:
+  batch_size_per_gpu: 24
+  num_workers: 4
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+  drop_last_train: true
+  drop_last_test: false
+
+model:
+  # BrainEncoder (unfrozen in Stage 2B)
+  enc_hidden: 1024
+  enc_blocks: 4
+  enc_drop: 0.25
+  n_tokens: 16
+  brain_dim: 768
+  token_drop_prob: 0.05
+  stochastic_depth: 0.05
+
+  # Flow_CLIP DiT
+  clip_dim: 1024
+  clip_dit_dim: 512
+  clip_dit_depth: 6
+  clip_dit_heads: 8
+  time_emb_dim: 512
+
+  # Flow_VAE UNet
+  unet_base_ch: 128
+  attn_heads: 8
+  latent_ch: 4
+  latent_res: 32
+
+training:
+  training_stage: "2b"
+  num_epochs: 150
+  grad_accum: 4
+  lr: 5e-5              # lower LR for fine-tuning
+  warmup_epochs: 5
+  min_lr: 1e-6
+  grad_clip: 1.0
+  weight_decay: 0.05
+  infonce_temp: 0.07
+
+  # VFM objectives
+  flow_objective: "vfm"
+  lambda_cos: 0.1
+  lambda_cls: 0.1
+  lambda_clip_flow: 0.5   # weight of Flow_CLIP loss relative to Flow_VAE
+
+  # VAE flow loss weights
+  lambda_align: 0.1
+  lambda_cfm: 1.0
+  lambda_percep: 0.0
+  percep_loss: "none"
+  sigma_min: 1.0e-4
+  cfg_drop_prob: 0.10
+  cfg_scale: 2.0
+  fmri_noise_std: 0.05
+  fmri_mask_prob: 0.0
+  mixup_alpha: 0.0
+  ema_decay: 0.999
+  ema_start: 2000
+  eval_freq: 5
+  eval_batches: 32
+  patience: 25
+  min_epochs: 60
+  log_every_n_steps: 50
+
+  # Exposure bias mitigation: ramp clip_sample_prob 0 → 0.5 over first 30%
+  # of epochs.  At epoch k:
+  #   clip_sample_prob = min(clip_sample_prob_max, k / (clip_ramp_frac * num_epochs))
+  clip_sample_prob_max: 0.5
+  clip_ramp_frac: 0.30
+
+inference:
+  ode_steps: 20
+  eval_ode_steps: 10
+  eval_solver: "euler"
+
+output:
+  output_dir: "./outputs/phase2_stage2b"
+  experiment_name: "phase2_stage2b"
+
+wandb:
+  wandb_project: "brainflow-phase2"
+  wandb_run_name: "stage2b-joint-finetune"
+  wandb_mode: "offline"

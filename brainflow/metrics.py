@@ -6,6 +6,12 @@ import torch
 import torch.nn.functional as F
 from scipy.stats import pearsonr
 
+# ImageNet normalization constants for CLIP preprocessing.
+# ViT-L/14 (openai) was trained with these exact values.
+# Using wrong mean/std breaks all CLIP-based metrics (phase-2 bugfix §0).
+_CLIP_MEAN = torch.tensor([0.48145466, 0.4578275, 0.40821073])
+_CLIP_STD  = torch.tensor([0.26862954, 0.26130258, 0.27577711])
+
 
 def pixel_correlation(pred, target):
     p = pred.flatten(1).cpu().numpy()
@@ -46,6 +52,23 @@ def _get_clip(device):
 
 
 @torch.no_grad()
+def _clip_preprocess(images: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """Resize to 224×224 and apply CLIP ImageNet normalisation.
+
+    Args:
+        images: (B, 3, H, W) float tensor in [0, 1]
+        device: target device
+
+    Returns:
+        (B, 3, 224, 224) normalised tensor
+    """
+    imgs_224 = F.interpolate(images.cpu(), 224, mode="bilinear", align_corners=False)
+    mean = _CLIP_MEAN.view(1, 3, 1, 1)
+    std  = _CLIP_STD.view(1, 3, 1, 1)
+    return ((imgs_224 - mean) / std).to(device)
+
+
+@torch.no_grad()
 def evaluate(model, vae, loader, device, cfg, n_batches=9999,
              n_steps=None, solver=None):
     """Evaluate model on loader.
@@ -74,8 +97,8 @@ def evaluate(model, vae, loader, device, cfg, n_batches=9999,
         pi = pi.clamp(0, 1)
         pcs.append(pixel_correlation(pi, images))
         sss.append(ssim_pytorch(pi.cpu(), images.cpu()))
-        pi_r = F.interpolate(pi.cpu(), 224, mode="bilinear", align_corners=False).to(device)
-        gt_r = F.interpolate(images.cpu(), 224, mode="bilinear", align_corners=False).to(device)
+        pi_r = _clip_preprocess(pi, device)
+        gt_r = _clip_preprocess(images, device)
         ep = F.normalize(clip_enc.encode_image(pi_r).float(), dim=-1)
         et = F.normalize(clip_enc.encode_image(gt_r).float(), dim=-1)
         css.append(float((ep * et).sum(-1).mean()))
