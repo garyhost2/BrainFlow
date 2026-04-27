@@ -10,6 +10,7 @@ This guide explains how to run multiple BrainFlow experiments in parallel to com
 4. **v6** - Enhanced architecture: 64 tokens + LPIPS (weight=0.15)
 5. **v7** - Compact model: 64 tokens + smaller UNet (192 base_ch, 6 enc blocks)
 6. **v8** - MindEye-v2 quality target: 32 tokens + CLIPPriorHead + pixel L1 (target: PC ≥ 0.32)
+7. **v9** - Phase 1+2 SOTA push: 64 tokens + CLIPPriorHead + rebalanced losses + LPIPS + accurate eval (target: PC ~0.18–0.22, CLIP ~0.85–0.90)
 
 ## Prerequisites
 
@@ -48,6 +49,7 @@ cd ~/BrainFlow
 ./launch_experiment.sh v6
 ./launch_experiment.sh v7
 ./launch_experiment.sh v8   # new: targets MindEye-v2 level quality
+./launch_experiment.sh v9   # new: Phase 1+2 SOTA push (64 tokens + rebalanced losses)
 ```
 
 The script automatically:
@@ -133,7 +135,68 @@ sbatch slurm/train.sbatch
   - λ_align: 0.2 (balanced alignment)
 - **Expected**: After 60 epochs on subj-1: PC ≥ 0.32, SSIM ≥ 0.42, CLIP ≥ 0.94
 
-## HRF Experiment Notes
+### V9 Experiment (Phase 1+2 SOTA Push)
+
+V9 incorporates all Phase 1 and Phase 2 improvements identified in the MC experiment audit.
+The baseline MC run at epoch 45 showed PC=0.090, SSIM=0.334, CLIP=0.740 — all significantly
+below SOTA (~0.35, ~0.42, ~0.94 respectively). V9 fixes the root causes systematically.
+
+- **Loss**: CFM (0.5×) + InfoNCE (0.8×) + CLIPPrior (0.3×) + LPIPS (0.15×)
+- **Architecture**: 64 tokens + deeper encoder (6 blocks) + CLIPPriorHead
+- **Method**: `baseline` (UNet backbone + CLIPPriorHead — not full DiT)
+- **Goal**: PC ~0.18–0.22, SSIM ~0.38–0.42, CLIP ~0.85–0.90
+
+#### What each change does and why
+
+| Change | Was | Now | Why |
+|--------|-----|-----|-----|
+| `use_clip_prior` | `False` | `True` | THE most important fix — forces semantic alignment via CLIPPriorHead |
+| `lambda_prior` | — | `0.3` | Supervision weight for CLIPPriorHead cosine loss |
+| `lambda_cfm` | `1.0` | `0.5` | CFM dominated at 9:1 over InfoNCE; must be balanced |
+| `lambda_align` | `0.2` | `0.8` | InfoNCE must compete with CFM to learn semantics first |
+| `infonce_temp` | `0.07` | `0.04` | Harder negatives = stronger contrastive signal |
+| `cfg_scale` | `2.0` | `6.0` | Critical for CLIP similarity at inference (SOTA uses 5–10) |
+| `cfg_drop_prob` | `0.10` | `0.15` | More unconditional training to support high CFG scale |
+| `n_tokens` | `16` | `64` | 4× richer brain representation; was a severe bottleneck |
+| `enc_blocks` | `4` | `6` | Deeper encoder extracts richer fMRI features |
+| `percep_loss` | `"none"` | `"lpips"` | Pixel-quality gradient signal; explains stagnant SSIM/PC |
+| `lambda_percep` | — | `0.15` | LPIPS weight |
+| `eval_ode_steps` | `10` | `25` | 10-step Euler systematically underestimates all metrics |
+| `eval_solver` | `"euler"` | `"midpoint"` | Strictly better accuracy at same NFE |
+| `ode_steps` | `20` | `30` | Better inference quality |
+
+#### How to launch
+
+```bash
+./launch_experiment.sh v9
+```
+
+Or directly via Slurm:
+
+```bash
+sbatch slurm/train_mc_xl_v9_v100_32gb.sbatch
+```
+
+#### Checkpoint continuity
+
+Existing baseline/v6/v7/v8 checkpoints can be continued with `strict=False`.
+`CLIPPriorHead` and `clip_to_brain` Linear are new parameters (not in old checkpoints),
+but all other weights are compatible. The rest of the encoder/UNet architecture is unchanged.
+
+```python
+model.load_state_dict(torch.load("outputs/baseline/best_combined_v5.pt"), strict=False)
+```
+
+#### Expected metric trajectory
+
+| Epoch | PC (expected) | SSIM (expected) | CLIP (expected) |
+|-------|---------------|-----------------|-----------------|
+| Baseline EP45 | 0.090 | 0.334 | 0.740 |
+| V9 EP15 | ~0.10–0.13 | ~0.34–0.37 | ~0.79–0.83 |
+| V9 EP30 | ~0.14–0.17 | ~0.36–0.40 | ~0.83–0.87 |
+| V9 EP60 | ~0.18–0.22 | ~0.38–0.42 | ~0.85–0.90 |
+
+
 
 The `hrf` method (`METHOD=hrf`) requires several fixes that are now applied to
 prevent metric collapse (cfm loss → 0 while PC stagnates or falls):
