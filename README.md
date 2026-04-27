@@ -1,8 +1,10 @@
-# BrainFlow v5 — fMRI → Image Reconstruction (Multi-subject CFM)
+# BrainFlow v5 — fMRI → Image Reconstruction (Multi-subject CFM + VFM)
 
 End-to-end pipeline for reconstructing seen images from fMRI on the
-**MindEyeV2 / NSD** dataset using **Conditional Flow Matching** in the
-SD-VAE latent space.
+**MindEyeV2 / NSD** dataset using **Conditional Flow Matching** (v5) and
+**Variational Flow Matching** (v5.2 / Phase 2) in the SD-VAE latent space.
+
+### Phase 1 Architecture (v5)
 
 ```
 fMRI (per-subject voxels)
@@ -15,6 +17,40 @@ FlowUNet velocity field (~120M)  ◄─── Euler integration (20 steps, CFG=2
    │
    ▼
 frozen SD-VAE decoder  →  256×256 image
+```
+
+### Phase 2 Architecture (v5.2 — Hierarchical VFM)
+
+```
+fMRI (per-subject voxels)
+   │  per-subject Linear projection
+   ▼
+BrainEncoder (MLP + stochastic depth)
+   │  → N context tokens (B, N, 768)  +  CLS (B, 768)
+   ├──────────────────────────────────────────┐
+   ▼                                          ▼
+Flow_CLIP DiT  ←──── VFM objective ────   brain tokens
+   │  16×16×1024 CLIP patch-token grid
+   │  (ViT-L/14, CLS dropped from flow)
+   ▼
+CLIP patch tokens  (B, 256, 1024)
+   │  clip_context_proj → brain_dim
+   ▼
+Flow_VAE UNet  ◄──── VFM or CFM ────  brain tokens + CLIP tokens
+   │  parallel brain + CLIP cross-attention
+   │  backward-compat: clip_ctx=None → original behavior
+   ▼
+frozen SD-VAE decoder  →  256×256 image
+```
+
+**`flow_objective` flag** (in `config.yaml` or any phase2 YAML):
+- `flow_objective: "cfm"` — standard CFM MSE loss (v5 baseline, default)
+- `flow_objective: "vfm"` — Variational Flow Matching (rg-vfm, ICLR 2026)
+
+```yaml
+training:
+  flow_objective: "vfm"   # or "cfm" for ablation
+  lambda_cos: 0.1         # cosine loss weight (Flow_CLIP only)
 ```
 
 ## Highlights — v5

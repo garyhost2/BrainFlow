@@ -111,6 +111,41 @@ class Config:
     prior_dim: int = 512         # CLIPPrior hidden dim
     prior_blocks: int = 3        # CLIPPrior residual block count
 
+    # ── Phase 2: VFM + Flow_CLIP + hierarchical conditioning ──────────────────
+    # VFM objective toggle: "cfm" | "vfm"
+    # "cfm" reproduces the existing CFM training loss exactly.
+    # "vfm" uses Variational Flow Matching (rg-vfm, ICLR 2026).
+    flow_objective: str = "cfm"
+
+    # Flow_CLIP DiT hyperparameters
+    # clip_dit_dim, clip_dit_depth, clip_dit_heads control the CLIP-space DiT.
+    clip_dit_dim: int = 512
+    clip_dit_depth: int = 6
+    clip_dit_heads: int = 8
+    # Cosine + MSE hybrid loss weight (lambda_cos * cosine_loss)
+    lambda_cos: float = 0.1
+    # Weight of auxiliary CLS head loss
+    lambda_cls: float = 0.1
+    # Weight of Flow_CLIP loss in the joint objective
+    lambda_clip_flow: float = 0.2
+
+    # Hierarchical conditioning: Flow_CLIP → Flow_VAE
+    # Probability of sampling from Flow_CLIP (vs. teacher-forcing true CLIP tokens)
+    # during Stage 2B joint training.  Linearly ramped 0 → clip_sample_prob_max
+    # over the first clip_ramp_frac * num_epochs epochs.
+    clip_sample_prob_max: float = 0.5
+    clip_ramp_frac: float = 0.3   # fraction of epochs over which to ramp
+
+    # Stage selector: "2a" | "2b" | "2c"
+    # 2a: Flow_CLIP only, BrainEncoder frozen
+    # 2b: joint fine-tune, ramped clip_sample_prob
+    # 2c: inference sweep (CFG x solver x NFE)
+    training_stage: str = "2b"
+
+    # Subject filter (for specialist fine-tuning)
+    # Set to [] for multi-subject training (default).
+    subject_filter: List[int] = field(default_factory=list)
+
     # Output
     output_dir: Path = Path("./outputs")
     experiment_name: str = "baseline"

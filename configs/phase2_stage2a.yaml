@@ -1,0 +1,119 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 2 — Stage 2A: Flow_CLIP only, BrainEncoder frozen
+# ~10h budget on 2×V100 32GB
+#
+# Goal: Train the Flow_CLIP DiT to map fMRI brain tokens → CLIP patch tokens.
+# BrainEncoder is frozen (loaded from a v9 checkpoint).
+# Verify: cosine similarity between sampled and ground-truth CLIP tokens > 0.5
+# by end of stage.
+#
+# Usage:
+#   python -m scripts.train --config configs/phase2_stage2a.yaml
+#
+# Multi-subject training (default). To train a subject-1 specialist, uncomment:
+#   subject_filter: [1]
+# ══════════════════════════════════════════════════════════════════════════════
+
+distribution:
+  backend: auto
+  init_method: "env://"
+
+data:
+  hf_repo: "pscotti/mindeyev2"
+  data_dir: "./mindeyev2_cache"
+  tensor_cache: "all_subjects_tensors.pt"
+  clip_cache: "all_subjects_clip.pt"
+  latent_cache: "all_subjects_latents.pt"
+  subjects: [1, 2, 3, 4, 5, 6, 7, 8]
+  # subject_filter: [1]   # uncomment for subj-1 specialist fine-tuning
+  img_size: 256
+  max_train: 999999
+  max_test: 999999
+  download_threads: 4
+  force_rebuild: false
+
+dataloader:
+  batch_size_per_gpu: 32
+  num_workers: 4
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+  drop_last_train: true
+  drop_last_test: false
+
+model:
+  # BrainEncoder (frozen in Stage 2A)
+  enc_hidden: 1024
+  enc_blocks: 4
+  enc_drop: 0.25
+  n_tokens: 16
+  brain_dim: 768
+  token_drop_prob: 0.0     # no token dropout; encoder is frozen
+  stochastic_depth: 0.05
+
+  # Flow_CLIP DiT
+  clip_dim: 1024           # ViT-L/14 patch token dim (16×16 grid)
+  clip_dit_dim: 512
+  clip_dit_depth: 6
+  clip_dit_heads: 8
+  time_emb_dim: 512
+
+  # Flow_VAE UNet (not trained in Stage 2A — kept for config completeness)
+  unet_base_ch: 128
+  attn_heads: 8
+  latent_ch: 4
+  latent_res: 32
+
+training:
+  training_stage: "2a"
+  num_epochs: 80
+  grad_accum: 2
+  lr: 1e-4
+  warmup_epochs: 5
+  min_lr: 1e-6
+  grad_clip: 1.0
+  weight_decay: 0.05
+  infonce_temp: 0.07
+
+  # VFM objective for Flow_CLIP
+  flow_objective: "vfm"    # "vfm" | "cfm" (cfm for ablation)
+  lambda_cos: 0.1          # cosine loss weight in CLIP token loss
+  lambda_cls: 0.1          # auxiliary CLS head loss weight
+  lambda_clip_flow: 1.0    # total Flow_CLIP loss weight
+
+  # Alignment loss (encoder still gets gradient from align loss even if frozen)
+  lambda_align: 0.0        # 0 in Stage 2A — encoder is frozen
+  lambda_cfm: 0.0          # VAE flow not trained in Stage 2A
+  lambda_percep: 0.0
+  percep_loss: "none"
+  sigma_min: 1.0e-4
+  cfg_drop_prob: 0.10
+  cfg_scale: 2.0
+  fmri_noise_std: 0.05
+  fmri_mask_prob: 0.0
+  mixup_alpha: 0.0
+  ema_decay: 0.999
+  ema_start: 1000
+  eval_freq: 5
+  eval_batches: 32
+  patience: 20
+  min_epochs: 30
+  log_every_n_steps: 50
+
+  # Clip sampling probability (not used in Stage 2A)
+  clip_sample_prob_max: 0.0
+  clip_ramp_frac: 0.0
+
+inference:
+  ode_steps: 20
+  eval_ode_steps: 10
+  eval_solver: "euler"
+
+output:
+  output_dir: "./outputs/phase2_stage2a"
+  experiment_name: "phase2_stage2a"
+
+wandb:
+  wandb_project: "brainflow-phase2"
+  wandb_run_name: "stage2a-clip-flow"
+  wandb_mode: "offline"
