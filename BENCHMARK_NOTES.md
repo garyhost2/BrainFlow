@@ -55,9 +55,50 @@ on `proj(cls)`.
 
 ---
 
-## 2. The v8 Recipe (MindEye-v2 Level Quality)
+## 2. The v9 Recipe (Phase 1+2 SOTA Push)
 
-**Target**: PC ≥ 0.32, SSIM ≥ 0.42, CLIP_Sim ≥ 0.94 on subj-1 (60 epochs).
+**Motivation**: The baseline MC experiment (`brainflow_mc_xl_v100_32_282325.out`) plateaued
+at epoch 45 with PC=0.090, SSIM=0.334, CLIP=0.740 — far below SOTA (~0.35, ~0.42, ~0.94).
+The audit identified seven root causes, all addressed in v9.
+
+**Target**: PC ~0.18–0.22, SSIM ~0.38–0.42, CLIP_Sim ~0.85–0.90 (after 60 epochs).
+
+### Root Causes Fixed
+
+1. **CLIP prior disabled** (`use_clip_prior: false`) — no mechanism forces semantic alignment.
+   V9 enables `CLIPPriorHead`, the single most impactful change (+0.08–0.15 CLIP expected).
+2. **InfoNCE too weak vs CFM** (λ_align=0.2 vs λ_cfm=1.0) — 9:1 gradient imbalance meant
+   the model learned pixel texture before semantics. V9 sets λ_align=0.8, λ_cfm=0.5.
+3. **Only 16 brain tokens** — severe representational bottleneck. V9 uses 64 tokens (4×).
+4. **CFG scale too low** (`cfg_scale=2.0`) — SOTA uses 5–10. V9 sets 6.0.
+5. **Eval uses 10-step Euler** — systematically underestimates all metrics. V9 uses
+   25-step midpoint solver for accurate benchmarking.
+6. **Perceptual loss disabled** — no pixel-quality gradient. V9 adds LPIPS (λ=0.15).
+7. **InfoNCE temperature too warm** (`infonce_temp=0.07`) — V9 uses 0.04 for harder negatives.
+
+### Configuration
+
+```bash
+USE_V9=1 ./launch_experiment.sh v9
+# or:
+sbatch slurm/train_mc_xl_v9_v100_32gb.sbatch
+```
+
+### Expected Metric Trajectory vs Baseline
+
+| Epoch | Baseline PC | V9 PC (est.) | Baseline CLIP | V9 CLIP (est.) |
+|-------|-------------|--------------|---------------|----------------|
+| 15 | 0.091 | ~0.10–0.13 | 0.731 | ~0.79–0.83 |
+| 30 | 0.088 | ~0.14–0.17 | 0.738 | ~0.83–0.87 |
+| 45 | 0.087 | ~0.16–0.20 | 0.740 | ~0.85–0.89 |
+| 60 | — | ~0.18–0.22 | — | ~0.85–0.90 |
+
+The CLIP gain is driven primarily by enabling `CLIPPriorHead` and raising `cfg_scale`.
+The PC/SSIM gain is driven by rebalancing λ_align/λ_cfm, adding LPIPS, and 64 tokens.
+
+---
+
+## 3. The v8 Recipe (MindEye-v2 Level Quality)
 
 ### Configuration
 
@@ -102,7 +143,7 @@ Applied only when `t > 0.85`, where the velocity approximation
 
 ---
 
-## 3. Checkpoint Migration (per-subject input_proj → shared Linear)
+## 4. Checkpoint Migration (per-subject input_proj → shared Linear)
 
 Old checkpoints used a `nn.ModuleDict` with one `Linear(voxels_s, enc_hidden)`
 per subject. The new architecture uses a single `Linear(max_vox, enc_hidden)`
@@ -136,7 +177,7 @@ model.load_state_dict(new_sd, strict=False)
 
 ---
 
-## 4. Throughput Improvements Summary
+## 5. Throughput Improvements Summary
 
 | Change | File | Expected Speedup |
 |--------|------|-----------------|
@@ -152,7 +193,7 @@ model.load_state_dict(new_sd, strict=False)
 
 ---
 
-## 5. Regression Guard
+## 6. Regression Guard
 
 The following observations indicate a degenerate training run:
 
