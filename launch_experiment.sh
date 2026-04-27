@@ -1,24 +1,24 @@
 #!/bin/bash
 # Experiment launcher for BrainFlow v5 variants
 # Usage: ./launch_experiment.sh <experiment_name>
-# Where experiment_name is: baseline | lpips | l1 | v6 | v7 | v8
+# Where experiment_name is: baseline | lpips | l1 | v6 | v7 | v8 | v9
 
 set -e
 
 EXPERIMENT=$1
 if [ -z "$EXPERIMENT" ]; then
     echo "Usage: $0 <experiment_name>"
-    echo "Available experiments: baseline, lpips, l1, v6, v7, v8"
+    echo "Available experiments: baseline, lpips, l1, v6, v7, v8, v9"
     exit 1
 fi
 
 # Validate experiment name
 case $EXPERIMENT in
-    baseline|lpips|l1|v6|v7|v8)
+    baseline|lpips|l1|v6|v7|v8|v9)
         ;;
     *)
         echo "Error: Unknown experiment '$EXPERIMENT'"
-        echo "Available experiments: baseline, lpips, l1, v6, v7, v8"
+        echo "Available experiments: baseline, lpips, l1, v6, v7, v8, v9"
         exit 1
         ;;
 esac
@@ -57,6 +57,11 @@ case $EXPERIMENT in
         export PERCEP_LOSS="none"
         export LAMBDA_PERCEP="0.0"
         export USE_V8="1"
+        ;;
+    v9)
+        export PERCEP_LOSS="lpips"
+        export LAMBDA_PERCEP="0.15"
+        export USE_V9="1"
         ;;
     baseline)
         export PERCEP_LOSS="none"

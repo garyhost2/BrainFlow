@@ -9,7 +9,7 @@ def apply_env_overrides(cfg):
     This allows launching different experiments without modifying config.yaml.
     
     Environment variables:
-        EXPERIMENT_NAME: baseline | lpips | l1 | v6 | v7
+        EXPERIMENT_NAME: baseline | lpips | l1 | v6 | v7 | v8 | v9
         PERCEP_LOSS: none | lpips | l1
         LAMBDA_PERCEP: float (e.g., "0.1")
         BATCH_SIZE_PER_GPU: int (e.g., "32")
@@ -19,6 +19,7 @@ def apply_env_overrides(cfg):
         N_ENC_BLOCKS: int (e.g., "6")
         USE_V6: "1" to enable V6 enhancements (64 tokens + LPIPS)
         USE_V7: "1" to enable V7 enhancements (compact model: 64 tokens, 192 base_ch, 6 enc blocks)
+        USE_V9: "1" to enable V9 enhancements (Phase 1+2 SOTA push)
     """
     # Experiment name
     if "EXPERIMENT_NAME" in os.environ:
@@ -103,6 +104,29 @@ def apply_env_overrides(cfg):
         cfg.method = "baseline"    # CLIP prior + bigger tokens, standard Gaussian source
         if not cfg.experiment_name.startswith("v8"):
             cfg.experiment_name = "v8"
+
+    # V9 enhancements — Phase 1+2 SOTA push
+    # Activate with: USE_V9=1 ./launch_experiment.sh v9
+    if "USE_V9" in os.environ and os.environ["USE_V9"] == "1":
+        # Phase 1: Semantic alignment overhaul
+        cfg.use_clip_prior = True       # THE most important change — enables CLIPPriorHead
+        cfg.lambda_prior = 0.3          # CLIPPriorHead cosine supervision weight
+        cfg.lambda_cfm = 0.5            # was 1.0 — stop letting CFM dominate semantics
+        cfg.lambda_align = 0.8          # was 0.2 — InfoNCE must compete with CFM
+        cfg.infonce_temp = 0.04         # was 0.07 — harder negatives = stronger signal
+        cfg.cfg_scale = 6.0             # was 2.0 — critical for CLIP score at inference
+        cfg.cfg_drop_prob = 0.15        # was 0.10 — more unconditional training to support high CFG
+        # Phase 2: Representational capacity + perceptual quality
+        cfg.n_tokens = 64               # was 16 — 4× richer brain representation
+        cfg.enc_blocks = 6              # was 4 — deeper encoder
+        cfg.percep_loss = "lpips"       # was "none" — activate perceptual loss
+        cfg.lambda_percep = 0.15        # LPIPS weight
+        # Phase 2: Eval accuracy fix
+        cfg.eval_ode_steps = 25         # was 10 — more accurate ODE integration
+        cfg.eval_solver = "midpoint"    # was "euler" — strictly better accuracy at same NFE
+        cfg.ode_steps = 30              # was 20 — better inference quality
+        if not cfg.experiment_name.startswith("v9"):
+            cfg.experiment_name = "v9"
 
     # ── Method selection (NeurIPS experiments) ──
     # METHOD=baseline | hrf
