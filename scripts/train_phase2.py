@@ -229,13 +229,15 @@ def main():
 
     ema = EMA(raw_model, decay=cfg.ema_decay)
 
-    _optim_kwargs = dict(lr=cfg.lr, weight_decay=cfg.weight_decay,
+    _optim_kwargs = dict(lr=float(cfg.lr), weight_decay=float(cfg.weight_decay),
                          betas=(0.9, 0.999), eps=1e-8)
     try:
         optimizer = AdamW(
             [p for p in model.parameters() if p.requires_grad],
             fused=True, **_optim_kwargs)
-    except (TypeError, RuntimeError):
+    except (TypeError, RuntimeError) as _e:
+        if "fused" not in str(_e).lower() and "unexpected keyword" not in str(_e).lower():
+            raise
         optimizer = AdamW(
             [p for p in model.parameters() if p.requires_grad], **_optim_kwargs)
 
