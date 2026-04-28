@@ -43,7 +43,7 @@ dataloader:
 
 model:
   # BrainEncoder (frozen in Stage 2A)
-  enc_hidden: 1024
+  enc_hidden: 2048
   enc_blocks: 4
   enc_drop: 0.25
   n_tokens: 16
