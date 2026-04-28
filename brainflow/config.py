@@ -181,6 +181,19 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     if "subjects" in flat:
         flat["subjects"] = list(flat["subjects"])
 
+    # Force-coerce float fields — some PyYAML versions parse '1e-4' as a string
+    _float_fields = {
+        "lr", "min_lr", "weight_decay", "grad_clip", "ema_decay",
+        "lambda_align", "lambda_cfm", "lambda_percep", "lambda_cos",
+        "lambda_cls", "lambda_clip_flow", "sigma_min", "cfg_drop_prob",
+        "cfg_scale", "fmri_noise_std", "fmri_mask_prob", "mixup_alpha",
+        "infonce_temp", "clip_sample_prob_max", "clip_ramp_frac",
+        "stochastic_depth", "enc_drop", "token_drop_prob",
+    }
+    for key in _float_fields:
+        if key in flat and not isinstance(flat[key], float):
+            flat[key] = float(flat[key])
+
     valid = {f.name for f in Config.__dataclass_fields__.values()}
     flat = {k: v for k, v in flat.items() if k in valid}
     return Config(**flat)
