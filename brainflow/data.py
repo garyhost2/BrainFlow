@@ -295,6 +295,31 @@ def compute_or_load_clip_patches(tensors: dict, cfg: Config) -> dict:
     for p in m.parameters(): p.requires_grad_(False)
 
     @torch.no_grad()
+    def _vit_patch_tokens(visual, x: torch.Tensor) -> torch.Tensor:
+        """Unrolled ViT-L/14 forward → patch tokens (B, 196, 1024).
+
+        Compatible with all open_clip versions (avoids output_tokens kwarg
+        which was added in open_clip >= 2.20.0).
+        Applies ln_post to patch tokens only (no projection).
+        """
+        # Patch embedding: (B, C, H, W) → (B, 196, 1024)
+        x = visual.conv1(x)                                          # (B, 1024, 14, 14)
+        x = x.reshape(x.shape[0], x.shape[1], -1).permute(0, 2, 1) # (B, 196, 1024)
+        B = x.shape[0]
+        # Prepend CLS token
+        cls = visual.class_embedding.to(x.dtype).reshape(1, 1, -1).expand(B, -1, -1)
+        x = torch.cat([cls, x], dim=1)                               # (B, 197, 1024)
+        x = x + visual.positional_embedding.to(x.dtype)
+        x = visual.ln_pre(x)
+        # Transformer (open_clip uses LND layout internally)
+        x = x.permute(1, 0, 2)   # NLD → LND
+        x = visual.transformer(x)
+        x = x.permute(1, 0, 2)   # LND → NLD
+        # Apply ln_post to patch tokens only (drop CLS at index 0)
+        patch_tok = visual.ln_post(x[:, 1:, :])                      # (B, 196, 1024)
+        return patch_tok
+
+    @torch.no_grad()
     def _extract_patches(imgs, bs=16):
         """imgs: (N, 3, H, W) uint8. Returns (N, 256, 1024) fp16."""
         out = []
@@ -304,9 +329,8 @@ def compute_or_load_clip_patches(tensors: dict, cfg: Config) -> dict:
                 chunk = chunk.float() / 255.0
             b = F.interpolate(chunk, 224, mode="bilinear",
                               align_corners=False).to(device)
-            # output_tokens=True → (pooled_cls, patch_tokens: B × 196 × 1024)
-            _, patch_tok = m.visual(b, output_tokens=True)
-            # Zero-pad 196 → 256 along sequence dim so grid is exactly 16×16
+            patch_tok = _vit_patch_tokens(m.visual, b)               # (B, 196, 1024)
+            # Zero-pad 196 → 256 so the grid is exactly 16×16
             padded = F.pad(patch_tok.float(), (0, 0, 0, 256 - patch_tok.shape[1]))
             out.append(padded.cpu().half())
         return torch.cat(out)  # (N, 256, 1024) fp16
