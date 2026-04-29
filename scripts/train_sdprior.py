@@ -301,7 +301,7 @@ def main():
     if resume_path.is_file():
         resume = torch.load(resume_path, map_location="cpu")
         if "ema" in resume:
-            ema.load_state_dict(resume["ema"])
+            ema.shadow = {k: v.clone() for k, v in resume["ema"].items()}
 
     # ── WandB ─────────────────────────────────────────────────────────────────
     use_wandb = False
@@ -426,7 +426,7 @@ def main():
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
                 "scaler": scaler.state_dict(),
-                "ema": ema.state_dict(),
+                "ema": {k: v.clone() for k, v in ema.shadow.items()},
                 "best_cos": best_cos,
                 "clip_mean": raw_prior.clip_mean.cpu(),
                 "clip_std": raw_prior.clip_std.cpu(),
