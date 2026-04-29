@@ -226,17 +226,26 @@ def main():
 
     if resume_path.is_file():
         resume = torch.load(resume_path, map_location="cpu")
-        prior.load_state_dict(resume["prior"])
-        start_epoch = resume.get("epoch", 0) + 1
-        best_cos = resume.get("best_cos", 0.0)
-        step = resume.get("step", 0)
-        if prior.clip_mean.norm() < 1e-6 and "clip_mean" in resume:
-            prior.clip_mean.copy_(resume["clip_mean"])
-            prior.clip_std.copy_(resume["clip_std"])
-            prior._stats_fitted = True
-        if is_main():
-            print(f"[SDPrior] Resumed from epoch {start_epoch - 1}, "
-                  f"best_cos={best_cos:.4f}")
+        # Sanity check: reject corrupted (NaN) checkpoints
+        prior_sd = resume["prior"]
+        n_nan = sum(1 for v in prior_sd.values() if not torch.isfinite(v).all())
+        if n_nan > 0:
+            if is_main():
+                print(f"[SDPrior] WARNING: resume.pt has {n_nan} NaN tensors — "
+                      f"ignoring corrupt checkpoint, starting fresh.")
+            resume_path.unlink(missing_ok=True)
+        else:
+            prior.load_state_dict(prior_sd)
+            start_epoch = resume.get("epoch", 0) + 1
+            best_cos = resume.get("best_cos", 0.0)
+            step = resume.get("step", 0)
+            if prior.clip_mean.norm() < 1e-6 and "clip_mean" in resume:
+                prior.clip_mean.copy_(resume["clip_mean"])
+                prior.clip_std.copy_(resume["clip_std"])
+                prior._stats_fitted = True
+            if is_main():
+                print(f"[SDPrior] Resumed from epoch {start_epoch - 1}, "
+                      f"best_cos={best_cos:.4f}")
 
     n_prior = sum(p.numel() for p in prior.parameters() if p.requires_grad)
     if is_main():
