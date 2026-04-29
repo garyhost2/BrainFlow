@@ -89,9 +89,9 @@ def fit_clip_stats(prior: ClipPrior, train_loader, device: torch.device,
     for batch in train_loader:
         if n >= max_samples:
             break
-        c = batch.get("clip")
+        c = batch.get("clip_emb")
         if c is None:
-            raise RuntimeError("'clip' key missing from batch. Check data pipeline.")
+            raise RuntimeError("'clip_emb' key missing from batch. Check data pipeline.")
         clips.append(c.float())
         n += c.shape[0]
     all_clips = torch.cat(clips, dim=0)[:max_samples]  # (N, 768)
@@ -132,7 +132,7 @@ def evaluate(
             break
         fmri = batch["fmri"].to(device)
         subject = batch["subject"].to(device)
-        clip_gt = batch["clip"].to(device).float()   # (B, 768)
+        clip_gt = batch["clip_emb"].to(device).float()  # (B, 768)
 
         tokens, _ = brain_enc(fmri, subject)         # (B, N, D)
         sampled = prior.sample(
@@ -339,7 +339,7 @@ def main():
         for bi, batch in enumerate(pbar):
             fmri = batch["fmri"].to(device)
             subject = batch["subject"].to(device)
-            clip_gt = batch["clip"].to(device).float()  # (B, 768)
+            clip_gt = batch["clip_emb"].to(device).float()  # (B, 768)
 
             with torch.no_grad():
                 tokens, _ = brain_enc(fmri, subject)   # (B, N, D), frozen
