@@ -152,7 +152,7 @@ class ClipPrior(nn.Module):
         """Fit mean/std from a (N, clip_dim) tensor of training CLIP embeddings."""
         clip_embs = clip_embs.float()
         self.clip_mean.copy_(clip_embs.mean(0))
-        self.clip_std.copy_(clip_embs.std(0).clamp(min=1e-6))
+        self.clip_std.copy_(clip_embs.std(0).clamp(min=1e-2))
         self._stats_fitted = True
 
     def normalize(self, x: torch.Tensor) -> torch.Tensor:
@@ -208,17 +208,18 @@ class ClipPrior(nn.Module):
             u_t = x_1 - (1 - σ_min) * ε    (constant velocity field)
         """
         B = clip_emb.shape[0]
-        x1 = self.normalize(clip_emb)
-        eps = torch.randn_like(x1)
-        t = torch.rand(B, device=x1.device)
+        # Force float32 for CFM math — fp16 overflows when std is near zero
+        with torch.cuda.amp.autocast(enabled=False):
+            x1 = self.normalize(clip_emb.float())
+            eps = torch.randn_like(x1)
+            t = torch.rand(B, device=x1.device)
+            # Interpolate
+            xt = (1 - (1 - sigma_min) * t[:, None]) * eps + t[:, None] * x1
+            # Target velocity
+            ut = x1 - (1 - sigma_min) * eps
 
-        # Interpolate
-        xt = (1 - (1 - sigma_min) * t[:, None]) * eps + t[:, None] * x1
-        # Target velocity
-        ut = x1 - (1 - sigma_min) * eps
-
-        v_pred = self.forward(xt, t, ctx)
-        return F.mse_loss(v_pred, ut)
+        v_pred = self.forward(xt.to(clip_emb.dtype), t, ctx)
+        return F.mse_loss(v_pred.float(), ut)
 
     # ── ODE sampling ──────────────────────────────────────────────────────────
 
