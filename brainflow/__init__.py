@@ -15,6 +15,7 @@ from .vfm import vfm_loss, cfm_loss, velocity_from_posterior, flow_loss
 from .flow_clip_dit import FlowCLIPDiT
 from .flow_unet import FlowUNet as FlowUNetV2
 from .phase2_model import BrainFlowPhase2
+from .clip_prior import ClipPrior
 from .solvers import solve, make_t_grid
 
 __all__ = [
@@ -26,5 +27,6 @@ __all__ = [
     "FlowCLIPDiT",
     "FlowUNetV2",
     "BrainFlowPhase2",
+    "ClipPrior",
     "solve", "make_t_grid",
 ]
