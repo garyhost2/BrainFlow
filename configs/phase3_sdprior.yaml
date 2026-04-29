@@ -1,0 +1,96 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 3 SDPrior — ClipPrior: fMRI brain tokens → CLIP CLS embedding
+#
+# Goal: Train a ~20M-param CFM DiT to map brain tokens directly to CLIP CLS
+#       embeddings. BrainEncoder is frozen (loaded from mc_xl checkpoint).
+#       Decoder: frozen Karlo (kakaobrain/karlo-v1-alpha) applied at eval.
+#
+# Expected: CLIP_Cos ≈ 0.75-0.85 by epoch 100.
+#
+# Usage (single GPU):
+#   BRAINFLOW_CONFIG=configs/phase3_sdprior.yaml \
+#   INIT_FROM=outputs/mc_xl_v100_32/best_pc_v5.pt \
+#   python -m scripts.train_sdprior
+#
+# Usage (SLURM):
+#   sbatch slurm/train_phase3_sdprior_v100_32gb.sbatch
+# ══════════════════════════════════════════════════════════════════════════════
+
+distribution:
+  backend: auto
+  init_method: "env://"
+
+data:
+  hf_repo: "pscotti/mindeyev2"
+  data_dir: "./mindeyev2_cache"
+  tensor_cache: "all_subjects_tensors.pt"
+  clip_cache: "all_subjects_clip.pt"
+  # latent_cache not needed — no VAE decoding during SDPrior training
+  latent_cache: "all_subjects_latents.pt"
+  subjects: [1, 2, 3, 4, 5, 6, 7, 8]
+  img_size: 256
+  max_train: 999999
+  max_test: 999999
+  download_threads: 4
+  force_rebuild: false
+
+dataloader:
+  batch_size_per_gpu: 64
+  num_workers: 4
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+  drop_last_train: true
+  drop_last_test: false
+
+model:
+  # BrainEncoder (frozen — loaded from mc_xl checkpoint)
+  enc_hidden: 2048
+  enc_blocks: 4
+  enc_drop: 0.25
+  n_tokens: 16
+  brain_dim: 768            # token dim output by BrainEncoder
+  token_drop_prob: 0.0      # encoder is frozen, no dropout
+
+  # ClipPrior DiT architecture
+  clip_dim: 768             # ViT-L/14 CLS embedding dimension
+  prior_dim: 512            # internal DiT hidden dim (~20M params at depth=6)
+  prior_blocks: 6           # DiT depth
+  attn_heads: 8             # attention heads
+
+training:
+  training_stage: "sdprior"
+  num_epochs: 100
+  grad_accum: 1
+  lr: 2e-4
+  warmup_epochs: 5
+  min_lr: 1e-5
+  grad_clip: 1.0
+  weight_decay: 0.05
+
+  sigma_min: 1.0e-4
+  cfg_drop_prob: 0.10       # CFG null-context dropout during training
+  cfg_scale: 1.5            # CFG scale at eval sampling
+  fmri_noise_std: 0.0       # no fMRI augmentation; encoder frozen
+  fmri_mask_prob: 0.0
+  mixup_alpha: 0.0
+  ema_decay: 0.9995
+  ema_start: 500
+  eval_freq: 5
+  eval_batches: 32
+  patience: 20
+  min_epochs: 40
+
+inference:
+  ode_steps: 50
+  eval_ode_steps: 20
+  eval_solver: "euler"
+
+output:
+  output_dir: "./outputs/phase3_sdprior"
+  experiment_name: "phase3_sdprior"
+
+wandb:
+  wandb_project: "brainflow-phase3"
+  wandb_run_name: "sdprior-clip-cfm"
+  wandb_mode: "offline"
