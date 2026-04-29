@@ -385,7 +385,9 @@ def main():
             torch.cuda.empty_cache()
 
             # Eval with EMA weights if available
+            _backup_sd = None
             if step >= cfg.ema_start:
+                _backup_sd = {k: v.clone() for k, v in raw_prior.state_dict().items()}
                 ema.apply(raw_prior)
 
             eval_metrics = evaluate(
@@ -393,8 +395,8 @@ def main():
                 n_batches=cfg.eval_batches,
             )
 
-            if step >= cfg.ema_start:
-                ema.restore(raw_prior)
+            if _backup_sd is not None:
+                ema.restore(_backup_sd, raw_prior)
 
             all_metrics = {**train_metrics, **{f"eval/{k}": v for k, v in eval_metrics.items()}}
             print(f"[Ep {epoch:3d}] " +
@@ -406,11 +408,12 @@ def main():
                 best_cos = cos
                 epochs_no_improve = 0
                 if step >= cfg.ema_start:
+                    _best_backup = {k: v.clone() for k, v in raw_prior.state_dict().items()}
                     ema.apply(raw_prior)
                 torch.save(raw_prior.state_dict(),
                            cfg.output_dir / "best_clip_cos.pt")
                 if step >= cfg.ema_start:
-                    ema.restore(raw_prior)
+                    ema.restore(_best_backup, raw_prior)
                 print(f"  [SDPrior] New best CLIP_Cos={best_cos:.4f} → best_clip_cos.pt")
             else:
                 epochs_no_improve += 1
@@ -449,10 +452,11 @@ def main():
         torch.save(raw_prior.state_dict(), cfg.output_dir / "final_raw.pt")
 
         if step >= cfg.ema_start:
+            _final_backup = {k: v.clone() for k, v in raw_prior.state_dict().items()}
             ema.apply(raw_prior)
         torch.save(raw_prior.state_dict(), cfg.output_dir / "final_ema.pt")
         if step >= cfg.ema_start:
-            ema.restore(raw_prior)
+            ema.restore(_final_backup, raw_prior)
 
         print(f"[SDPrior] Training done. Best CLIP_Cos={best_cos:.4f}")
         print(f"  Outputs in {cfg.output_dir}")
