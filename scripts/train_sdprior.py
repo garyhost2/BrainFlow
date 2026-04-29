@@ -349,6 +349,11 @@ def main():
                 loss = raw_prior.flow_loss(clip_gt, tokens,
                                            sigma_min=float(cfg.sigma_min))
 
+            # Skip NaN/Inf steps (fp16 overflow recovery)
+            if not torch.isfinite(loss):
+                optimizer.zero_grad()
+                continue
+
             scaler.scale(loss / cfg.grad_accum).backward()
 
             if (bi + 1) % cfg.grad_accum == 0:

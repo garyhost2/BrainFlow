@@ -73,7 +73,8 @@ class _Block(nn.Module):
     def forward(self, x: torch.Tensor, ctx: torch.Tensor,
                 t_emb: torch.Tensor) -> torch.Tensor:
         # AdaLN modulation: 6 chunks → shift/scale for self, cross, mlp
-        ada = self.ada_norm(t_emb)  # (B, 6*dim)
+        # Clamp to prevent fp16 overflow (values > ~60k overflow float16)
+        ada = self.ada_norm(t_emb).clamp(-6, 6)  # (B, 6*dim)
         s1, g1, s2, g2, s3, g3 = ada.chunk(6, dim=-1)
 
         # Self-attention
