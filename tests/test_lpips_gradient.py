@@ -23,12 +23,13 @@ def test_lpips_path_keeps_gradient():
     cfg.enc_hidden = 64
     cfg.enc_blocks = 2
     cfg.brain_dim = 64
+    cfg.clip_dim = 64
     cfg.n_tokens = 8
     cfg.time_emb_dim = 64
     cfg.unet_base_ch = 32
     cfg.attn_heads = 4
     cfg.lambda_cfm = 0.0
-    cfg.lambda_align = 0.0
+    cfg.lambda_align = 0.1
     cfg.lambda_percep = 0.15
     cfg.percep_loss = "lpips"
     cfg.token_drop_prob = 0.0
