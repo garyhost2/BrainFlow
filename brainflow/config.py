@@ -17,9 +17,9 @@ class Config:
     hf_repo: str = "pscotti/mindeyev2"
     data_dir: Path = Path("./mindeyev2_cache")
     tensor_cache: str = "all_subjects_tensors.pt"
-    clip_cache: str = "all_subjects_clip.pt"
-    clip_patch_cache: str = "all_subjects_clip_patches.pt"  # Phase 2: ViT-L/14 patch tokens
-    latent_cache: str = "all_subjects_latents.pt"
+    clip_cache: str = "all_subjects_clip_v2.pt"
+    clip_patch_cache: str = "all_subjects_clip_patches_v2.pt"  # Phase 2: ViT-L/14 patch tokens
+    latent_cache: str = "all_subjects_latents_v2.pt"
     subjects: List[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6, 7, 8])
     img_size: int = 256
     max_train: int = 8859
@@ -62,8 +62,8 @@ class Config:
     infonce_temp: float = 0.07
     lambda_align: float = 0.1
     lambda_cfm: float = 1.0
-    lambda_percep: float = 0.1
-    percep_loss: str = "none"
+    lambda_percep: float = 0.15
+    percep_loss: str = "lpips"
     sigma_min: float = 1e-4
     cfg_drop_prob: float = 0.20
     cfg_scale: float = 2.0
@@ -196,4 +196,11 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
 
     valid = {f.name for f in Config.__dataclass_fields__.values()}
     flat = {k: v for k, v in flat.items() if k in valid}
-    return Config(**flat)
+    cfg = Config(**flat)
+    if (cfg.lambda_percep > 0) != (cfg.percep_loss != "none"):
+        raise ValueError(
+            "Invalid perceptual configuration: (lambda_percep > 0) must match "
+            "(percep_loss != 'none'). Set percep_loss='lpips' (or 'l1') when "
+            "lambda_percep > 0, or set percep_loss='none' with lambda_percep=0."
+        )
+    return cfg

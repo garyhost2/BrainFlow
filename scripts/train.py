@@ -67,6 +67,10 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
 
 
+def _trainable_params(module: nn.Module) -> int:
+    return sum(p.numel() for p in module.parameters() if p.requires_grad)
+
+
 def main():
     set_seed(42)
     cfg = load_config()
@@ -96,13 +100,17 @@ def main():
               f"Test batches/rank: {len(test_loader)}")
 
     model = BrainFlowV5(cfg, voxels).to(device)
-    n_total = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    n_enc = sum(p.numel() for p in model.brain_enc.parameters())
+    n_total = _trainable_params(model)
+    n_enc = _trainable_params(model.brain_enc)
     flow_module = model.flow_dit if cfg.method == "dit" else model.flow_unet
     flow_label = "dit" if cfg.method == "dit" else "unet"
-    n_flow = sum(p.numel() for p in flow_module.parameters())
+    n_flow = _trainable_params(flow_module)
     if is_main():
-        print(f"Params: total={n_total/1e6:.1f}M | enc={n_enc/1e6:.1f}M | {flow_label}={n_flow/1e6:.1f}M")
+        print("Trainable parameter counts:")
+        for name, submodule in model.named_children():
+            n_sub = _trainable_params(submodule)
+            print(f"  {name}: {n_sub:,}")
+        print(f"  total: {n_total:,}")
 
     # Warm-start from a Stage-1 prior pretrain checkpoint (encoder + clip_prior weights).
     # Strict=False so unrelated keys (flow_dit / flow_unet / cls_to_latent / etc.) are skipped.
