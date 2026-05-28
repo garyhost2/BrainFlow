@@ -783,8 +783,8 @@ class BrainFlowV5(nn.Module):
             mask = t > 0.85
             if mask.any():
                 pred_latent = (xt + vt * (1 - t_expand))[mask]
+                pred_imgs = vae.decode(pred_latent)           # [-1, 1]
                 with torch.no_grad():
-                    pred_imgs = vae.decode(pred_latent)           # [-1, 1]
                     gt_imgs_masked = batch["image"].to(device, non_blocking=True)[mask]
                     gt_imgs_masked = gt_imgs_masked * 2.0 - 1.0  # [0,1] → [-1,1] for LPIPS
                 loss_percep = percep_loss_fn(pred_imgs, gt_imgs_masked)

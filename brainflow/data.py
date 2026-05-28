@@ -1,6 +1,6 @@
 """Multi-subject MindEyeV2 data pipeline with DDP support."""
 from __future__ import annotations
-import os, io, gc, random
+import os, io, gc, random, subprocess
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -18,6 +18,10 @@ from tqdm.auto import tqdm
 from .config import Config
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
+_CACHE_FORMAT_V2 = "v2_imagenet_norm"
+_LATENT_CACHE_FORMAT_V2 = "v2_sdvae_scaled"
+_CLIP_MEAN = torch.tensor([0.48145466, 0.4578275, 0.40821073])
+_CLIP_STD = torch.tensor([0.26862954, 0.26130258, 0.27577711])
 
 
 
@@ -32,6 +36,50 @@ def world_size() -> int:
 
 def is_main() -> bool:
     return rank() == 0
+
+
+def _git_sha() -> str:
+    try:
+        root = Path(__file__).resolve().parent.parent
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=root, text=True
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def _v2_cache_meta() -> dict[str, str]:
+    return {
+        "format": _CACHE_FORMAT_V2,
+        "clip_model": "ViT-L-14",
+        "pretrained": "openai",
+        "git_sha": _git_sha(),
+    }
+
+
+def _assert_v2_cache(cache: Path, payload: dict) -> None:
+    meta = payload.get("_meta")
+    if not isinstance(meta, dict) or meta.get("format") != _CACHE_FORMAT_V2:
+        raise RuntimeError(
+            f"Cache format mismatch for {cache}. Expected _meta.format={_CACHE_FORMAT_V2!r}. "
+            f"Set force_rebuild: true to rebuild this cache."
+        )
+
+
+def _latent_cache_meta() -> dict[str, str]:
+    return {
+        "format": _LATENT_CACHE_FORMAT_V2,
+        "git_sha": _git_sha(),
+    }
+
+
+def _assert_latent_cache(cache: Path, payload: dict) -> None:
+    meta = payload.get("_meta")
+    if not isinstance(meta, dict) or meta.get("format") != _LATENT_CACHE_FORMAT_V2:
+        raise RuntimeError(
+            f"Cache format mismatch for {cache}. Expected _meta.format={_LATENT_CACHE_FORMAT_V2!r}. "
+            f"Set force_rebuild: true to rebuild this cache."
+        )
 
 
 # ─── HF download ──────────────────────────────────────────────────────────────
@@ -192,11 +240,14 @@ def compute_or_load_clip(tensors: dict, cfg: Config) -> dict:
         if is_main():
             print(f"✓ Loading CLIP cache: {cache}")
         out = torch.load(cache, map_location="cpu")
+        _assert_v2_cache(cache, out)
         if is_dist(): dist.barrier()
         return out
     if not is_main():
         if is_dist(): dist.barrier()
-        return torch.load(cache, map_location="cpu")
+        out = torch.load(cache, map_location="cpu")
+        _assert_v2_cache(cache, out)
+        return out
 
     import open_clip
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -214,6 +265,7 @@ def compute_or_load_clip(tensors: dict, cfg: Config) -> dict:
                 chunk = chunk.float() / 255.0
             b = F.interpolate(chunk, 224, mode="bilinear",
                               align_corners=False).to(device)
+            b = (b - _CLIP_MEAN.to(device).view(1, 3, 1, 1)) / _CLIP_STD.to(device).view(1, 3, 1, 1)
             e = F.normalize(m.encode_image(b).float(), dim=-1).cpu()
             out.append(e)
         return torch.cat(out)
@@ -223,6 +275,7 @@ def compute_or_load_clip(tensors: dict, cfg: Config) -> dict:
         print(f"CLIP encoding subj{subj:02d} …")
         res[f"clip_train_{subj}"] = _enc(tensors[f"imgs_train_{subj}"])
         res[f"clip_test_{subj}"] = _enc(tensors[f"imgs_test_{subj}"])
+    res["_meta"] = _v2_cache_meta()
     del m; gc.collect(); torch.cuda.empty_cache()
     torch.save(res, cache)
     print(f"✓ CLIP cache saved: {cache}")
@@ -238,11 +291,14 @@ def compute_or_load_latents(tensors: dict, cfg: Config) -> dict:
         if is_main():
             print(f"✓ Loading VAE latent cache: {cache}")
         out = torch.load(cache, map_location="cpu")
+        _assert_latent_cache(cache, out)
         if is_dist(): dist.barrier()
         return out
     if not is_main():
         if is_dist(): dist.barrier()
-        return torch.load(cache, map_location="cpu")
+        out = torch.load(cache, map_location="cpu")
+        _assert_latent_cache(cache, out)
+        return out
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     vae = FrozenVAE(cache_dir=cfg.data_dir / "hf_cache").to(device)
@@ -262,6 +318,7 @@ def compute_or_load_latents(tensors: dict, cfg: Config) -> dict:
         print(f"VAE encoding subj{subj:02d} …")
         res[f"lat_train_{subj}"] = _enc(tensors[f"imgs_train_{subj}"])
         res[f"lat_test_{subj}"] = _enc(tensors[f"imgs_test_{subj}"])
+    res["_meta"] = _latent_cache_meta()
     del vae; gc.collect(); torch.cuda.empty_cache()
     torch.save(res, cache)
     print(f"✓ VAE latent cache saved: {cache}")
@@ -281,11 +338,14 @@ def compute_or_load_clip_patches(tensors: dict, cfg: Config) -> dict:
         if is_main():
             print(f"✓ Loading CLIP patch cache: {cache}")
         out = torch.load(cache, map_location="cpu")
+        _assert_v2_cache(cache, out)
         if is_dist(): dist.barrier()
         return out
     if not is_main():
         if is_dist(): dist.barrier()
-        return torch.load(cache, map_location="cpu")
+        out = torch.load(cache, map_location="cpu")
+        _assert_v2_cache(cache, out)
+        return out
 
     import open_clip
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -329,6 +389,7 @@ def compute_or_load_clip_patches(tensors: dict, cfg: Config) -> dict:
                 chunk = chunk.float() / 255.0
             b = F.interpolate(chunk, 224, mode="bilinear",
                               align_corners=False).to(device)
+            b = (b - _CLIP_MEAN.to(device).view(1, 3, 1, 1)) / _CLIP_STD.to(device).view(1, 3, 1, 1)
             patch_tok = _vit_patch_tokens(m.visual, b)               # (B, 196, 1024)
             # Zero-pad 196 → 256 so the grid is exactly 16×16
             padded = F.pad(patch_tok.float(), (0, 0, 0, 256 - patch_tok.shape[1]))
@@ -342,6 +403,7 @@ def compute_or_load_clip_patches(tensors: dict, cfg: Config) -> dict:
             tensors[f"imgs_train_{subj}"])
         res[f"clip_patch_test_{subj}"] = _extract_patches(
             tensors[f"imgs_test_{subj}"])
+    res["_meta"] = _v2_cache_meta()
     del m; gc.collect(); torch.cuda.empty_cache()
     torch.save(res, cache)
     print(f"✓ CLIP patch cache saved: {cache}")

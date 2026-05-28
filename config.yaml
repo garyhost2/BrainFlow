@@ -10,8 +10,9 @@ data:
   hf_repo: "pscotti/mindeyev2"
   data_dir: "./mindeyev2_cache"
   tensor_cache: "all_subjects_tensors.pt"
-  clip_cache: "all_subjects_clip.pt"
-  latent_cache: "all_subjects_latents.pt"
+  clip_cache: "all_subjects_clip_v2.pt"
+  clip_patch_cache: "all_subjects_clip_patches_v2.pt"
+  latent_cache: "all_subjects_latents_v2.pt"
   subjects: [1, 2, 3, 4, 5, 6, 7, 8]   # train on ALL subjects
   img_size: 256
   max_train: 999999
@@ -54,8 +55,8 @@ training:
   infonce_temp: 0.07
   lambda_align: 0.2        # was 0.5 — InfoNCE was dominating
   lambda_cfm: 1.0
-  lambda_percep: 0.1           # weight for LPIPS/L1 loss (0.0 = disabled)
-  percep_loss: "none"          # none | lpips | l1
+  lambda_percep: 0.15          # weight for LPIPS/L1 loss (0.0 = disabled)
+  percep_loss: "lpips"         # none | lpips | l1
   sigma_min: 1.0e-4
   cfg_drop_prob: 0.10      # was 0.20
   cfg_scale: 2.0

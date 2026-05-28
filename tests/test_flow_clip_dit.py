@@ -17,6 +17,7 @@ def _make_cfg(flow_objective: str = "vfm") -> Config:
     cfg.dit_heads = 4
     cfg.time_emb_dim = 64
     cfg.brain_dim = 64
+    cfg.clip_dim = 32
     cfg.n_tokens = 8
     cfg.flow_objective = flow_objective
     cfg.lambda_cos = 0.1
@@ -28,7 +29,8 @@ def _make_batch(B: int = 2, device: str = "cpu"):
     torch.manual_seed(0)
     clip_grid = torch.randn(B, CLIP_TOKEN_DIM, CLIP_GRID_H, CLIP_GRID_W, device=device)
     brain_ctx = torch.randn(B, 8, 64, device=device)   # n_tokens=8, brain_dim=64
-    return clip_grid, brain_ctx
+    clip_cls = torch.randn(B, 32, device=device)
+    return clip_grid, brain_ctx, clip_cls
 
 
 class TestFlowCLIPDiTForward:
@@ -38,7 +40,7 @@ class TestFlowCLIPDiTForward:
         model = FlowCLIPDiT(cfg)
         model.eval()
         B = 2
-        clip_grid, brain_ctx = _make_batch(B)
+        clip_grid, brain_ctx, _ = _make_batch(B)
         t = torch.rand(B)
         out = model(clip_grid, t, brain_ctx)
         # VFM: 2× channels (mu + log_sigma)
@@ -51,7 +53,7 @@ class TestFlowCLIPDiTForward:
         model = FlowCLIPDiT(cfg)
         model.eval()
         B = 2
-        clip_grid, brain_ctx = _make_batch(B)
+        clip_grid, brain_ctx, _ = _make_batch(B)
         t = torch.rand(B)
         out = model(clip_grid, t, brain_ctx)
         assert out.shape == (B, CLIP_TOKEN_DIM, CLIP_GRID_H, CLIP_GRID_W), \
@@ -63,7 +65,7 @@ class TestFlowCLIPDiTForward:
         model = FlowCLIPDiT(cfg)
         model.train()
         B = 2
-        clip_grid, brain_ctx = _make_batch(B)
+        clip_grid, brain_ctx, _ = _make_batch(B)
         t = torch.rand(B)
         out = model(clip_grid, t, brain_ctx)
         loss = out.mean()
@@ -77,7 +79,7 @@ class TestFlowCLIPDiTForward:
         model = FlowCLIPDiT(cfg)
         model.train()
         B = 2
-        clip_grid, brain_ctx = _make_batch(B)
+        clip_grid, brain_ctx, _ = _make_batch(B)
         t = torch.rand(B)
         out = model(clip_grid, t, brain_ctx)
         loss = out.mean()
@@ -92,8 +94,8 @@ class TestFlowCLIPDiTFlowLoss:
         model = FlowCLIPDiT(cfg)
         model.train()
         B = 2
-        clip_grid, brain_ctx = _make_batch(B)
-        result = model.flow_loss(clip_grid, brain_ctx)
+        clip_grid, brain_ctx, clip_cls = _make_batch(B)
+        result = model.flow_loss(clip_grid, brain_ctx, clip_cls)
         assert "loss" in result
         assert result["loss"].dim() == 0
         assert not torch.isnan(result["loss"]), "VFM loss must not be NaN"
@@ -104,8 +106,8 @@ class TestFlowCLIPDiTFlowLoss:
         model = FlowCLIPDiT(cfg)
         model.train()
         B = 2
-        clip_grid, brain_ctx = _make_batch(B)
-        result = model.flow_loss(clip_grid, brain_ctx)
+        clip_grid, brain_ctx, clip_cls = _make_batch(B)
+        result = model.flow_loss(clip_grid, brain_ctx, clip_cls)
         assert "loss" in result
         assert result["loss"].dim() == 0
 
@@ -115,8 +117,8 @@ class TestFlowCLIPDiTFlowLoss:
         model = FlowCLIPDiT(cfg)
         model.train()
         B = 2
-        clip_grid, brain_ctx = _make_batch(B)
-        result = model.flow_loss(clip_grid, brain_ctx)
+        clip_grid, brain_ctx, clip_cls = _make_batch(B)
+        result = model.flow_loss(clip_grid, brain_ctx, clip_cls)
         result["loss"].backward()
         assert model.patch_embed.weight.grad is not None
 
@@ -138,7 +140,7 @@ class TestFlowCLIPDiTSampling:
         model = FlowCLIPDiT(cfg)
         model.eval()
         B = 2
-        _, brain_ctx = _make_batch(B)
+        _, brain_ctx, _ = _make_batch(B)
         with torch.no_grad():
             out = model.sample(brain_ctx, n_steps=2)
         assert out.shape == (B, CLIP_TOKEN_DIM, CLIP_GRID_H, CLIP_GRID_W)
@@ -148,7 +150,7 @@ class TestFlowCLIPDiTSampling:
         model = FlowCLIPDiT(cfg)
         model.eval()
         B = 2
-        _, brain_ctx = _make_batch(B)
+        _, brain_ctx, _ = _make_batch(B)
         with torch.no_grad():
             out = model.sample(brain_ctx, n_steps=5)
         assert not torch.any(torch.isnan(out)), "Sampled tokens must not contain NaN"
