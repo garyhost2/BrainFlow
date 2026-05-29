@@ -101,6 +101,7 @@ class BrainFlowPhase2(nn.Module):
     def _step_2a(self, batch: dict, device: torch.device) -> dict[str, torch.Tensor]:
         """Stage 2A: FlowCLIPDiT loss; BrainEncoder runs under no_grad."""
         clip_patches = batch["clip_patches"].to(device).float()  # (B, 256, 1024)
+        clip_cls = batch["clip_emb"].to(device).float()
         fmri = batch["fmri"].to(device)
         subject = batch["subject"].to(device)
 
@@ -108,13 +109,14 @@ class BrainFlowPhase2(nn.Module):
             tokens, _ = self.brain_enc(fmri, subject)
 
         clip_grid = self._to_clip_grid(clip_patches)          # (B, 1024, 16, 16)
-        loss_dict = self.flow_clip.flow_loss(clip_grid, tokens)
+        loss_dict = self.flow_clip.flow_loss(clip_grid, tokens, clip_cls)
         return loss_dict  # keys: loss, loss_mse, loss_cos, loss_cls
 
     def _step_2b(self, batch: dict, device: torch.device,
                  epoch: int) -> dict[str, torch.Tensor]:
         """Stage 2B: joint FlowCLIPDiT + FlowUNet with CFG drop & clip ramp."""
         clip_patches = batch["clip_patches"].to(device).float()  # (B, 256, 1024)
+        clip_cls = batch["clip_emb"].to(device).float()
         latents = batch["latent"].to(device)                     # (B, 4, 32, 32)
         fmri = batch["fmri"].to(device)
         subject = batch["subject"].to(device)
@@ -125,17 +127,20 @@ class BrainFlowPhase2(nn.Module):
 
         # ── FlowCLIPDiT loss ───────────────────────────────────────────────
         clip_grid = self._to_clip_grid(clip_patches)
-        clip_loss_dict = self.flow_clip.flow_loss(clip_grid, tokens)
+        clip_loss_dict = self.flow_clip.flow_loss(clip_grid, tokens, clip_cls)
 
         # ── Ramped clip_sample_prob ────────────────────────────────────────
         ramp_epochs = max(1, cfg.clip_ramp_frac * cfg.num_epochs)
         clip_sample_prob = min(cfg.clip_sample_prob_max,
                                epoch / ramp_epochs * cfg.clip_sample_prob_max)
 
-        if torch.rand(1).item() < clip_sample_prob:
+        sample_mask = torch.rand(B, device=device) < clip_sample_prob
+        if sample_mask.any():
             with torch.no_grad():
-                sampled = self.flow_clip.sample(tokens, n_steps=10, solver="euler")
-            clip_ctx = self._from_clip_grid(sampled)             # (B, 256, 1024)
+                sampled = self.flow_clip.sample(tokens[sample_mask], n_steps=10, solver="euler")
+            sampled_patches = self._from_clip_grid(sampled)
+            clip_ctx = clip_patches.clone()
+            clip_ctx[sample_mask] = sampled_patches
         else:
             clip_ctx = clip_patches                               # teacher-force GT
 

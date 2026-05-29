@@ -172,6 +172,7 @@ class FlowCLIPDiT(nn.Module):
         self.token_dim = CLIP_TOKEN_DIM
         self.flow_objective = getattr(cfg, "flow_objective", "vfm")
         self.lambda_cos = getattr(cfg, "lambda_cos", 0.1)
+        self.lambda_cls = getattr(cfg, "lambda_cls", 0.1)
         self.brain_dim = bd
 
         # Number of output channels: 2× for VFM (mu + log_sigma), 1× for CFM
@@ -209,7 +210,7 @@ class FlowCLIPDiT(nn.Module):
         nn.init.zeros_(self.final_proj.bias)
 
         # Auxiliary CLS head
-        self.cls_head = CLSHead(d, CLIP_TOKEN_DIM)
+        self.cls_head = CLSHead(d, cfg.clip_dim)
 
         # Learned null context embedding for classifier-free guidance
         self.null_tokens = nn.Parameter(
@@ -293,12 +294,14 @@ class FlowCLIPDiT(nn.Module):
 
     def flow_loss(self, clip_grid_gt: torch.Tensor,
                   brain_ctx: torch.Tensor,
+                  clip_cls_gt: torch.Tensor,
                   x0: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
         """Compute VFM/CFM loss for a batch of CLIP token grids.
 
         Args:
             clip_grid_gt:  ground-truth CLIP patch tokens (B, 1024, 16, 16)
             brain_ctx:     brain conditioning tokens (B, n_tokens, brain_dim)
+            clip_cls_gt:   ground-truth CLIP CLS embeddings (B, 768|1024)
             x0:            optional source noise; if None, drawn from N(0,I)
 
         Returns:
@@ -338,9 +341,9 @@ class FlowCLIPDiT(nn.Module):
         # We do a second forward to get the hidden state for the CLS head.
         # For efficiency, re-use the patch embed output (computed inside forward).
         # Here we compute it separately since forward() only returns raw output.
-        loss_cls = self._cls_head_loss(clip_grid_gt, brain_ctx, t)
+        loss_cls = self._cls_head_loss(clip_grid_gt, brain_ctx, clip_cls_gt, t)
 
-        total = loss_mse + self.lambda_cos * loss_cos + 0.1 * loss_cls
+        total = loss_mse + self.lambda_cos * loss_cos + self.lambda_cls * loss_cls
         return {
             "loss": total,
             "loss_mse": loss_mse,
@@ -350,6 +353,7 @@ class FlowCLIPDiT(nn.Module):
 
     def _cls_head_loss(self, clip_grid_gt: torch.Tensor,
                        brain_ctx: torch.Tensor,
+                       clip_cls_gt: torch.Tensor,
                        t: torch.Tensor) -> torch.Tensor:
         """Auxiliary CLS head loss (MSE + cosine on predicted CLS token).
 
@@ -359,14 +363,7 @@ class FlowCLIPDiT(nn.Module):
         """
         B = clip_grid_gt.shape[0]
         te = self.te(t)
-        # We need a ground-truth CLS target. When the input is the full grid,
-        # we use the L2-norm of the mean token as a proxy CLS target.
-        # In practice the caller can pass the real CLS token separately, but
-        # for the loss computation we use the mean token as target.
-        cls_target = F.normalize(
-            clip_grid_gt.permute(0, 2, 3, 1).reshape(B, -1, CLIP_TOKEN_DIM).mean(1),
-            dim=-1,
-        )
+        cls_target = F.normalize(clip_cls_gt, dim=-1)
 
         # Partial forward to get hidden tokens
         x0 = torch.randn_like(clip_grid_gt)

@@ -163,6 +163,10 @@ The following observations indicate a degenerate training run:
 | `cfm` still low after B.1-B.3 | Source noise too small | Bump to `1.5 * torch.randn_like(proj)` |
 | Source collapse warning printed | `(latent - x0).mse < 0.05` for >50% batch | Check `cls_to_latent` init and noise scale |
 
+## Cache note (v6 Wave 0)
+
+`brainflow/vae.py` already applies SD-VAE scaling correctly (`encode`: `* 0.18215`, `decode`: `/ 0.18215`), so no VAE math change was required; latent cache version was bumped to `all_subjects_latents_v2.pt` with `_meta` version checks to force clean rebuilds.
+
 ---
 
 ## 6. Phase 2 — Corrected v9 Baseline (CLIP normalisation fix)
