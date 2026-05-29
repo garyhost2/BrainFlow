@@ -21,6 +21,7 @@ Available solvers:
 """
 from __future__ import annotations
 
+import math
 from typing import Callable
 
 import torch
@@ -221,6 +222,67 @@ def solve(
     return _SOLVERS[method](model, x0, t_grid, **kwargs)
 
 
-def make_t_grid(n_steps: int, device: torch.device | str = "cpu") -> torch.Tensor:
-    """Convenience: build a uniform time grid [0, 1] with n_steps intervals."""
-    return torch.linspace(0.0, 1.0, n_steps + 1, device=device)
+def make_t_grid(
+    n_steps: int,
+    device: torch.device | str = "cpu",
+    schedule: str = "linear",
+    logit_normal_m: float = 0.0,
+    logit_normal_s: float = 1.0,
+) -> torch.Tensor:
+    """Build a time grid [0, 1] with n_steps intervals.
+
+    Args:
+        n_steps:         Number of ODE steps (grid has n_steps+1 points).
+        device:          Target device.
+        schedule:        Time schedule:
+                         - ``"linear"``       — uniform spacing (default; byte-for-byte
+                                                identical to previous behavior).
+                         - ``"cosine"``       — concentrates steps near t=0 and t=1
+                                                where flow curvature is highest:
+                                                t_i = (1 - cos(i·π/N)) / 2.
+                         - ``"logit_normal"`` — maps evenly spaced quantiles through
+                                                the logistic of a normal distribution,
+                                                controlled by ``logit_normal_m`` and
+                                                ``logit_normal_s``.
+        logit_normal_m:  Mean of the normal for ``"logit_normal"`` schedule (default 0).
+        logit_normal_s:  Std  of the normal for ``"logit_normal"`` schedule (default 1).
+
+    Returns:
+        1-D Tensor of shape (n_steps+1,) with values in [0, 1], strictly
+        monotonically increasing, starting exactly at 0.0 and ending at 1.0.
+
+    Raises:
+        ValueError: If ``schedule`` is not one of the supported values.
+    """
+    _VALID = ("linear", "cosine", "logit_normal")
+    if schedule not in _VALID:
+        raise ValueError(
+            f"Unknown schedule: {schedule!r}. Choose one of {_VALID}."
+        )
+
+    N = n_steps
+
+    if schedule == "linear":
+        return torch.linspace(0.0, 1.0, N + 1, device=device)
+
+    if schedule == "cosine":
+        i = torch.arange(N + 1, dtype=torch.float64, device=device)
+        t = (1.0 - torch.cos(i * math.pi / N)) / 2.0
+        # Clamp endpoints to exactly 0 and 1 (floating point safety)
+        t[0] = 0.0
+        t[-1] = 1.0
+        return t.float()
+
+    # schedule == "logit_normal"
+    # Build N+1 points via inverse normal CDF, then sigmoid-shift
+    eps = 1e-6
+    u = torch.linspace(eps, 1.0 - eps, N + 1, dtype=torch.float64, device=device)
+    # Φ^{-1}(u): inverse normal CDF via erfinv
+    z = torch.erfinv(2.0 * u - 1.0) * math.sqrt(2.0)  # standard normal quantiles
+    t = torch.sigmoid(logit_normal_m + logit_normal_s * z)
+    # Rescale so endpoints are exactly 0 and 1 and the grid is monotone
+    t_min, t_max = t[0], t[-1]
+    t = (t - t_min) / (t_max - t_min).clamp(min=1e-12)
+    t[0] = 0.0
+    t[-1] = 1.0
+    return t.float()

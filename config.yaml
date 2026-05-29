@@ -86,3 +86,17 @@ wandb:
   wandb_project: "brainflow-v5"
   wandb_run_name: "v5-multisubject"
   wandb_mode: "offline"         # offline by default; run `wandb sync` after training
+
+# ── New geometry / schedule / OT options (Items 1–3) ──────────────────────────
+geometry:
+  clip_prior_geometry: "euclidean"   # "euclidean" | "sphere"
+
+schedule:
+  t_schedule: "linear"               # "linear" | "cosine" | "logit_normal"
+  logit_normal_m: 0.0
+  logit_normal_s: 1.0
+
+ot:
+  use_ot_coupling: false             # enable minibatch OT for Stage 2B VAE flow
+  ot_reg: 0.05
+  ot_iters: 50

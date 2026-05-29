@@ -53,6 +53,83 @@ training:
   lambda_cos: 0.1         # cosine loss weight (Flow_CLIP only)
 ```
 
+### New Options (Items 1–4)
+
+#### Item 1 — Spherical geometry for `ClipPrior` (`clip_prior_geometry`)
+
+CLIP embeddings are L2-normalized and live on the unit hypersphere S^(d-1).
+Enabling `geometry: "sphere"` switches `ClipPrior` from straight-line Euclidean
+CFM to Riemannian flow matching:
+
+- Source: uniform on S^(d-1) (Gaussian → L2-normalize)
+- Interpolant: SLERP geodesic (stays on the sphere)
+- Target velocity: analytic time-derivative of the geodesic (tangent)
+- Sampler: exponential-map retraction keeps iterates on the sphere at every step
+
+*Math correctness note:* The straight-line interpolant `x_t = (1-t)·x_0 + t·x_1`
+leaves the sphere for `t ∈ (0,1)` and the velocity `u_t = x_1 - x_0` is not
+tangent to S^(d-1).  The SLERP interpolant and exp-map retraction correct both
+failures, keeping the entire trajectory on the manifold.
+
+```yaml
+geometry:
+  clip_prior_geometry: "euclidean"   # "euclidean" (default) | "sphere"
+```
+
+The flag is backward-compatible: `"euclidean"` reproduces the original behavior
+exactly, including mean/std normalization of the GT embedding.  In `"sphere"`
+mode, mean/std normalization is **not** applied (unit-norm vectors already fix
+the scale); this is documented in `brainflow/clip_prior.py`.
+
+#### Item 2 — Time schedule for ODE integration (`t_schedule`)
+
+`make_t_grid` in `brainflow/solvers.py` now supports three schedules:
+
+```yaml
+schedule:
+  t_schedule: "linear"       # "linear" (default) | "cosine" | "logit_normal"
+  logit_normal_m: 0.0        # mean for logit_normal (ignored otherwise)
+  logit_normal_s: 1.0        # sigma for logit_normal (ignored otherwise)
+```
+
+- **`"linear"`** — uniform spacing; byte-for-byte identical to previous behavior.
+- **`"cosine"`** — `t_i = (1 - cos(i·π/N)) / 2`; concentrates steps near `t=0`
+  and `t=1` where flow curvature is highest.
+- **`"logit_normal"`** — maps evenly spaced quantiles through `sigmoid(m + s·Φ⁻¹)`,
+  concentrating steps in the interior of `[0,1]` (useful for heavy-tailed flows).
+
+#### Item 3 — Minibatch OT source coupling (`use_ot_coupling`)
+
+Random pairing of noise `x0` to VAE latents `x1` in Stage 2B yields near-
+orthogonal, long trajectories.  Enabling minibatch optimal-transport coupling
+reorders the noise batch to minimize total squared-Euclidean transport cost,
+shortening trajectories and reducing velocity-estimation variance.
+
+```yaml
+ot:
+  use_ot_coupling: false   # true to enable (default: false — current behavior)
+  ot_reg: 0.05             # Sinkhorn entropic regularization
+  ot_iters: 50             # Sinkhorn iterations
+```
+
+Implementation: `brainflow/ot_coupling.py::ot_minibatch_coupling` uses a pure-
+PyTorch log-domain Sinkhorn (no hard dependency on `pot`/`geomloss`), resolved
+to a hard row-wise argmax assignment.
+
+#### Item 4 — Full 8-metric eval harness (`scripts/eval_full.py`)
+
+```bash
+# Full GPU run (requires checkpoint + NSD data)
+python -m scripts.eval_full --ckpt outputs/best.pt --subject 1
+
+# CI / offline self-test (PixCorr + SSIM only, no GPU/data needed)
+python -m scripts.eval_full --self-test
+```
+
+Flags: `--ckpt`, `--subject`, `--ode-steps`, `--solver`, `--schedule`,
+`--cfg-scale`, `--out-dir`.  Results are printed as a table and written to
+`outputs/<experiment>/full_metrics.json`.
+
 ## Highlights — v5
 
 - **Multi-subject training** (1..8) via per-subject input projection

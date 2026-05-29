@@ -34,6 +34,50 @@ class TestMakeTGrid:
         diffs = (grid[1:] - grid[:-1])
         assert torch.allclose(diffs, diffs[0].expand_as(diffs), atol=1e-6)
 
+    def test_linear_identical_to_linspace(self):
+        """'linear' must be byte-for-byte identical to torch.linspace."""
+        ref = torch.linspace(0.0, 1.0, 21)
+        out = make_t_grid(20, schedule="linear")
+        assert torch.allclose(out, ref)
+
+    def test_cosine_endpoints(self):
+        grid = make_t_grid(20, schedule="cosine")
+        assert abs(grid[0].item()) < 1e-6
+        assert abs(grid[-1].item() - 1.0) < 1e-6
+
+    def test_cosine_shape(self):
+        grid = make_t_grid(15, schedule="cosine")
+        assert grid.shape == (16,)
+
+    def test_cosine_monotone(self):
+        grid = make_t_grid(20, schedule="cosine")
+        diffs = grid[1:] - grid[:-1]
+        assert (diffs > 0).all(), "cosine grid must be strictly increasing"
+
+    def test_logit_normal_endpoints(self):
+        grid = make_t_grid(20, schedule="logit_normal")
+        assert abs(grid[0].item()) < 1e-6
+        assert abs(grid[-1].item() - 1.0) < 1e-6
+
+    def test_logit_normal_shape(self):
+        grid = make_t_grid(15, schedule="logit_normal")
+        assert grid.shape == (16,)
+
+    def test_logit_normal_monotone(self):
+        grid = make_t_grid(20, schedule="logit_normal")
+        diffs = grid[1:] - grid[:-1]
+        assert (diffs > 0).all(), "logit_normal grid must be strictly increasing"
+
+    def test_logit_normal_custom_params(self):
+        grid = make_t_grid(20, schedule="logit_normal", logit_normal_m=0.5, logit_normal_s=2.0)
+        assert abs(grid[0].item()) < 1e-6
+        assert abs(grid[-1].item() - 1.0) < 1e-6
+        assert (grid[1:] > grid[:-1]).all()
+
+    def test_unknown_schedule_raises(self):
+        with pytest.raises(ValueError, match="Unknown schedule"):
+            make_t_grid(10, schedule="polynomial")
+
 
 class TestEulerSolver:
     def test_integrates_linear_ode(self):

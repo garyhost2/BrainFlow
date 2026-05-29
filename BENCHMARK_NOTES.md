@@ -198,17 +198,33 @@ in this document were computed with the **buggy** normalisation.
 > magnitude of the normalisation bug. This section will be updated after
 > re-evaluation.
 
-### 8-Metric Full Evaluation (Phase 2 target — to be filled after Stage 2B)
+### 8-Metric Full Evaluation (Phase 2 target — §6 table)
 
-| Metric | v9 (corrected) | Phase 2 Stage 2B | Δ |
-|--------|----------------|-------------------|---|
-| PixCorr | TBD | TBD | — |
-| SSIM | TBD | TBD | — |
-| AlexNet(2) | TBD | TBD | — |
-| AlexNet(5) | TBD | TBD | — |
-| Inception | TBD | TBD | — |
-| CLIP | TBD | TBD | — |
-| EffNet-B | TBD | TBD | — |
-| SwAV | TBD | TBD | — |
+This table compares BrainFlow variants against the publicly reported MindEye2
+numbers (subject 1).  BrainFlow cells are marked **`RUN_REQUIRED`** — they
+require a full GPU run to populate; **no numbers have been fabricated**.
+
+To populate the BrainFlow columns, run:
+
+```bash
+python -m scripts.eval_full --ckpt <path/to/checkpoint.pt> --subject 1
+```
+
+Results are written to `outputs/<experiment_name>/full_metrics.json` and
+printed to stdout as a formatted table.
+
+| Metric | v9 (corrected) | Phase 2 Stage 2B | MindEye2 (reported)¹ |
+|--------|----------------|-------------------|----------------------|
+| PixCorr | RUN_REQUIRED | RUN_REQUIRED | TBD (see MindEye2 paper) |
+| SSIM | RUN_REQUIRED | RUN_REQUIRED | TBD (see MindEye2 paper) |
+| AlexNet(2) | RUN_REQUIRED | RUN_REQUIRED | TBD (see MindEye2 paper) |
+| AlexNet(5) | RUN_REQUIRED | RUN_REQUIRED | TBD (see MindEye2 paper) |
+| Inception | RUN_REQUIRED | RUN_REQUIRED | TBD (see MindEye2 paper) |
+| CLIP | RUN_REQUIRED | RUN_REQUIRED | TBD (see MindEye2 paper) |
+| EffNet-B | RUN_REQUIRED | RUN_REQUIRED | TBD (see MindEye2 paper) |
+| SwAV | RUN_REQUIRED | RUN_REQUIRED | TBD (see MindEye2 paper) |
+
+¹ MindEye2: Scotti et al., "MindEye2: Shared-Subject Models Enable fMRI-To-Image With 1 Hour of Data", ICML 2024.
+  Subject-1 numbers not filled in here to avoid misquoting; consult Table 1 of the paper directly.
 
 Use `brainflow/metrics_full.py` → `evaluate_full()` to compute these numbers.
