@@ -72,6 +72,10 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
 
 
+def _trainable_params(module: nn.Module) -> int:
+    return sum(p.numel() for p in module.parameters() if p.requires_grad)
+
+
 # ── Stage 2A eval: CLIP patch cosine similarity ────────────────────────────────
 
 @torch.no_grad()
@@ -190,13 +194,16 @@ def main():
         raw_model.set_stage_2b()
     raw_model = raw_model.to(device)
 
-    n_total = sum(p.numel() for p in raw_model.parameters() if p.requires_grad)
-    n_enc = sum(p.numel() for p in raw_model.brain_enc.parameters())
-    n_fcd = sum(p.numel() for p in raw_model.flow_clip.parameters())
-    n_funet = sum(p.numel() for p in raw_model.flow_vae.parameters())
+    n_total = _trainable_params(raw_model)
+    n_enc = _trainable_params(raw_model.brain_enc)
+    n_fcd = _trainable_params(raw_model.flow_clip)
+    n_funet = _trainable_params(raw_model.flow_vae)
     if is_main():
-        print(f"Trainable: {n_total/1e6:.1f}M | enc={n_enc/1e6:.1f}M "
-              f"clip_dit={n_fcd/1e6:.1f}M flow_unet={n_funet/1e6:.1f}M")
+        print("Trainable parameter counts:")
+        for name, submodule in raw_model.named_children():
+            n_sub = _trainable_params(submodule)
+            print(f"  {name}: {n_sub:,}")
+        print(f"  total: {n_total:,}")
 
     # Fit CLIP standardization on rank-0, then broadcast
     if stage == "2a":

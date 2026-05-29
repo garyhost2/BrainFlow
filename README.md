@@ -13,7 +13,7 @@ fMRI (per-subject voxels)
 BrainEncoder (MLP + stochastic depth)
    │  → 16 context tokens (B, 16, 768)  +  CLS (B, 768)
    ▼
-FlowUNet velocity field (~120M)  ◄─── Euler integration (20 steps, CFG=2.0)
+FlowUNet velocity field (see startup param-count banner)  ◄─── Euler integration (20 steps, CFG=2.0)
    │
    ▼
 frozen SD-VAE decoder  →  256×256 image
