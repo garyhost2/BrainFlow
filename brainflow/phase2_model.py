@@ -16,6 +16,7 @@ from .config import Config
 from .models import BrainEncoder
 from .flow_clip_dit import FlowCLIPDiT
 from .flow_unet import FlowUNet
+from .ot_coupling import ot_minibatch_coupling
 
 
 class BrainFlowPhase2(nn.Module):
@@ -147,6 +148,15 @@ class BrainFlowPhase2(nn.Module):
         # ── FlowUNet CFM loss ──────────────────────────────────────────────
         t = torch.rand(B, device=device)
         x0 = torch.randn_like(latents)
+
+        # Optional minibatch OT coupling: reorder x0 to reduce transport cost
+        if cfg.use_ot_coupling:
+            x0 = ot_minibatch_coupling(
+                x0, latents,
+                reg=cfg.ot_reg,
+                n_iters=cfg.ot_iters,
+            )
+
         t_exp = t[:, None, None, None]
         xt = (1 - t_exp) * x0 + t_exp * latents
         ut = latents - x0
