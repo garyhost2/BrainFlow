@@ -22,6 +22,67 @@ def _double_gamma_hrf(length: int, peak: float = 6.0, undershoot: float = 16.0,
     return torch.tensor(h, dtype=torch.float32)
 
 
+def _sample_t(B, device, cfg) -> torch.Tensor:
+    """Sample t ∈ [0,1] per cfg.t_schedule: 'linear' | 'cosine' | 'logit_normal'."""
+    sched = getattr(cfg, "t_schedule", "linear")
+    if sched == "cosine":
+        u = torch.rand(B, device=device)
+        return (1 - torch.cos(math.pi * u)) / 2
+    if sched == "logit_normal":
+        m = getattr(cfg, "logit_normal_m", 0.0)
+        s = getattr(cfg, "logit_normal_s", 1.0)
+        z = torch.randn(B, device=device) * s + m
+        return torch.sigmoid(z)
+    return torch.rand(B, device=device)
+
+
+def _sinkhorn_ot(C, reg=0.05, n_iter=50) -> torch.Tensor:
+    """Minibatch OT via Sinkhorn log-domain.
+    C: (B,B) cost matrix.
+    Returns col_idx (B,): x1[i] is paired with x0[col_idx[i]]."""
+    B = C.shape[0]
+    log_M = -C / reg
+    log_a = torch.full((B,), -math.log(B), device=C.device)
+    log_b = torch.full((B,), -math.log(B), device=C.device)
+    log_u = torch.zeros(B, device=C.device)
+    for _ in range(n_iter):
+        log_v = log_b - torch.logsumexp(log_M + log_u[:, None], dim=0)
+        log_u = log_a - torch.logsumexp(log_M + log_v[None, :], dim=1)
+    log_pi = log_M + log_u[:, None] + log_v[None, :]
+    pi = (log_pi - log_pi.max(dim=1, keepdim=True).values).exp()
+    return torch.multinomial(pi + 1e-10, num_samples=1).squeeze(-1)
+
+
+def _slerp(x0, x1, t) -> torch.Tensor:
+    """SLERP geodesic on S^(d-1). x0, x1: (B,d) unit vectors. t: (B,)."""
+    cos_theta = (x0 * x1).sum(-1, keepdim=True).clamp(-1 + 1e-6, 1 - 1e-6)
+    theta = torch.acos(cos_theta)
+    sin_theta = theta.sin().clamp(min=1e-6)
+    w0 = torch.sin((1 - t[:, None]) * theta) / sin_theta
+    w1 = torch.sin(t[:, None] * theta) / sin_theta
+    return w0 * x0 + w1 * x1
+
+
+def _slerp_velocity(x0, x1, t) -> torch.Tensor:
+    """Tangent vector (d/dt SLERP) at time t. Lives in T_{x_t}S^(d-1)."""
+    cos_theta = (x0 * x1).sum(-1, keepdim=True).clamp(-1 + 1e-6, 1 - 1e-6)
+    theta = torch.acos(cos_theta)
+    sin_theta = theta.sin().clamp(min=1e-6)
+    scale = theta / sin_theta
+    dw0 = -torch.cos((1 - t[:, None]) * theta)
+    dw1 = torch.cos(t[:, None] * theta)
+    return scale * (dw0 * x0 + dw1 * x1)
+
+
+def _exp_map(x, v, dt) -> torch.Tensor:
+    """Exponential map retraction on S^(d-1): Exp_x(dt·v).
+    Projects v to tangent space then retracts. Always stays on manifold."""
+    v_tan = v - (v * x).sum(-1, keepdim=True) * x
+    norm_v = v_tan.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+    step = dt * norm_v
+    return torch.cos(step) * x + torch.sin(step) * (v_tan / norm_v)
+
+
 class ResBlockMLP(nn.Module):
     def __init__(self, dim, drop=0.1, mult=4, stoch_depth=0.0):
         super().__init__()
@@ -364,6 +425,9 @@ class CLIPPrior(nn.Module):
         n_blocks = int(getattr(cfg, "prior_blocks", 3))
         td = 128
         self.cd = cd
+        self.cfg = cfg
+        self.geometry = getattr(cfg, "clip_prior_geometry", "euclidean")
+        self.flow_obj = getattr(cfg, "flow_objective", "cfm")
         self.te = SinusoidalTimeEmbedding(td)
         self.in_proj = nn.Linear(cd, d)
         self.cond_proj = nn.Linear(bd, d)
@@ -382,36 +446,116 @@ class CLIPPrior(nn.Module):
         self.out_proj = nn.Linear(d, cd)
         nn.init.zeros_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
+        self.sigma_head = None
+        if self.flow_obj == "vfm":
+            self.sigma_head = nn.Linear(d, cd)
+            nn.init.zeros_(self.sigma_head.weight)
+            nn.init.constant_(self.sigma_head.bias, -2.0)
 
-    def forward(self, clip_t: torch.Tensor, t: torch.Tensor, cls: torch.Tensor) -> torch.Tensor:
-        """Predict velocity v = (clip_clean - clip_noise). Shapes: (B, cd)."""
+    def _forward_features(self, clip_t: torch.Tensor, t: torch.Tensor, cls: torch.Tensor) -> torch.Tensor:
+        """Return shared trunk features before output projections."""
         te = self.te(t)
         h = self.in_proj(clip_t) + self.cond_proj(cls) + self.time_proj(te)
         for blk in self.blocks:
             h = h + blk(h)
-        return self.out_proj(self.out_norm(h))
+        return self.out_norm(h)
 
-    def flow_loss(self, clip_gt: torch.Tensor, cls: torch.Tensor) -> torch.Tensor:
-        """CFM loss: x_t = (1-t) noise + t * clip_gt, target v = clip_gt - noise."""
+    def forward(self, clip_t: torch.Tensor, t: torch.Tensor, cls: torch.Tensor) -> torch.Tensor:
+        """Predict velocity v = (clip_clean - clip_noise). Shapes: (B, cd)."""
+        h = self._forward_features(clip_t, t, cls)
+        return self.out_proj(h)
+
+    def forward_with_sigma(self, clip_t: torch.Tensor, t: torch.Tensor, cls: torch.Tensor):
+        """Predict velocity mean and standard deviation for VFM training."""
+        if self.sigma_head is None:
+            raise RuntimeError("forward_with_sigma is only available when flow_objective='vfm'.")
+        h = self._forward_features(clip_t, t, cls)
+        mu = self.out_proj(h)
+        log_sigma = self.sigma_head(h)
+        sigma = torch.exp(log_sigma).clamp(1e-4, 10.0)
+        return mu, sigma, log_sigma
+
+    def flow_loss(self, clip_gt: torch.Tensor, cls: torch.Tensor, vfm_kl_weight: float = 0.0) -> torch.Tensor:
+        """Compute CLIP prior flow-matching loss for euclidean or spherical geometry."""
         B = clip_gt.shape[0]
-        x0 = torch.randn_like(clip_gt)
-        t = torch.rand(B, device=clip_gt.device)
-        xt = (1 - t)[:, None] * x0 + t[:, None] * clip_gt
+        t = _sample_t(B, clip_gt.device, self.cfg)
+
+        if self.geometry == "sphere":
+            x1 = F.normalize(clip_gt, dim=-1)
+            x0 = F.normalize(torch.randn_like(x1), dim=-1)
+            xt = _slerp(x0, x1, t)
+            ut = _slerp_velocity(x0, x1, t)
+        else:
+            x0 = torch.randn_like(clip_gt)
+            xt = (1 - t)[:, None] * x0 + t[:, None] * clip_gt
+            ut = clip_gt - x0
+
+        if self.flow_obj == "vfm" and self.sigma_head is not None:
+            mu, sigma, log_sigma = self.forward_with_sigma(xt, t, cls)
+            recon = (mu - ut).pow(2)
+            kl = sigma.pow(2) - 1 - 2 * log_sigma
+            return (recon + vfm_kl_weight * kl).mean()
+
         vt_pred = self.forward(xt, t, cls)
-        vt_tgt = clip_gt - x0
-        return F.mse_loss(vt_pred, vt_tgt)
+        return F.mse_loss(vt_pred, ut)
 
     @torch.no_grad()
-    def sample(self, cls: torch.Tensor, n_steps: int = 10) -> torch.Tensor:
-        """Midpoint-Euler ODE sample → L2-normalized CLIP embedding."""
+    def sample(self, cls: torch.Tensor, n_steps: int = 10, solver: str = "dpm2m") -> torch.Tensor:
+        """Sample CLIP embeddings with Euler, midpoint, or DPM-Solver++(2M)."""
         B = cls.shape[0]
-        x = torch.randn(B, self.cd, device=cls.device)
-        dt = 1.0 / n_steps
-        for i in range(n_steps):
-            t = torch.full((B,), (i + 0.5) * dt, device=cls.device)
-            v = self.forward(x, t, cls)
-            x = x + v * dt
+        if self.geometry == "sphere":
+            x = F.normalize(torch.randn(B, self.cd, device=cls.device), dim=-1)
+        else:
+            x = torch.randn(B, self.cd, device=cls.device)
+        dt = 1.0 / max(1, n_steps)
+        v_prev = None
+        h_prev = None
+
+        def _vel(xt: torch.Tensor, t_val: float) -> torch.Tensor:
+            t = torch.full((B,), t_val, device=xt.device, dtype=xt.dtype)
+            return self.forward(xt, t, cls)
+
+        for i in range(max(1, n_steps)):
+            t_cur = i * dt
+            t_next = (i + 1) * dt
+            h_cur = t_next - t_cur
+
+            if solver == "euler":
+                v = _vel(x, t_cur)
+                v_step = v
+            elif solver == "midpoint":
+                v = _vel(x, t_cur)
+                t_mid = 0.5 * (t_cur + t_next)
+                if self.geometry == "sphere":
+                    x_mid = _exp_map(x, v, h_cur / 2)
+                else:
+                    x_mid = x + v * (h_cur / 2)
+                v_step = _vel(x_mid, t_mid)
+            elif solver == "dpm2m":
+                v_cur = _vel(x, t_cur)
+                if v_prev is None or h_prev is None:
+                    v_step = v_cur
+                else:
+                    r = h_prev / h_cur
+                    v_step = (1 + r / 2) * v_cur - (r / 2) * v_prev
+                v_prev = v_cur
+                h_prev = h_cur
+            else:
+                raise ValueError(f"Unknown solver: {solver!r}. Use 'euler', 'midpoint', or 'dpm2m'.")
+
+            if self.geometry == "sphere":
+                x = _exp_map(x, v_step, h_cur)
+            else:
+                x = x + v_step * h_cur
         return F.normalize(x, dim=-1)
+
+    @torch.no_grad()
+    def get_uncertainty(self, clip_t: torch.Tensor, t: torch.Tensor, cls: torch.Tensor) -> torch.Tensor:
+        """Return per-sample mean predictive sigma for VFM priors."""
+        if self.sigma_head is None:
+            return torch.zeros(clip_t.shape[0], device=clip_t.device, dtype=clip_t.dtype)
+        _, sigma, _ = self.forward_with_sigma(clip_t, t, cls)
+        return sigma.mean(dim=-1)
 
 
 
@@ -551,8 +695,20 @@ class BrainFlowV5(nn.Module):
         proj = self.cls_to_latent(cls_d).view(B, cfg.latent_ch, cfg.latent_res, cfg.latent_res)
         return proj + torch.randn_like(proj)  # B.1: unit-variance noise (was 0.1×)
 
+    def _get_null_tokens(self, flow, n_ctx: int, B: int, device, dtype):
+        """Build unconditional context tokens with optional learned prior-token pad."""
+        base_null = flow.null_tokens.to(device=device, dtype=dtype)
+        if n_ctx > base_null.shape[1]:
+            if self.null_prior_token is not None:
+                null_pad = self.null_prior_token.to(device=device, dtype=dtype)
+            else:
+                null_pad = torch.zeros(1, n_ctx - base_null.shape[1], base_null.shape[2],
+                                       device=device, dtype=dtype)
+            return torch.cat([base_null, null_pad], dim=1).expand(B, -1, -1)
+        return base_null.expand(B, -1, -1)
+
     @torch.no_grad()
-    def sample(self, tokens, n_steps=None, cfg_scale=None, solver: str = "midpoint",
+    def sample(self, tokens, n_steps=None, cfg_scale=None, solver: str = "dpm2m",
                cls: torch.Tensor | None = None):
         """ODE integration from source distribution → VAE latent.
 
@@ -562,11 +718,12 @@ class BrainFlowV5(nn.Module):
         whose sampled embedding is appended to the cross-attention context.
         For baseline/sb, source = pure Gaussian noise.
 
-        solver: "euler" | "midpoint" | "heun"
+        solver: "euler" | "midpoint" | "heun" | "dpm2m"
         """
         cfg = self.cfg
         if n_steps is None: n_steps = cfg.ode_steps
         if cfg_scale is None: cfg_scale = cfg.cfg_scale
+        n_steps = max(1, int(n_steps))
         B = tokens.shape[0]
         method = getattr(cfg, "method", "baseline")
 
@@ -578,7 +735,7 @@ class BrainFlowV5(nn.Module):
         # ── Build cross-attention context (+ prior token for DiT / CLIPPriorHead) ──
         if method == "dit":
             assert cls is not None, "DiT method requires cls for the CLIP prior"
-            clip_pred = self.clip_prior.sample(cls, n_steps=cfg.prior_ode_steps)
+            clip_pred = self.clip_prior.sample(cls, n_steps=cfg.prior_ode_steps, solver="dpm2m")
             prior_tok = self.clip_to_token(clip_pred).unsqueeze(1)      # (B,1,bd)
             tokens = torch.cat([tokens, prior_tok], dim=1)
 
@@ -595,63 +752,62 @@ class BrainFlowV5(nn.Module):
         else:
             x = torch.randn(B, cfg.latent_ch, cfg.latent_res, cfg.latent_res,
                             device=tokens.device)
-        dt = 1.0 / n_steps
         flow = self._flow()
-        # Expand null_tokens to match context width (handles +1 from CLIPPriorHead)
         n_ctx = tokens.shape[1]
-        base_null = flow.null_tokens  # (1, base_n_tokens, bd)
-        if n_ctx > base_null.shape[1]:
-            # Use learned null_prior_token instead of zeros — zero is out-of-distribution
-            # for the attention key space and makes the CFG unconditional path degenerate.
-            # Fall back to zeros only if null_prior_token was not initialised (should not
-            # happen in normal usage, but avoids a hard crash if config is unusual).
-            if self.null_prior_token is not None:
-                null_pad = self.null_prior_token.to(base_null.device, base_null.dtype)
-            else:
-                null_pad = torch.zeros(1, n_ctx - base_null.shape[1], base_null.shape[2],
-                                       device=base_null.device, dtype=base_null.dtype)
-            null = torch.cat([base_null, null_pad], dim=1).expand(B, -1, -1)
+        null = self._get_null_tokens(flow, n_ctx, B, tokens.device, tokens.dtype)
+
+        if getattr(cfg, "t_schedule", "linear") == "cosine":
+            idx = torch.arange(n_steps + 1, device=tokens.device, dtype=tokens.dtype)
+            t_grid = (1 - torch.cos(math.pi * idx / n_steps)) / 2
         else:
-            null = base_null.expand(B, -1, -1)
+            t_grid = torch.linspace(0.0, 1.0, steps=n_steps + 1, device=tokens.device, dtype=tokens.dtype)
 
         def _vel(xt, t_val):
-            t = torch.full((B,), t_val, device=xt.device)
+            t = torch.full((B,), t_val, device=xt.device, dtype=xt.dtype)
             if cfg_scale > 1.0:
                 v_cond = flow(xt, t, tokens)
                 v_uncond = flow(xt, t, null)
                 return v_uncond + cfg_scale * (v_cond - v_uncond)
             return flow(xt, t, tokens)
 
+        v_prev = None
+        h_prev = None
         for i in range(n_steps):
+            t_cur = float(t_grid[i].item())
+            t_next = float(t_grid[i + 1].item())
+            h_cur = t_next - t_cur
             if solver == "euler":
-                t_cur = i * dt
                 v = _vel(x, t_cur)
-                x = x + v * dt
+                x = x + v * h_cur
             elif solver == "midpoint":
-                # Midpoint Euler: evaluate velocity at midpoint of interval
-                t_mid = (i + 0.5) * dt
+                t_mid = 0.5 * (t_cur + t_next)
                 v = _vel(x, t_mid)
-                x = x + v * dt
+                x = x + v * h_cur
             elif solver == "heun":
-                # Heun's method (2-stage RK): doubles NFE but dramatically
-                # more accurate — use for final evaluation runs
-                t_cur = i * dt
-                t_next = (i + 1) * dt
                 v1 = _vel(x, t_cur)
-                x_euler = x + v1 * dt
+                x_euler = x + v1 * h_cur
                 v2 = _vel(x_euler, t_next)
-                x = x + (v1 + v2) * (dt / 2)
+                x = x + (v1 + v2) * (h_cur / 2)
+            elif solver == "dpm2m":
+                v_cur = _vel(x, t_cur)
+                if v_prev is None or h_prev is None:
+                    v_step = v_cur
+                else:
+                    r = h_prev / h_cur
+                    v_step = (1 + r / 2) * v_cur - (r / 2) * v_prev
+                x = x + v_step * h_cur
+                v_prev = v_cur
+                h_prev = h_cur
             else:
-                raise ValueError(f"Unknown solver: {solver!r}. Use 'euler', 'midpoint', or 'heun'.")
+                raise ValueError(f"Unknown solver: {solver!r}. Use 'euler', 'midpoint', 'heun', or 'dpm2m'.")
 
             # SB stochastic sampler: add σ(t)·√dt·ε at each step (Euler-Maruyama).
             # σ(t) = σ_max·√(t(1-t)) peaks at t=0.5, vanishes at endpoints so the
             # final sample is deterministic given the velocity field.
             if getattr(cfg, "method", "baseline") == "sb":
-                t_next = (i + 1) * dt
                 sigma_t = cfg.sb_sigma_max * math.sqrt(max(t_next * (1 - t_next), 0.0))
                 if sigma_t > 0:
-                    x = x + sigma_t * math.sqrt(dt) * torch.randn_like(x)
+                    x = x + sigma_t * math.sqrt(h_cur) * torch.randn_like(x)
         return x
 
     def training_step(self, batch, device, vae=None, percep_loss_fn=None, epoch: int = 0):
@@ -719,7 +875,12 @@ class BrainFlowV5(nn.Module):
                     )
         else:
             x0 = torch.randn_like(latent)
-        t = torch.rand(B, device=device)
+            if getattr(cfg, "use_ot_coupling", False):
+                with torch.no_grad():
+                    C = torch.cdist(latent.view(B, -1), x0.view(B, -1)).pow(2)
+                    col_idx = _sinkhorn_ot(C, reg=cfg.ot_reg, n_iter=cfg.ot_iters)
+                x0 = x0[col_idx]
+        t = _sample_t(B, device, cfg)
         t_expand = t[:, None, None, None]
         xt = (1 - t_expand) * x0 + t_expand * latent
         ut = latent - x0
@@ -730,22 +891,8 @@ class BrainFlowV5(nn.Module):
             xt = xt + sigma_t * torch.randn_like(xt)
 
         flow = self._flow()
-        # Expand null_tokens to match context width (handles +1 from CLIPPriorHead)
         n_ctx = tokens.shape[1]
-        base_null = flow.null_tokens  # (1, base_n_tokens, bd)
-        if n_ctx > base_null.shape[1]:
-            # Use learned null_prior_token instead of zeros — zero is out-of-distribution
-            # for the attention key space and makes the CFG unconditional path degenerate.
-            # Fall back to zeros only if null_prior_token was not initialised (should not
-            # happen in normal usage, but avoids a hard crash if config is unusual).
-            if self.null_prior_token is not None:
-                null_pad = self.null_prior_token.to(base_null.device, base_null.dtype)
-            else:
-                null_pad = torch.zeros(1, n_ctx - base_null.shape[1], base_null.shape[2],
-                                       device=base_null.device, dtype=base_null.dtype)
-            null_tokens = torch.cat([base_null, null_pad], dim=1).expand(B, -1, -1)
-        else:
-            null_tokens = base_null.expand(B, -1, -1)
+        null_tokens = self._get_null_tokens(flow, n_ctx, B, tokens.device, tokens.dtype)
 
         drop_mask = torch.rand(B, device=device) < cfg.cfg_drop_prob
         ctx = torch.where(drop_mask[:, None, None], null_tokens, tokens)
@@ -772,7 +919,10 @@ class BrainFlowV5(nn.Module):
         # DiT: diffusion-prior flow-matching loss on CLIP embeddings
         loss_prior = torch.tensor(0.0, device=device)
         if method == "dit":
-            loss_prior = self.clip_prior.flow_loss(clip_emb, cls_clean)
+            vfm_kl_w = getattr(cfg, "vfm_kl_weight", 0.0)
+            vfm_anneal = getattr(cfg, "vfm_kl_anneal_epochs", 50)
+            kl_weight = vfm_kl_w * min(1.0, epoch / max(1, vfm_anneal))
+            loss_prior = self.clip_prior.flow_loss(clip_emb, cls_clean, vfm_kl_weight=kl_weight)
 
         # Compute perceptual loss if enabled
         # Gate on t > 0.85: the approximation pred_latent ≈ xt + vt*(1-t) is only

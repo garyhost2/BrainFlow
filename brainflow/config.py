@@ -63,6 +63,8 @@ class Config:
     lambda_align: float = 0.1
     lambda_cfm: float = 1.0
     lambda_percep: float = 0.15
+    vfm_kl_weight: float = 0.0
+    vfm_kl_anneal_epochs: int = 50
     percep_loss: str = "lpips"
     sigma_min: float = 1e-4
     cfg_drop_prob: float = 0.20
@@ -208,7 +210,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         "cfg_scale", "fmri_noise_std", "fmri_mask_prob", "mixup_alpha",
         "infonce_temp", "clip_sample_prob_max", "clip_ramp_frac",
         "stochastic_depth", "enc_drop", "token_drop_prob",
-        "ot_reg", "logit_normal_m", "logit_normal_s",
+        "ot_reg", "logit_normal_m", "logit_normal_s", "vfm_kl_weight",
     }
     for key in _float_fields:
         if key in flat and not isinstance(flat[key], float):
