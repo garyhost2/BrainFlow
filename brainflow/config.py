@@ -156,6 +156,25 @@ class Config:
     wandb_run_name: str = "v5-multisubject"
     wandb_mode: str = "online"  # "online" | "offline" | "disabled"
 
+    # ── Item 1: Spherical geometry for ClipPrior ───────────────────────────────
+    # "euclidean" — standard Gaussian CFM (default, preserves current behavior)
+    # "sphere"    — Riemannian flow matching on S^(d-1) via SLERP + exp-map
+    clip_prior_geometry: str = "euclidean"
+
+    # ── Item 2: Time schedule for ODE integration ──────────────────────────────
+    # "linear"       — uniform spacing (default)
+    # "cosine"       — concentrates steps near t=0 and t=1
+    # "logit_normal" — logistic-normal quantile spacing
+    t_schedule: str = "linear"
+    logit_normal_m: float = 0.0   # mean  for logit_normal schedule
+    logit_normal_s: float = 1.0   # sigma for logit_normal schedule
+
+    # ── Item 3: Minibatch OT coupling for VAE-latent CFM ──────────────────────
+    # use_ot_coupling: enable entropic Sinkhorn coupling in _step_2b
+    use_ot_coupling: bool = False
+    ot_reg: float = 0.05    # Sinkhorn entropic regularization
+    ot_iters: int = 50      # Sinkhorn iterations
+
 
 def load_config(path: str | os.PathLike | None = None) -> Config:
     """Load config.yaml. If path is None, checks BRAINFLOW_CONFIG env var, then repo-root config.yaml."""
@@ -189,6 +208,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         "cfg_scale", "fmri_noise_std", "fmri_mask_prob", "mixup_alpha",
         "infonce_temp", "clip_sample_prob_max", "clip_ramp_frac",
         "stochastic_depth", "enc_drop", "token_drop_prob",
+        "ot_reg", "logit_normal_m", "logit_normal_s",
     }
     for key in _float_fields:
         if key in flat and not isinstance(flat[key], float):
