@@ -32,3 +32,12 @@ class FrozenVAE(nn.Module):
         # Cast to target dtype for faster inference; output back to fp32
         return ((self.vae.decode((z / self.scale).to(self.dtype))
                  .sample.float().clamp(-1, 1) + 1) / 2)
+
+    def decode_grad(self, z):
+        """Gradient-enabled decode path for training losses.
+
+        VAE weights remain frozen via requires_grad_(False), but gradients from
+        downstream losses can flow back to z.
+        """
+        return ((self.vae.decode((z / self.scale).to(self.dtype))
+                 .sample.float().clamp(-1, 1) + 1) / 2)

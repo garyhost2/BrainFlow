@@ -32,6 +32,14 @@ _IN_STD  = torch.tensor([0.229, 0.224, 0.225])
 
 _MODEL_CACHE: dict[str, Any] = {}
 
+# Torchvision AlexNet(features) index map:
+# 0 conv1, 1 relu1, 2 pool1, 3 conv2, 4 relu2, 5 pool2,
+# 6 conv3, 7 relu3, 8 conv4, 9 relu4, 10 conv5, 11 relu5, 12 pool5.
+# MindEye-style "early/mid" taps commonly use deeper conv-block activations.
+# We default to relu2/relu5 style taps (features[4], features[12]).
+ALEXNET_EARLY_LAYER = 4
+ALEXNET_MID_LAYER = 12
+
 
 def pixel_correlation(pred: torch.Tensor, target: torch.Tensor) -> float:
     p = pred.flatten(1).cpu().numpy()
@@ -62,6 +70,28 @@ def _normalise(imgs: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> tor
     mean = mean.view(1, 3, 1, 1).to(imgs.device)
     std  = std.view(1, 3, 1, 1).to(imgs.device)
     return (imgs - mean) / std
+
+
+def _mean_cosine(pred_feats: torch.Tensor, target_feats: torch.Tensor) -> float:
+    pred_feats = F.normalize(pred_feats.float(), dim=-1)
+    target_feats = F.normalize(target_feats.float(), dim=-1)
+    return float((pred_feats * target_feats).sum(-1).mean())
+
+
+def two_way_identification(pred_feats: torch.Tensor, target_feats: torch.Tensor) -> float:
+    """All-pairs 2-way identification accuracy in [0, 1].
+
+    For each sample i, compares s(P_i, T_i) against all foil pairs s(P_i, T_j), j!=i.
+    """
+    pred_feats = F.normalize(pred_feats.float(), dim=-1)
+    target_feats = F.normalize(target_feats.float(), dim=-1)
+    sim = pred_feats @ target_feats.T
+    correct = sim.diag().unsqueeze(1)
+    if sim.shape[0] < 2:
+        return 1.0
+    foil_mask = ~torch.eye(sim.shape[0], dtype=torch.bool, device=sim.device)
+    foil = sim[foil_mask].view(sim.shape[0], sim.shape[0] - 1)
+    return float((correct > foil).float().mean())
 
 
 def _get_clip(device):
@@ -108,25 +138,36 @@ def _get_effnet(device):
 
 def _get_swav(device):
     if "swav" not in _MODEL_CACHE:
-        import torch.hub
-        m = torch.hub.load("facebookresearch/swav:main", "resnet50")
-        m.eval()
-        for p in m.parameters():
-            p.requires_grad_(False)
-        _MODEL_CACHE["swav"] = m
-    return _MODEL_CACHE["swav"].to(device)
+        try:
+            import torch.hub
+            m = torch.hub.load("facebookresearch/swav:main", "resnet50")
+            m.eval()
+            for p in m.parameters():
+                p.requires_grad_(False)
+            _MODEL_CACHE["swav"] = m
+        except Exception as e:
+            print(f"[metrics_full] WARNING: failed to load SwAV ({e}); skipping SwAV metrics.")
+            _MODEL_CACHE["swav"] = None
+    m = _MODEL_CACHE["swav"]
+    return None if m is None else m.to(device)
 
 
 @torch.no_grad()
-def clip_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float:
+def _clip_feature_pair(pred: torch.Tensor, target: torch.Tensor, device) -> tuple[torch.Tensor, torch.Tensor]:
     clip_enc = _get_clip(device)
     pi = F.interpolate(pred.cpu(), 224, mode="bilinear", align_corners=False)
     gt = F.interpolate(target.cpu(), 224, mode="bilinear", align_corners=False)
     pi = _normalise(pi, _CLIP_MEAN, _CLIP_STD).to(device)
     gt = _normalise(gt, _CLIP_MEAN, _CLIP_STD).to(device)
-    ep = F.normalize(clip_enc.encode_image(pi).float(), dim=-1)
-    et = F.normalize(clip_enc.encode_image(gt).float(), dim=-1)
-    return float((ep * et).sum(-1).mean())
+    ep = clip_enc.encode_image(pi).float()
+    et = clip_enc.encode_image(gt).float()
+    return ep, et
+
+
+@torch.no_grad()
+def clip_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float:
+    ep, et = _clip_feature_pair(pred, target, device)
+    return _mean_cosine(ep, et)
 
 
 @torch.no_grad()
@@ -141,25 +182,28 @@ def _alexnet_features(imgs: torch.Tensor, layer: int, device) -> torch.Tensor:
 
 
 @torch.no_grad()
-def alexnet_layer2_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float:
+def _alexnet_feature_pair(pred: torch.Tensor, target: torch.Tensor, layer: int, device) -> tuple[torch.Tensor, torch.Tensor]:
     pi = F.interpolate(pred.cpu(), 224, mode="bilinear", align_corners=False)
     gt = F.interpolate(target.cpu(), 224, mode="bilinear", align_corners=False)
-    fp = F.normalize(_alexnet_features(pi, 2, device), dim=-1)
-    ft = F.normalize(_alexnet_features(gt, 2, device), dim=-1)
-    return float((fp * ft).sum(-1).mean())
+    fp = _alexnet_features(pi, layer, device)
+    ft = _alexnet_features(gt, layer, device)
+    return fp, ft
+
+
+@torch.no_grad()
+def alexnet_layer2_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float:
+    fp, ft = _alexnet_feature_pair(pred, target, ALEXNET_EARLY_LAYER, device)
+    return _mean_cosine(fp, ft)
 
 
 @torch.no_grad()
 def alexnet_layer5_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float:
-    pi = F.interpolate(pred.cpu(), 224, mode="bilinear", align_corners=False)
-    gt = F.interpolate(target.cpu(), 224, mode="bilinear", align_corners=False)
-    fp = F.normalize(_alexnet_features(pi, 5, device), dim=-1)
-    ft = F.normalize(_alexnet_features(gt, 5, device), dim=-1)
-    return float((fp * ft).sum(-1).mean())
+    fp, ft = _alexnet_feature_pair(pred, target, ALEXNET_MID_LAYER, device)
+    return _mean_cosine(fp, ft)
 
 
 @torch.no_grad()
-def inception_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float:
+def _inception_feature_pair(pred: torch.Tensor, target: torch.Tensor, device) -> tuple[torch.Tensor, torch.Tensor]:
     m = _get_inception(device)
     pi = F.interpolate(pred.cpu(), 299, mode="bilinear", align_corners=False)
     gt = F.interpolate(target.cpu(), 299, mode="bilinear", align_corners=False)
@@ -178,13 +222,19 @@ def inception_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> fl
         x = m.avgpool(x)
         return x.flatten(1)
 
-    fp = F.normalize(_feat(pi), dim=-1)
-    ft = F.normalize(_feat(gt), dim=-1)
-    return float((fp * ft).sum(-1).mean())
+    fp = _feat(pi)
+    ft = _feat(gt)
+    return fp, ft
 
 
 @torch.no_grad()
-def effnet_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float:
+def inception_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float:
+    fp, ft = _inception_feature_pair(pred, target, device)
+    return _mean_cosine(fp, ft)
+
+
+@torch.no_grad()
+def _effnet_feature_pair(pred: torch.Tensor, target: torch.Tensor, device) -> tuple[torch.Tensor, torch.Tensor]:
     m = _get_effnet(device)
     pi = F.interpolate(pred.cpu(), 240, mode="bilinear", align_corners=False)
     gt = F.interpolate(target.cpu(), 240, mode="bilinear", align_corners=False)
@@ -196,14 +246,22 @@ def effnet_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float
         x = m.avgpool(x)
         return x.flatten(1)
 
-    fp = F.normalize(_feat(pi), dim=-1)
-    ft = F.normalize(_feat(gt), dim=-1)
-    return float((fp * ft).sum(-1).mean())
+    fp = _feat(pi)
+    ft = _feat(gt)
+    return fp, ft
 
 
 @torch.no_grad()
-def swav_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float:
+def effnet_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float:
+    fp, ft = _effnet_feature_pair(pred, target, device)
+    return _mean_cosine(fp, ft)
+
+
+@torch.no_grad()
+def _swav_feature_pair(pred: torch.Tensor, target: torch.Tensor, device) -> tuple[torch.Tensor, torch.Tensor] | None:
     m = _get_swav(device)
+    if m is None:
+        return None
     pi = F.interpolate(pred.cpu(), 224, mode="bilinear", align_corners=False)
     gt = F.interpolate(target.cpu(), 224, mode="bilinear", align_corners=False)
     pi = _normalise(pi, _IN_MEAN, _IN_STD).to(device)
@@ -215,9 +273,18 @@ def swav_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float:
         x = m.avgpool(x)
         return x.flatten(1)
 
-    fp = F.normalize(_feat(pi), dim=-1)
-    ft = F.normalize(_feat(gt), dim=-1)
-    return float((fp * ft).sum(-1).mean())
+    fp = _feat(pi)
+    ft = _feat(gt)
+    return fp, ft
+
+
+@torch.no_grad()
+def swav_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float:
+    feats = _swav_feature_pair(pred, target, device)
+    if feats is None:
+        raise RuntimeError("SwAV is unavailable")
+    fp, ft = feats
+    return _mean_cosine(fp, ft)
 
 
 @torch.no_grad()
@@ -227,7 +294,7 @@ def evaluate_full(
     device,
     skip: list[str] | None = None,
 ) -> dict[str, float]:
-    """Compute the full 8-metric suite on a batch of images.
+    """Compute the full 8-metric suite on a set of predicted/target images.
 
     Args:
         pred_images:   (B, 3, H, W) float32 in [0, 1]
@@ -236,7 +303,12 @@ def evaluate_full(
         skip:          metric names to skip (e.g. ["SwAV"] if no internet)
 
     Returns:
-        dict mapping metric name -> score
+        dict mapping metric name -> score (cosine + *_2way keys).
+
+    Note:
+        2-way identification uses all-pairs foils from the passed feature
+        matrix. Callers should pass the full test set (or a large aggregated
+        set), not tiny mini-batches.
     """
     skip = skip or []
     metrics: dict[str, float] = {}
@@ -247,16 +319,32 @@ def evaluate_full(
 
     # GPU metrics (loaded lazily)
     if "AlexNet(2)" not in skip:
-        metrics["AlexNet(2)"] = alexnet_layer2_similarity(pred_images, target_images, device)
+        fp, ft = _alexnet_feature_pair(pred_images, target_images, ALEXNET_EARLY_LAYER, device)
+        metrics["AlexNet(2)"] = _mean_cosine(fp, ft)
+        metrics["AlexNet(2)_2way"] = two_way_identification(fp, ft)
     if "AlexNet(5)" not in skip:
-        metrics["AlexNet(5)"] = alexnet_layer5_similarity(pred_images, target_images, device)
+        fp, ft = _alexnet_feature_pair(pred_images, target_images, ALEXNET_MID_LAYER, device)
+        metrics["AlexNet(5)"] = _mean_cosine(fp, ft)
+        metrics["AlexNet(5)_2way"] = two_way_identification(fp, ft)
     if "Inception" not in skip:
-        metrics["Inception"]  = inception_similarity(pred_images, target_images, device)
+        fp, ft = _inception_feature_pair(pred_images, target_images, device)
+        metrics["Inception"] = _mean_cosine(fp, ft)
+        metrics["Inception_2way"] = two_way_identification(fp, ft)
     if "CLIP" not in skip:
-        metrics["CLIP"]       = clip_similarity(pred_images, target_images, device)
+        fp, ft = _clip_feature_pair(pred_images, target_images, device)
+        metrics["CLIP"] = _mean_cosine(fp, ft)
+        metrics["CLIP_2way"] = two_way_identification(fp, ft)
     if "EffNet-B" not in skip:
-        metrics["EffNet-B"]   = effnet_similarity(pred_images, target_images, device)
+        fp, ft = _effnet_feature_pair(pred_images, target_images, device)
+        metrics["EffNet-B"] = _mean_cosine(fp, ft)
+        metrics["EffNet-B_2way"] = two_way_identification(fp, ft)
     if "SwAV" not in skip:
-        metrics["SwAV"]       = swav_similarity(pred_images, target_images, device)
+        feats = _swav_feature_pair(pred_images, target_images, device)
+        if feats is None:
+            skip.append("SwAV")
+        else:
+            fp, ft = feats
+            metrics["SwAV"] = _mean_cosine(fp, ft)
+            metrics["SwAV_2way"] = two_way_identification(fp, ft)
 
     return metrics
