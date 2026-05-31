@@ -116,7 +116,7 @@ class BrainEncoder(nn.Module):
         self.input_proj = nn.Linear(self.max_vox, cfg.enc_hidden)
         self.stem_norm = nn.LayerNorm(cfg.enc_hidden)
         self.stem_act = nn.GELU()
-        self.stem_drop = nn.Dropout(float(getattr(cfg, "stem_drop", 0.15)))
+        self.stem_drop = nn.Dropout(0.3)
 
         self.blocks = nn.ModuleList([
             ResBlockMLP(
@@ -682,14 +682,6 @@ class BrainFlowV5(nn.Module):
             return self.flow_dit
         return self.flow_unet
 
-    def _expected_context_tokens(self) -> int:
-        n = int(self.cfg.n_tokens)
-        if getattr(self.cfg, "method", "baseline") == "dit":
-            n += 1
-        if self.clip_prior_head is not None:
-            n += 1
-        return n
-
     def _source_from_cls(self, cls: torch.Tensor) -> torch.Tensor:
         """Brain-manifold starting point: projected CLS + unit-variance noise.
 
@@ -752,11 +744,6 @@ class BrainFlowV5(nn.Module):
             clip_pred = self.clip_prior_head(cls)                        # (B, clip_dim)
             prior_tok = self.clip_to_brain(clip_pred).unsqueeze(1)       # (B, 1, brain_dim)
             tokens = torch.cat([tokens, prior_tok], dim=1)
-        assert tokens.shape[1] == self._expected_context_tokens(), (
-            f"context token mismatch at sampling: got {tokens.shape[1]}, "
-            f"expected {self._expected_context_tokens()}"
-        )
-
         # ── Source distribution ──
         if method == "hrf":
             assert cls is not None, "HRF method requires cls embedding for sampling"
@@ -871,11 +858,6 @@ class BrainFlowV5(nn.Module):
             tokens = torch.cat([tokens, prior_tok], dim=1)
             # Prior loss: 1 - cosine similarity with true CLIP embedding
             loss_clip_prior = 1.0 - (clip_pred * clip_emb).sum(-1).mean()
-        assert tokens.shape[1] == self._expected_context_tokens(), (
-            f"context token mismatch at train: got {tokens.shape[1]}, "
-            f"expected {self._expected_context_tokens()}"
-        )
-
         # Source distribution: brain-manifold (HRF) or pure noise (baseline/sb/dit)
         if method == "hrf":
             x0 = self._source_from_cls(cls_emb)
@@ -928,25 +910,9 @@ class BrainFlowV5(nn.Module):
         else:
             cls_clean = cls_emb
         labels = torch.arange(B, device=device)
-        use_mixco = bool(getattr(cfg, "use_mixco", True))
-        mixco_alpha = float(getattr(cfg, "mixco_alpha", 0.3))
-        if self.training and use_mixco and mixco_alpha > 0:
-            lam = float(np.random.beta(mixco_alpha, mixco_alpha))
-            lam = max(lam, 1.0 - lam)
-            perm = torch.randperm(B, device=device)
-            cls_anchor = F.normalize(
-                lam * cls_clean + (1.0 - lam) * cls_clean[perm], dim=-1
-            )
-            logits = (cls_anchor @ clip_emb.T) / cfg.infonce_temp
-            loss_i = lam * F.cross_entropy(logits, labels) + \
-                (1.0 - lam) * F.cross_entropy(logits, perm)
-            loss_t = lam * F.cross_entropy(logits.T, labels) + \
-                (1.0 - lam) * F.cross_entropy(logits.T, perm)
-            loss_align = (loss_i + loss_t) / 2
-        else:
-            logits = (cls_clean @ clip_emb.T) / cfg.infonce_temp
-            loss_align = (F.cross_entropy(logits, labels) +
-                          F.cross_entropy(logits.T, labels)) / 2
+        logits = (cls_clean @ clip_emb.T) / cfg.infonce_temp
+        loss_align = (F.cross_entropy(logits, labels) +
+                      F.cross_entropy(logits.T, labels)) / 2
 
         # DiT: diffusion-prior flow-matching loss on CLIP embeddings
         loss_prior = torch.tensor(0.0, device=device)

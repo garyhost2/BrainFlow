@@ -279,15 +279,6 @@ def main():
                     pbar.set_postfix(c=f"{ld['cfm'].item():.3f}",
                                      a=f"{ld['align'].item():.3f}")
 
-        # Flush remainder when dataloader length is not divisible by grad_accum.
-        if len(train_loader) % cfg.grad_accum != 0:
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-            scaler.step(optimizer); scaler.update(); optimizer.zero_grad()
-            if step >= cfg.ema_start:
-                ema.update(raw_model)
-            step += 1
-
         scheduler.step()
 
         # A.1: materialise accumulated tensors in a single batch — one sync per epoch
