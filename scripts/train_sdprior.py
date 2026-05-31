@@ -40,7 +40,7 @@ from brainflow.clip_prior import ClipPrior
 from brainflow.config import load_config
 from brainflow.data import build_dataloaders, is_dist, is_main, rank, world_size
 from brainflow.ema import EMA
-from brainflow.models import BrainEncoder
+from brainflow.models import BrainEncoder, migrate_input_proj
 
 load_dotenv()
 
@@ -180,6 +180,7 @@ def main():
         ckpt = torch.load(init_from, map_location="cpu", mmap=True)
         # Strip torch.compile prefix if present
         ckpt = {k.replace("._orig_mod.", "."): v for k, v in ckpt.items()}
+        ckpt = migrate_input_proj(ckpt, brain_enc.max_vox)
         # Accept both plain keys (brain_enc.*) and bare keys
         enc_ckpt = {}
         for k, v in ckpt.items():

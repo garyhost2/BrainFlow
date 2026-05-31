@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .config import Config
-from .models import BrainEncoder
+from .models import BrainEncoder, migrate_input_proj
 from .flow_clip_dit import FlowCLIPDiT
 from .flow_unet import FlowUNet
 from .ot_coupling import ot_minibatch_coupling
@@ -39,6 +39,7 @@ class BrainFlowPhase2(nn.Module):
         state = torch.load(ckpt_path, map_location="cpu")
         # Strip torch.compile prefix if present
         state = {k.replace("._orig_mod.", "."): v for k, v in state.items()}
+        state = migrate_input_proj(state, model.brain_enc.max_vox)
         enc_state = {k[len("brain_enc."):]: v
                      for k, v in state.items() if k.startswith("brain_enc.")}
         missing, unexpected = model.brain_enc.load_state_dict(enc_state, strict=False)
