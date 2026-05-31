@@ -112,3 +112,21 @@ def test_lpips_path_keeps_gradient():
     assert model.flow_unet.op.weight.grad is not None
     assert model.brain_enc.input_proj.weight.grad.abs().sum().item() > 0.0
     assert model.flow_unet.op.weight.grad.abs().sum().item() > 0.0
+
+
+def test_context_length_matches_train_and_sample():
+    cfg = Config()
+    cfg.subjects = [1]
+    cfg.method = "baseline"
+    cfg.use_clip_prior = True
+    cfg.enc_hidden = 64
+    cfg.enc_blocks = 1
+    cfg.brain_dim = 64
+    cfg.clip_dim = 64
+    cfg.n_tokens = 8
+    cfg.time_emb_dim = 64
+    cfg.unet_base_ch = 32
+    cfg.attn_heads = 4
+    model = BrainFlowV5(cfg, {1: 64})
+    assert model._expected_context_tokens(True) == cfg.n_tokens + 1
+    assert model._expected_context_tokens(False) == cfg.n_tokens
