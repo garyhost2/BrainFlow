@@ -116,7 +116,7 @@ class BrainEncoder(nn.Module):
         self.input_proj = nn.Linear(self.max_vox, cfg.enc_hidden)
         self.stem_norm = nn.LayerNorm(cfg.enc_hidden)
         self.stem_act = nn.GELU()
-        self.stem_drop = nn.Dropout(0.3)
+        self.stem_drop = nn.Dropout(float(getattr(cfg, "stem_drop", 0.15)))
 
         self.blocks = nn.ModuleList([
             ResBlockMLP(
@@ -682,6 +682,14 @@ class BrainFlowV5(nn.Module):
             return self.flow_dit
         return self.flow_unet
 
+    def _expected_context_tokens(self) -> int:
+        n = int(self.cfg.n_tokens)
+        if getattr(self.cfg, "method", "baseline") == "dit":
+            n += 1
+        if self.clip_prior_head is not None:
+            n += 1
+        return n
+
     def _source_from_cls(self, cls: torch.Tensor) -> torch.Tensor:
         """Brain-manifold starting point: projected CLS + unit-variance noise.
 
@@ -744,6 +752,10 @@ class BrainFlowV5(nn.Module):
             clip_pred = self.clip_prior_head(cls)                        # (B, clip_dim)
             prior_tok = self.clip_to_brain(clip_pred).unsqueeze(1)       # (B, 1, brain_dim)
             tokens = torch.cat([tokens, prior_tok], dim=1)
+        assert tokens.shape[1] == self._expected_context_tokens(), (
+            f"context token mismatch at sampling: got {tokens.shape[1]}, "
+            f"expected {self._expected_context_tokens()}"
+        )
 
         # ── Source distribution ──
         if method == "hrf":
@@ -859,6 +871,10 @@ class BrainFlowV5(nn.Module):
             tokens = torch.cat([tokens, prior_tok], dim=1)
             # Prior loss: 1 - cosine similarity with true CLIP embedding
             loss_clip_prior = 1.0 - (clip_pred * clip_emb).sum(-1).mean()
+        assert tokens.shape[1] == self._expected_context_tokens(), (
+            f"context token mismatch at train: got {tokens.shape[1]}, "
+            f"expected {self._expected_context_tokens()}"
+        )
 
         # Source distribution: brain-manifold (HRF) or pure noise (baseline/sb/dit)
         if method == "hrf":
@@ -911,10 +927,26 @@ class BrainFlowV5(nn.Module):
             _, cls_clean = self.encode_fmri(fmri, subject)
         else:
             cls_clean = cls_emb
-        logits = (cls_clean @ clip_emb.T) / cfg.infonce_temp
         labels = torch.arange(B, device=device)
-        loss_align = (F.cross_entropy(logits, labels) +
-                      F.cross_entropy(logits.T, labels)) / 2
+        use_mixco = bool(getattr(cfg, "use_mixco", True))
+        mixco_alpha = float(getattr(cfg, "mixco_alpha", 0.3))
+        if self.training and use_mixco and mixco_alpha > 0:
+            lam = float(np.random.beta(mixco_alpha, mixco_alpha))
+            lam = max(lam, 1.0 - lam)
+            perm = torch.randperm(B, device=device)
+            cls_anchor = F.normalize(
+                lam * cls_clean + (1.0 - lam) * cls_clean[perm], dim=-1
+            )
+            logits = (cls_anchor @ clip_emb.T) / cfg.infonce_temp
+            loss_i = lam * F.cross_entropy(logits, labels) + \
+                (1.0 - lam) * F.cross_entropy(logits, perm)
+            loss_t = lam * F.cross_entropy(logits.T, labels) + \
+                (1.0 - lam) * F.cross_entropy(logits.T, perm)
+            loss_align = (loss_i + loss_t) / 2
+        else:
+            logits = (cls_clean @ clip_emb.T) / cfg.infonce_temp
+            loss_align = (F.cross_entropy(logits, labels) +
+                          F.cross_entropy(logits.T, labels)) / 2
 
         # DiT: diffusion-prior flow-matching loss on CLIP embeddings
         loss_prior = torch.tensor(0.0, device=device)
@@ -924,34 +956,52 @@ class BrainFlowV5(nn.Module):
             kl_weight = vfm_kl_w * min(1.0, epoch / max(1, vfm_anneal))
             loss_prior = self.clip_prior.flow_loss(clip_emb, cls_clean, vfm_kl_weight=kl_weight)
 
-        # Compute perceptual loss if enabled
-        # Gate on t > 0.85: the approximation pred_latent ≈ xt + vt*(1-t) is only
-        # valid near t ≈ 1. At t < 0.5 xt is mostly noise, so decoded images are
-        # random — computing LPIPS against them injects chaotic gradients.
+        # Compute low-level losses from one-step endpoint estimate:
+        #   pred_latent_hat = xt + vt * (1 - t)
+        # Apply a soft t-weight (higher t gets more weight) with an optional
+        # hard floor to avoid decoding near-pure-noise latents at very low t.
+        percep_t_min = float(getattr(cfg, "percep_t_min", 0.5))
+        percep_t_power = float(getattr(cfg, "percep_t_power", 1.0))
+        pred_latent_hat = xt + vt * (1 - t_expand)
+
+        def _weighted_mean(vals: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+            denom = weights.sum().clamp_min(1e-8)
+            return (vals * weights).sum() / denom
+
+        def _per_sample_percep(pred_imgs: torch.Tensor, gt_imgs: torch.Tensor) -> torch.Tensor:
+            raw = percep_loss_fn(pred_imgs, gt_imgs)
+            if raw.ndim == 0:
+                if hasattr(percep_loss_fn, "lpips"):
+                    vals = percep_loss_fn.lpips(pred_imgs, gt_imgs)
+                    return vals.view(vals.shape[0], -1).mean(dim=1)
+                return (pred_imgs - gt_imgs).abs().flatten(1).mean(dim=1)
+            return raw.view(raw.shape[0], -1).mean(dim=1)
+
         loss_percep = torch.tensor(0.0, device=device)
         if percep_loss_fn is not None and vae is not None and cfg.lambda_percep > 0:
-            mask = t > 0.85
+            mask = t >= percep_t_min
             if mask.any():
-                pred_latent = (xt + vt * (1 - t_expand))[mask]
-                pred_imgs = vae.decode(pred_latent)           # [-1, 1]
+                pred_imgs = vae.decode_grad(pred_latent_hat[mask]) * 2.0 - 1.0
                 with torch.no_grad():
                     gt_imgs_masked = batch["image"].to(device, non_blocking=True)[mask]
                     gt_imgs_masked = gt_imgs_masked * 2.0 - 1.0  # [0,1] → [-1,1] for LPIPS
-                loss_percep = percep_loss_fn(pred_imgs, gt_imgs_masked)
+                w = t[mask].pow(percep_t_power)
+                per_sample = _per_sample_percep(pred_imgs, gt_imgs_masked)
+                loss_percep = _weighted_mean(per_sample, w)
 
-        # C.2: Pixel-space L1 loss — only at t > 0.85 where the approximation
-        # pred_lat ≈ xt + vt*(1-t) is valid (velocity ≈ constant near t=1).
+        # C.2: Pixel-space L1 loss with the same t-floor + soft weighting.
         loss_pixel = torch.tensor(0.0, device=device)
         lambda_pixel = getattr(cfg, "lambda_pixel", 0.0)
         if lambda_pixel > 0 and vae is not None:
-            mask = t > 0.85
+            mask = t >= percep_t_min
             if mask.any():
-                pred_lat = xt + vt * (1 - t_expand)
-                pred_imgs_px = vae.decode(pred_lat[mask])
+                pred_imgs_px = vae.decode_grad(pred_latent_hat[mask]) * 2.0 - 1.0
                 with torch.no_grad():
                     gt_imgs_px = batch["image"].to(device, non_blocking=True) * 2 - 1
                     gt_imgs_px = gt_imgs_px[mask]
-                loss_pixel = F.l1_loss(pred_imgs_px, gt_imgs_px)
+                per_sample_l1 = (pred_imgs_px - gt_imgs_px).abs().flatten(1).mean(dim=1)
+                w = t[mask].pow(percep_t_power)
+                loss_pixel = _weighted_mean(per_sample_l1, w)
 
         lambda_prior_w = getattr(cfg, "lambda_prior", 0.0)
         total = (cfg.lambda_cfm * loss_cfm
@@ -960,4 +1010,4 @@ class BrainFlowV5(nn.Module):
                  + lambda_prior_w * (loss_prior + loss_clip_prior)
                  + lambda_pixel * loss_pixel)
         return {"loss": total, "cfm": loss_cfm, "align": loss_align,
-                "percep": loss_percep, "prior": loss_prior}
+                "percep": loss_percep, "prior": loss_prior, "pixel": loss_pixel}

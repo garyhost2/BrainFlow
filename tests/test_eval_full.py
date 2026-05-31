@@ -13,7 +13,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from brainflow.metrics_full import evaluate_full
+from brainflow.metrics_full import evaluate_full, two_way_identification
 
 _SKIP = ["AlexNet(2)", "AlexNet(5)", "Inception", "CLIP", "EffNet-B", "SwAV"]
 _EXPECTED_KEYS = {"PixCorr", "SSIM"}
@@ -89,6 +89,43 @@ class TestSelfTestScript:
         )
         assert "PixCorr" in result.stdout
         assert "SSIM" in result.stdout
+
+
+class TestTwoWayIdentification:
+    def test_perfect_alignment_is_one(self):
+        feats = torch.eye(8)
+        assert two_way_identification(feats, feats.clone()) == 1.0
+
+    def test_random_alignment_is_near_half(self):
+        torch.manual_seed(0)
+        p = torch.randn(128, 64)
+        t = torch.randn(128, 64)
+        score = two_way_identification(p, t)
+        assert 0.35 <= score <= 0.65
+
+
+class TestEvaluateFullTwoWayKeys:
+    def test_returns_2way_keys(self, monkeypatch):
+        def _pair(pred, target, device):
+            B = pred.shape[0]
+            x = torch.eye(B, dtype=pred.dtype, device=pred.device)
+            return x, x.clone()
+
+        monkeypatch.setattr("brainflow.metrics_full._alexnet_feature_pair",
+                            lambda pred, target, layer, device: _pair(pred, target, device))
+        monkeypatch.setattr("brainflow.metrics_full._inception_feature_pair", _pair)
+        monkeypatch.setattr("brainflow.metrics_full._clip_feature_pair", _pair)
+        monkeypatch.setattr("brainflow.metrics_full._effnet_feature_pair", _pair)
+        monkeypatch.setattr("brainflow.metrics_full._swav_feature_pair", _pair)
+
+        pred = torch.rand(4, 3, 64, 64)
+        target = torch.rand(4, 3, 64, 64)
+        result = evaluate_full(pred, target, device="cpu")
+        expected = {
+            "AlexNet(2)_2way", "AlexNet(5)_2way", "Inception_2way",
+            "CLIP_2way", "EffNet-B_2way", "SwAV_2way",
+        }
+        assert expected <= result.keys()
 
 
 if __name__ == "__main__":

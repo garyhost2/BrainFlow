@@ -39,7 +39,8 @@ class Config:
     # Model
     enc_hidden: int = 1024
     enc_blocks: int = 4
-    enc_drop: float = 0.25
+    enc_drop: float = 0.15
+    stem_drop: float = 0.15
     n_tokens: int = 16
     brain_dim: int = 768
     token_drop_prob: float = 0.1
@@ -86,10 +87,14 @@ class Config:
     eval_solver: str = "euler"    # solver for training-time eval: euler | midpoint | heun
 
     # C.1 CLIP Prior head (use_clip_prior)
-    use_clip_prior: bool = False
+    use_clip_prior: bool = True
 
     # C.2 Pixel-space L1 loss
-    lambda_pixel: float = 0.0
+    lambda_pixel: float = 0.3
+    percep_t_min: float = 0.5
+    percep_t_power: float = 1.0
+    use_mixco: bool = True
+    mixco_alpha: float = 0.3
 
     # Method (formulation): "baseline" | "hrf" | "sb" | "dit"
     #   baseline — standard CFM from Gaussian noise → VAE latent
@@ -109,7 +114,7 @@ class Config:
     dit_depth: int = 12
     dit_heads: int = 8
     dit_patch: int = 4
-    lambda_prior: float = 0.2    # weight of the diffusion prior loss (also used by CLIPPriorHead)
+    lambda_prior: float = 0.3    # weight of the diffusion prior loss (also used by CLIPPriorHead)
     prior_ode_steps: int = 10    # sampling steps for the CLIP prior
     prior_dim: int = 512         # CLIPPrior hidden dim
     prior_blocks: int = 3        # CLIPPrior residual block count
@@ -210,7 +215,9 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         "cfg_scale", "fmri_noise_std", "fmri_mask_prob", "mixup_alpha",
         "infonce_temp", "clip_sample_prob_max", "clip_ramp_frac",
         "stochastic_depth", "enc_drop", "token_drop_prob",
-        "ot_reg", "logit_normal_m", "logit_normal_s", "vfm_kl_weight",
+        "stem_drop", "lambda_pixel", "lambda_prior", "percep_t_min",
+        "percep_t_power", "mixco_alpha", "ot_reg", "logit_normal_m",
+        "logit_normal_s", "vfm_kl_weight",
     }
     for key in _float_fields:
         if key in flat and not isinstance(flat[key], float):
