@@ -29,7 +29,7 @@ if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "enable_flas
 from brainflow.config import load_config
 from brainflow.config_overrides import apply_env_overrides
 from brainflow.data import build_dataloaders, is_dist, is_main, rank, world_size
-from brainflow.models import BrainFlowV5
+from brainflow.models import BrainFlowV5, migrate_input_proj
 from brainflow.ema import EMA
 from brainflow.vae import FrozenVAE
 from brainflow.metrics import evaluate
@@ -110,6 +110,9 @@ def main():
         for name, submodule in model.named_children():
             n_sub = _trainable_params(submodule)
             print(f"  {name}: {n_sub:,}")
+            if name == "brain_enc":
+                for child_name, child in submodule.named_children():
+                    print(f"    brain_enc.{child_name}: {_trainable_params(child):,}")
         print(f"  total: {n_total:,}")
 
     # Warm-start from a Stage-1 prior pretrain checkpoint (encoder + clip_prior weights).
@@ -122,6 +125,7 @@ def main():
         else:
             ckpt = torch.load(init_from, map_location="cpu")
             ckpt = {k.replace("._orig_mod.", "."): v for k, v in ckpt.items()}
+            ckpt = migrate_input_proj(ckpt, model.brain_enc.max_vox)
             missing, unexpected = model.load_state_dict(ckpt, strict=False)
             if is_main():
                 loaded = len(ckpt) - len(unexpected)

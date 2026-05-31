@@ -35,6 +35,7 @@ if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "enable_flas
 from brainflow.config import load_config
 from brainflow.data import build_dataloaders, is_dist, is_main, rank, world_size
 from brainflow.phase2_model import BrainFlowPhase2
+from brainflow.models import migrate_input_proj
 from brainflow.ema import EMA
 from brainflow.vae import FrozenVAE
 from brainflow.metrics import evaluate
@@ -173,6 +174,7 @@ def main():
         ckpt = torch.load(init_from, map_location="cpu")
         # Strip torch.compile prefix if present
         ckpt = {k.replace("._orig_mod.", "."): v for k, v in ckpt.items()}
+        ckpt = migrate_input_proj(ckpt, raw_model.brain_enc.max_vox)
         missing, unexpected = raw_model.load_state_dict(ckpt, strict=False)
         if is_main():
             loaded = len(ckpt) - len(unexpected)

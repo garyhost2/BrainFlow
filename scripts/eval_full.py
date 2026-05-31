@@ -114,6 +114,7 @@ def run_full_eval(args: argparse.Namespace) -> int:
         return 1
 
     state = torch.load(ckpt_path, map_location="cpu")
+    state = {k.replace("._orig_mod.", "."): v for k, v in state.items()}
     # Detect Phase 2 vs Phase 1 by key prefix
     is_phase2 = any(k.startswith("flow_clip.") for k in state.keys())
 
@@ -122,8 +123,9 @@ def run_full_eval(args: argparse.Namespace) -> int:
         model = BrainFlowPhase2(cfg, voxels).to(device).eval()
         model.load_state_dict(state, strict=False)
     else:
-        from brainflow.models import BrainFlowV5
+        from brainflow.models import BrainFlowV5, migrate_input_proj
         model = BrainFlowV5(cfg, voxels).to(device).eval()
+        state = migrate_input_proj(state, model.brain_enc.max_vox)
         model.load_state_dict(state, strict=False)
 
     print(f"Loaded {'Phase 2' if is_phase2 else 'Phase 1'} checkpoint: {ckpt_path}")
