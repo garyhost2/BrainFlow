@@ -32,7 +32,8 @@ dataloader:
 model:
   enc_hidden: 1024
   enc_blocks: 4
-  enc_drop: 0.25
+  enc_drop: 0.15
+  stem_drop: 0.15
   n_tokens: 16
   brain_dim: 768
   token_drop_prob: 0.1
@@ -46,7 +47,7 @@ model:
 
 training:
   num_epochs: 150
-  grad_accum: 1            # was 2; set to 1 since batch_size_per_gpu doubled
+  grad_accum: 4            # effective batch = per_gpu_batch * grad_accum * world_size (target >= 512)
   lr: 2.5e-4               # √2 scaled from 2.0e-4
   warmup_epochs: 10
   min_lr: 1.0e-5
@@ -56,6 +57,9 @@ training:
   lambda_align: 0.2        # was 0.5 — InfoNCE was dominating
   lambda_cfm: 1.0
   lambda_percep: 0.15          # weight for LPIPS/L1 loss (0.0 = disabled)
+  lambda_pixel: 0.3            # pixel-space L1 low-level supervision
+  percep_t_min: 0.5            # hard floor for low-level decode path
+  percep_t_power: 1.0          # soft t-weight exponent (higher t => higher weight)
   vfm_kl_weight: 0.0           # disabled — enable later when model is stable
   vfm_kl_anneal_epochs: 50
   percep_loss: "lpips"         # none | lpips | l1
@@ -65,6 +69,8 @@ training:
   fmri_noise_std: 0.05
   fmri_mask_prob: 0.0      # was 0.05
   mixup_alpha: 0.0         # was 0.2 (mixup is incompatible with hrf source; disabled globally)
+  use_mixco: true          # CLIP-space MixCo/BiMixCo for alignment loss
+  mixco_alpha: 0.3
   ema_decay: 0.999         # was 0.9995 (faster ramp-up)
   ema_start: 4000          # was 200 (wait ~2 epochs before EMA)
   eval_freq: 5
@@ -79,6 +85,8 @@ inference:
   eval_ode_steps: 10       # faster eval during training (10-step Euler)
   eval_solver: "dpm2m"     # euler | midpoint | heun | dpm2m
   prior_ode_steps: 20      # ODE steps for CLIPPrior.sample() during inference
+  use_clip_prior: true
+  lambda_prior: 0.3
 
 output:
   output_dir: "./outputs"
