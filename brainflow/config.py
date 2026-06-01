@@ -43,6 +43,8 @@ class Config:
     stem_drop: float = 0.15
     n_tokens: int = 64
     brain_dim: int = 1024
+    enc_token_attn_layers: int = 0  # self-attn layers over brain tokens; 0 keeps current behavior
+    enc_token_attn_heads: int = 8   # attention heads for encoder token self-attention
     token_drop_prob: float = 0.1
     stochastic_depth: float = 0.1
     unet_base_ch: int = 128
@@ -100,6 +102,8 @@ class Config:
     percep_t_power: float = 1.0
     use_mixco: bool = True
     mixco_alpha: float = 0.3
+    softclip_start_epoch: int = -1  # switch hard contrastive loss → SoftCLIP at this epoch; -1 disables
+    softclip_temp: float = 0.006    # temperature for CLIP→CLIP soft targets during SoftCLIP
 
     # Method (formulation): "baseline" | "hrf" | "sb" | "dit"
     #   baseline — standard CFM from Gaussian noise → VAE latent
@@ -226,7 +230,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         "stochastic_depth", "enc_drop", "token_drop_prob",
         "stem_drop", "lambda_pixel", "lambda_prior", "percep_t_min",
         "percep_t_power", "mixco_alpha", "ot_reg", "logit_normal_m",
-        "logit_normal_s", "vfm_kl_weight", "ridge_lambda",
+        "logit_normal_s", "vfm_kl_weight", "ridge_lambda", "softclip_temp",
     }
     for key in _float_fields:
         if key in flat and not isinstance(flat[key], float):

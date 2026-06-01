@@ -119,3 +119,79 @@ def test_old_checkpoint_loads_with_noop_new_paths():
     out_b = model.encode_fmri(fmri, torch.tensor([2]))
     assert torch.allclose(out_a.cls, out_b.cls, atol=1e-6)
     assert torch.allclose(out_a.cls_align, out_b.cls_align, atol=1e-6)
+
+
+def test_token_self_attention_is_identity_at_init():
+    torch.manual_seed(0)
+    cfg_base = _wide_cfg()
+    cfg_base.enc_token_attn_layers = 0
+    cfg_base.enc_token_attn_heads = 4
+    enc_base = BrainEncoder(cfg_base, {1: 32, 2: 32})
+
+    cfg_attn = _wide_cfg()
+    cfg_attn.enc_token_attn_layers = 2
+    cfg_attn.enc_token_attn_heads = 4
+    enc_attn = BrainEncoder(cfg_attn, {1: 32, 2: 32})
+    missing, unexpected = enc_attn.load_state_dict(enc_base.state_dict(), strict=False)
+    enc_base.eval()
+    enc_attn.eval()
+
+    assert unexpected == []
+    assert len(enc_attn.token_attn) == 2
+    assert sum(p.numel() for p in enc_attn.parameters()) > sum(p.numel() for p in enc_base.parameters())
+    assert all(key.startswith("token_attn.") for key in missing)
+
+    fmri = torch.randn(3, 32)
+    subject = torch.tensor([1, 1, 1], dtype=torch.long)
+    out_base = enc_base(fmri, subject)
+    out_attn = enc_attn(fmri, subject)
+
+    assert torch.allclose(out_attn.tokens, out_base.tokens, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(out_attn.cls, out_base.cls, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(out_attn.cls_align, out_base.cls_align, atol=1e-6, rtol=1e-6)
+
+
+def test_softclip_curriculum_switches_at_configured_epoch():
+    torch.manual_seed(0)
+    cfg = _wide_cfg()
+    cfg.enc_token_attn_layers = 0
+    cfg.use_mixco = False
+    cfg.mixup_alpha = 0.0
+    cfg.softclip_start_epoch = 1
+    cfg.softclip_temp = 0.006
+
+    model = BrainFlowV5(cfg, {1: 32, 2: 32})
+    model.eval()
+    batch = {
+        "fmri": torch.randn(3, 32),
+        "latent": torch.randn(3, 4, 32, 32),
+        "clip_emb": F.normalize(torch.randn(3, cfg.clip_dim), dim=-1),
+        "subject": torch.tensor([1, 1, 1], dtype=torch.long),
+        "image": torch.rand(3, 3, 32, 32),
+    }
+
+    with torch.no_grad():
+        enc_out = model.encode_fmri(batch["fmri"], batch["subject"])
+        logits = ((enc_out.cls_align @ batch["clip_emb"].T) / cfg.infonce_temp).float()
+        labels = torch.arange(batch["fmri"].shape[0], dtype=torch.long)
+        soft_target = F.softmax(
+            (batch["clip_emb"].float() @ batch["clip_emb"].float().T) / cfg.softclip_temp,
+            dim=-1,
+        )
+        hard_align = (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2
+        soft_align = (
+            -(soft_target * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+            - (soft_target.T * F.log_softmax(logits.T, dim=-1)).sum(dim=-1).mean()
+        ) / 2
+
+    assert torch.allclose(soft_target.sum(dim=-1), torch.ones(soft_target.shape[0]), atol=1e-6)
+
+    loss_hard = model.training_step(batch, torch.device("cpu"), epoch=0)
+    loss_soft = model.training_step(batch, torch.device("cpu"), epoch=1)
+    loss_soft["loss"].backward()
+
+    assert torch.allclose(loss_hard["align"], hard_align, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(loss_soft["align"], soft_align, atol=1e-6, rtol=1e-6)
+    assert torch.isfinite(loss_soft["align"])
+    assert model.brain_enc.align_proj.weight.grad is not None
+    assert torch.isfinite(model.brain_enc.align_proj.weight.grad).all()
