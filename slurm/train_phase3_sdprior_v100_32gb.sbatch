@@ -1,8 +1,9 @@
 #!/bin/bash -l
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 3 SDPrior — ClipPrior training on 1×V100 32GB.
-# Frozen BrainEncoder + trainable ClipPrior (~20M params).
-# No patch cache needed → fits in 80G RAM easily.
+# Trainable BrainEncoder + ClipPrior (~20M params).
+# If enabling `prior_target: patches`, keep RAM headroom and consider
+# lowering batch_size_per_gpu (e.g. 16 -> 8) for V100 32GB.
 # Expected: ~4h for 100 epochs.
 #
 #   Submit:  sbatch slurm/train_phase3_sdprior_v100_32gb.sbatch
