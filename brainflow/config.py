@@ -123,6 +123,9 @@ class Config:
     prior_ode_steps: int = 10    # sampling steps for the CLIP prior
     prior_dim: int = 512         # CLIPPrior hidden dim
     prior_blocks: int = 3        # CLIPPrior residual block count
+    decoder_model_id: str = "stabilityai/stable-diffusion-2-1-unclip"
+    decoder_num_inference_steps: int = 30
+    decoder_guidance_scale: float = 7.5
 
     # ── Phase 2: VFM + Flow_CLIP + hierarchical conditioning ──────────────────
     # VFM objective toggle: "cfm" | "vfm"

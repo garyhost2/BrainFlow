@@ -228,3 +228,29 @@ printed to stdout as a formatted table.
   Subject-1 numbers not filled in here to avoid misquoting; consult Table 1 of the paper directly.
 
 Use `brainflow/metrics_full.py` → `evaluate_full()` to compute these numbers.
+
+---
+
+## 7. Phase 3 SDPrior frozen-decoder path
+
+New additive pipeline:
+
+`fMRI -> BrainEncoder tokens -> ClipPrior -> CLIP image embedding -> FrozenImageEmbeddingDecoder -> image`
+
+- **Trained:** BrainEncoder + ClipPrior (flow loss + InfoNCE alignment)
+- **Frozen:** pretrained diffusion decoder (`decoder_model_id`)
+- **Eval harness:** `scripts/eval_sdprior.py` computes `cosine` plus full `evaluate_full` 8-metric outputs (including `*_2way` keys)
+
+Run:
+
+```bash
+BRAINFLOW_CONFIG=configs/phase3_sdprior.yaml \
+INIT_FROM=outputs/best_pc_v5.pt \
+python -m scripts.train_sdprior
+
+BRAINFLOW_CONFIG=configs/phase3_sdprior.yaml \
+CHECKPOINT=outputs/phase3_sdprior/best_clip_cos.pt \
+python -m scripts.eval_sdprior
+```
+
+Decoder weights are fetched on first use into `data_dir/hf_cache`; offline runs must pre-cache these files.
