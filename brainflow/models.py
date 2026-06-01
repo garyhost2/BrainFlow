@@ -1,5 +1,6 @@
-"""BrainFlow v5 model: per-subject input projection + shared encoder + UNet."""
+"""BrainFlow v5 model: shared encoder, subject adapters, and flow backbones."""
 from __future__ import annotations
+from dataclasses import dataclass
 import math, random
 from typing import Dict
 import numpy as np
@@ -8,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .config import Config
+from .ridge_init import load_ridge_init_state
 
 
 def _double_gamma_hrf(length: int, peak: float = 6.0, undershoot: float = 16.0,
@@ -101,6 +103,42 @@ class ResBlockMLP(nn.Module):
         return x + self.net(self.norm(x))
 
 
+@dataclass
+class BrainEncoderOutput:
+    tokens: torch.Tensor
+    cls: torch.Tensor
+    cls_align: torch.Tensor
+
+    def __iter__(self):
+        yield self.tokens
+        yield self.cls
+
+
+class SubjectResidualAdapter(nn.Module):
+    """Per-subject low-rank residual on shared stem features.
+
+    Uses embedding lookups so only the active subject's adapter weights receive
+    gradients each step, avoiding the DDP allreduce waste from full per-subject
+    projection layers.
+    """
+    def __init__(self, n_subjects: int, hidden_dim: int, rank: int):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.rank = max(1, int(rank))
+        self.down = nn.Embedding(n_subjects, hidden_dim * self.rank)
+        self.up = nn.Embedding(n_subjects, self.rank * hidden_dim)
+        self.bias = nn.Embedding(n_subjects, hidden_dim)
+        nn.init.zeros_(self.down.weight)
+        nn.init.zeros_(self.up.weight)
+        nn.init.zeros_(self.bias.weight)
+
+    def forward(self, h: torch.Tensor, subject_idx: torch.Tensor) -> torch.Tensor:
+        down = self.down(subject_idx).view(-1, self.hidden_dim, self.rank)
+        up = self.up(subject_idx).view(-1, self.rank, self.hidden_dim)
+        delta = torch.bmm(torch.bmm(h.unsqueeze(1), down), up).squeeze(1)
+        return h + delta + self.bias(subject_idx)
+
+
 class BrainEncoder(nn.Module):
     """fMRI → (B, N_TOKENS, BRAIN_DIM) tokens + (B, BRAIN_DIM) cls.
     Shared input projection with zero-padding for variable-voxel subjects.
@@ -110,10 +148,26 @@ class BrainEncoder(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.subjects = sorted(voxels_per_subject.keys())
+        self.use_subject_heads = bool(getattr(cfg, "use_subject_heads", True))
+        self.use_ridge_init = bool(getattr(cfg, "use_ridge_init", True))
+        self.subject_head_rank = int(getattr(cfg, "subject_head_rank", 16))
         # A.4: shared projection; pad shorter subjects' fmri with zeros on-the-fly
         self.voxels_per_subject = dict(voxels_per_subject)
         self.max_vox = max(voxels_per_subject.values())
         self.input_proj = nn.Linear(self.max_vox, cfg.enc_hidden)
+        max_subject_id = max(self.subjects) if self.subjects else 0
+        subject_lookup = torch.full((max_subject_id + 1,), -1, dtype=torch.long)
+        for i, sid in enumerate(self.subjects):
+            subject_lookup[sid] = i
+        self.register_buffer("subject_lookup", subject_lookup, persistent=False)
+        if self.use_subject_heads and self.subjects:
+            self.subject_adapter = SubjectResidualAdapter(
+                n_subjects=len(self.subjects),
+                hidden_dim=cfg.enc_hidden,
+                rank=self.subject_head_rank,
+            )
+        else:
+            self.subject_adapter = None
         self.stem_norm = nn.LayerNorm(cfg.enc_hidden)
         self.stem_act = nn.GELU()
         self.stem_drop = nn.Dropout(float(getattr(cfg, "stem_drop", 0.15)))
@@ -132,18 +186,59 @@ class BrainEncoder(nn.Module):
             nn.Dropout(0.1),
         )
         self.cls_head = nn.Linear(cfg.enc_hidden, cfg.brain_dim)
+        self.align_proj = nn.Linear(cfg.brain_dim, cfg.clip_dim)
+        self.ridge_skip = nn.Linear(self.max_vox, cfg.clip_dim)
+        nn.init.zeros_(self.ridge_skip.weight)
+        nn.init.zeros_(self.ridge_skip.bias)
+        self._maybe_load_ridge_init()
 
-    def forward(self, fmri: torch.Tensor, subject: torch.Tensor):
-        sid = int(subject[0].item())
-        v = self.voxels_per_subject[sid]
-        if v < self.max_vox:
-            fmri = F.pad(fmri, (0, self.max_vox - v))
-        h = self.stem_drop(self.stem_act(self.stem_norm(self.input_proj(fmri))))
+    def _subject_indices(self, subject: torch.Tensor | int, batch_size: int, device) -> torch.Tensor:
+        if isinstance(subject, int):
+            subject = torch.full((batch_size,), subject, device=device, dtype=torch.long)
+        elif not torch.is_tensor(subject):
+            subject = torch.as_tensor(subject, device=device, dtype=torch.long)
+        else:
+            subject = subject.to(device=device, dtype=torch.long).view(-1)
+        if subject.numel() == 1 and batch_size != 1:
+            subject = subject.expand(batch_size)
+        if subject.numel() != batch_size:
+            raise ValueError(f"Expected {batch_size} subject ids, got {subject.numel()}.")
+        if subject.max().item() >= self.subject_lookup.numel():
+            raise KeyError(f"Unknown subject id(s): {subject.tolist()}")
+        subject_idx = self.subject_lookup[subject]
+        if (subject_idx < 0).any():
+            raise KeyError(f"Unknown subject id(s): {subject.tolist()}")
+        return subject_idx
+
+    def _maybe_load_ridge_init(self) -> None:
+        if not self.use_ridge_init:
+            return
+        ridge_state = load_ridge_init_state(self.cfg, self.max_vox, self.cfg.clip_dim)
+        if ridge_state is None:
+            return
+        with torch.no_grad():
+            self.ridge_skip.weight.copy_(ridge_state["weight"])
+            self.ridge_skip.bias.copy_(ridge_state["bias"])
+
+    def forward(self, fmri: torch.Tensor, subject: torch.Tensor | int):
+        if fmri.shape[-1] > self.max_vox:
+            raise ValueError(f"fMRI width {fmri.shape[-1]} exceeds max_vox {self.max_vox}.")
+        if fmri.shape[-1] < self.max_vox:
+            fmri = F.pad(fmri, (0, self.max_vox - fmri.shape[-1]))
+        subject_idx = self._subject_indices(subject, fmri.shape[0], fmri.device)
+        h = self.input_proj(fmri)
+        if self.subject_adapter is not None:
+            h = self.subject_adapter(h, subject_idx)
+        h = self.stem_drop(self.stem_act(self.stem_norm(h)))
         for b in self.blocks:
             h = b(h)
         tokens = self.to_tokens(h)
         cls = F.normalize(self.cls_head(h), dim=-1)
-        return tokens, cls
+        cls_align = self.align_proj(cls)
+        if self.use_ridge_init:
+            cls_align = cls_align + self.ridge_skip(fmri)
+        cls_align = F.normalize(cls_align, dim=-1)
+        return BrainEncoderOutput(tokens=tokens, cls=cls, cls_align=cls_align)
 
 
 
@@ -570,7 +665,9 @@ def migrate_input_proj(state_dict: dict, new_max_vox: int) -> dict:
 
     A warning is always printed when migration occurs so future regressions are
     visible. A hard crash is never raised — worst case the projection is random
-    and training resumes from that starting point.
+    and training resumes from that starting point. New subject-adapter / ridge
+    skip parameters are intentionally left absent so strict=False loading keeps
+    their zero-init no-op behaviour.
     """
     new_key = "brain_enc.input_proj.weight"
     if new_key in state_dict:
@@ -845,7 +942,9 @@ class BrainFlowV5(nn.Module):
             fmri_mixed = fmri
             lam = 1.0
 
-        tokens, cls_emb = self.encode_fmri(fmri_mixed, subject)
+        enc_out = self.encode_fmri(fmri_mixed, subject)
+        tokens, cls_emb = enc_out
+        cls_align = enc_out.cls_align
 
         # DiT: teacher-force the CLIP prior token onto the context.
         # Curriculum exposure bias fix: ramp up prior-sample probability from 0 → 0.3
@@ -922,9 +1021,12 @@ class BrainFlowV5(nn.Module):
         loss_cfm = F.mse_loss(vt, ut)
 
         if lam < 1.0:
-            _, cls_clean = self.encode_fmri(fmri, subject)
+            clean_out = self.encode_fmri(fmri, subject)
+            _, cls_clean = clean_out
+            cls_clean_align = clean_out.cls_align
         else:
             cls_clean = cls_emb
+            cls_clean_align = cls_align
         labels = torch.arange(B, device=device)
         use_mixco = bool(getattr(cfg, "use_mixco", True))
         mixco_alpha = float(getattr(cfg, "mixco_alpha", 0.3))
@@ -933,7 +1035,7 @@ class BrainFlowV5(nn.Module):
             lam = max(lam, 1.0 - lam)
             perm = torch.randperm(B, device=device)
             cls_anchor = F.normalize(
-                lam * cls_clean + (1.0 - lam) * cls_clean[perm], dim=-1
+                lam * cls_clean_align + (1.0 - lam) * cls_clean_align[perm], dim=-1
             )
             logits = (cls_anchor @ clip_emb.T) / cfg.infonce_temp
             loss_i = lam * F.cross_entropy(logits, labels) + \
@@ -942,7 +1044,7 @@ class BrainFlowV5(nn.Module):
                 (1.0 - lam) * F.cross_entropy(logits.T, perm)
             loss_align = (loss_i + loss_t) / 2
         else:
-            logits = (cls_clean @ clip_emb.T) / cfg.infonce_temp
+            logits = (cls_clean_align @ clip_emb.T) / cfg.infonce_temp
             loss_align = (F.cross_entropy(logits, labels) +
                           F.cross_entropy(logits.T, labels)) / 2
 

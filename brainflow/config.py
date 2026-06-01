@@ -41,8 +41,8 @@ class Config:
     enc_blocks: int = 4
     enc_drop: float = 0.15
     stem_drop: float = 0.15
-    n_tokens: int = 16
-    brain_dim: int = 768
+    n_tokens: int = 64
+    brain_dim: int = 1024
     token_drop_prob: float = 0.1
     stochastic_depth: float = 0.1
     unet_base_ch: int = 128
@@ -51,6 +51,11 @@ class Config:
     latent_ch: int = 4
     latent_res: int = 32
     clip_dim: int = 768
+    use_subject_heads: bool = True
+    subject_head_rank: int = 16
+    use_ridge_init: bool = True
+    ridge_lambda: float = 1e3
+    ridge_init_cache: str = "ridge_init.pt"
 
     # Training
     num_epochs: int = 150
@@ -217,7 +222,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         "stochastic_depth", "enc_drop", "token_drop_prob",
         "stem_drop", "lambda_pixel", "lambda_prior", "percep_t_min",
         "percep_t_power", "mixco_alpha", "ot_reg", "logit_normal_m",
-        "logit_normal_s", "vfm_kl_weight",
+        "logit_normal_s", "vfm_kl_weight", "ridge_lambda",
     }
     for key in _float_fields:
         if key in flat and not isinstance(flat[key], float):
