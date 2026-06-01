@@ -130,6 +130,30 @@ Flags: `--ckpt`, `--subject`, `--ode-steps`, `--solver`, `--schedule`,
 `--cfg-scale`, `--out-dir`.  Results are printed as a table and written to
 `outputs/<experiment>/full_metrics.json`.
 
+#### Item 5 — SDPrior + frozen diffusion decoder (`scripts/train_sdprior.py`)
+
+Additive Phase-3 path:
+
+`fMRI -> BrainEncoder tokens -> ClipPrior -> CLIP image embedding -> FrozenImageEmbeddingDecoder -> image`
+
+- Trained: `BrainEncoder` and `ClipPrior`
+- Frozen: diffusion decoder (`decoder_model_id`, loaded lazily)
+- Eval: `python -m scripts.eval_sdprior` routes outputs into `brainflow.metrics_full.evaluate_full`
+
+```bash
+# train
+BRAINFLOW_CONFIG=configs/phase3_sdprior.yaml \
+INIT_FROM=outputs/best_pc_v5.pt \
+python -m scripts.train_sdprior
+
+# eval (8 metrics + cosine + *_2way keys)
+BRAINFLOW_CONFIG=configs/phase3_sdprior.yaml \
+CHECKPOINT=outputs/phase3_sdprior/best_clip_cos.pt \
+python -m scripts.eval_sdprior
+```
+
+Decoder weights download on first use into `data_dir/hf_cache`; offline runs must pre-cache that model.
+
 ## Highlights — v5
 
 - **Multi-subject training** (1..8) via per-subject input projection
