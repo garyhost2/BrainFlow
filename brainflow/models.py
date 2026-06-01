@@ -139,6 +139,27 @@ class SubjectResidualAdapter(nn.Module):
         return h + delta + self.bias(subject_idx)
 
 
+class TokenSelfAttention(nn.Module):
+    def __init__(self, dim: int, n_heads: int):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, n_heads, batch_first=True, dropout=0.0)
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, dim * 4),
+            nn.GELU(),
+            nn.Linear(dim * 4, dim),
+        )
+        nn.init.zeros_(self.attn.out_proj.weight)
+        nn.init.zeros_(self.attn.out_proj.bias)
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x), self.norm1(x), self.norm1(x), need_weights=False)[0]
+        return x + self.mlp(self.norm2(x))
+
+
 class BrainEncoder(nn.Module):
     """fMRI → (B, N_TOKENS, BRAIN_DIM) tokens + (B, BRAIN_DIM) cls.
     Shared input projection with zero-padding for variable-voxel subjects.
@@ -185,6 +206,14 @@ class BrainEncoder(nn.Module):
             nn.LayerNorm(cfg.brain_dim),
             nn.Dropout(0.1),
         )
+        n_token_attn = int(getattr(cfg, "enc_token_attn_layers", 0))
+        if n_token_attn > 0:
+            self.token_attn = nn.ModuleList([
+                TokenSelfAttention(cfg.brain_dim, cfg.enc_token_attn_heads)
+                for _ in range(n_token_attn)
+            ])
+        else:
+            self.token_attn = None
         self.cls_head = nn.Linear(cfg.enc_hidden, cfg.brain_dim)
         self.align_proj = nn.Linear(cfg.brain_dim, cfg.clip_dim)
         self.ridge_skip = nn.Linear(self.max_vox, cfg.clip_dim)
@@ -233,6 +262,9 @@ class BrainEncoder(nn.Module):
         for b in self.blocks:
             h = b(h)
         tokens = self.to_tokens(h)
+        if self.token_attn is not None:
+            for blk in self.token_attn:
+                tokens = blk(tokens)
         cls = F.normalize(self.cls_head(h), dim=-1)
         cls_align = self.align_proj(cls)
         if self.use_ridge_init:
@@ -1028,9 +1060,18 @@ class BrainFlowV5(nn.Module):
             cls_clean = cls_emb
             cls_clean_align = cls_align
         labels = torch.arange(B, device=device)
+        softclip_start_epoch = int(getattr(cfg, "softclip_start_epoch", -1))
+        use_softclip = softclip_start_epoch >= 0 and epoch >= softclip_start_epoch
         use_mixco = bool(getattr(cfg, "use_mixco", True))
         mixco_alpha = float(getattr(cfg, "mixco_alpha", 0.3))
-        if self.training and use_mixco and mixco_alpha > 0:
+        if use_softclip:
+            logits = ((cls_clean_align @ clip_emb.T) / cfg.infonce_temp).float()
+            with torch.no_grad():
+                target = F.softmax(((clip_emb.float() @ clip_emb.float().T) / cfg.softclip_temp), dim=-1)
+            loss_i = -(target * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+            loss_t = -(target.T * F.log_softmax(logits.T, dim=-1)).sum(dim=-1).mean()
+            loss_align = (loss_i + loss_t) / 2
+        elif self.training and use_mixco and mixco_alpha > 0:
             lam = float(np.random.beta(mixco_alpha, mixco_alpha))
             lam = max(lam, 1.0 - lam)
             perm = torch.randperm(B, device=device)
