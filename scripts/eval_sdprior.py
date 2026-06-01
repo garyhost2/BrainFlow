@@ -41,10 +41,22 @@ def evaluate_sdprior(brain_enc, prior, decoder, loader, cfg, device):
             cfg_scale=float(getattr(cfg, "cfg_scale", 1.0)),
             normalize_output=True,
         )
-        cos_vals.append(F.cosine_similarity(clip_pred, clip_gt, dim=-1).cpu())
+        if getattr(prior, "prior_target", "cls") == "patches":
+            if "clip_patches" not in batch:
+                raise RuntimeError("prior_target='patches' requires clip_patches in eval batches.")
+            clip_metric = F.normalize(prior.patches_to_embedding(clip_pred), dim=-1)
+            clip_gt_metric = F.normalize(
+                prior.patches_to_embedding(batch["clip_patches"].to(device).float()),
+                dim=-1,
+            )
+        else:
+            clip_metric = clip_pred
+            clip_gt_metric = clip_gt
+        cos_vals.append(F.cosine_similarity(clip_metric, clip_gt_metric, dim=-1).cpu())
 
         pred = decoder.generate(
-            clip_pred,
+            clip_image_embedding=None if getattr(prior, "prior_target", "cls") == "patches" else clip_pred,
+            clip_patch_tokens=clip_pred if getattr(prior, "prior_target", "cls") == "patches" else None,
             num_inference_steps=int(getattr(cfg, "decoder_num_inference_steps", 30)),
             guidance_scale=float(getattr(cfg, "decoder_guidance_scale", 7.5)),
         )
@@ -79,6 +91,7 @@ def main():
         dropout=cfg.enc_drop,
         cfg_drop=cfg.cfg_drop_prob,
         geometry=getattr(cfg, "geometry", getattr(cfg, "clip_prior_geometry", "euclidean")),
+        prior_target=getattr(cfg, "prior_target", "cls"),
     ).to(device)
     decoder = FrozenImageEmbeddingDecoder(
         model_id=cfg.decoder_model_id,

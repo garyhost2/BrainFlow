@@ -72,10 +72,18 @@ class FrozenImageEmbeddingDecoder(nn.Module):
     @torch.no_grad()
     def generate(
         self,
-        clip_image_embedding: torch.Tensor,
+        clip_image_embedding: torch.Tensor | None = None,
+        clip_patch_tokens: torch.Tensor | None = None,
         num_inference_steps: int = 30,
         guidance_scale: float = 7.5,
     ) -> torch.Tensor:
+        if clip_image_embedding is None:
+            if clip_patch_tokens is None:
+                raise ValueError("Either clip_image_embedding or clip_patch_tokens must be provided.")
+            # Stable-diffusion-2-1-unclip accepts global image embeddings only.
+            # Fallback for patch mode: mean-pool real ViT-L/14 patch positions (196).
+            clip_image_embedding = clip_patch_tokens[:, :196].mean(dim=1)
+
         pipe = self._load_pipe()
         emb = clip_image_embedding.to(dtype=self.torch_dtype, device=pipe._execution_device)
         out = pipe(
