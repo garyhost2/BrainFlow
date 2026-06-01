@@ -1,4 +1,4 @@
-"""Phase 3 SDPrior training: frozen BrainEncoder + ClipPrior → CLIP embedding.
+"""Phase 3 SDPrior training: BrainEncoder + ClipPrior → CLIP embedding.
 
 Usage (single GPU):
     BRAINFLOW_CONFIG=configs/phase3_sdprior.yaml \\
@@ -102,8 +102,8 @@ def fit_clip_stats(prior: ClipPrior, train_loader, device: torch.device,
               f"mean={prior.clip_mean.norm():.3f} std={prior.clip_std.mean():.3f}")
 
     if is_dist():
-        dist.broadcast(prior.clip_mean.to(device), src=0)
-        dist.broadcast(prior.clip_std.to(device), src=0)
+        dist.broadcast(prior.clip_mean, src=0)
+        dist.broadcast(prior.clip_std, src=0)
         flag = torch.tensor([1.0 if prior._stats_fitted else 0.0], device=device)
         dist.broadcast(flag, src=0)
         if not is_main() and flag.item() > 0:
@@ -151,6 +151,18 @@ def evaluate(
     return {"CLIP_Cos": float(np.mean(cos_vals)) if cos_vals else 0.0}
 
 
+def compute_sdprior_losses(prior: ClipPrior, tokens: torch.Tensor, cls_align: torch.Tensor, clip_gt: torch.Tensor, cfg) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Shared loss helper for tests and training loop."""
+    loss_flow = prior.flow_loss(clip_gt, tokens, sigma_min=float(cfg.sigma_min))
+    z1 = F.normalize(cls_align, dim=-1)
+    z2 = F.normalize(clip_gt, dim=-1)
+    logits = z1 @ z2.t() / float(cfg.infonce_temp)
+    labels = torch.arange(logits.shape[0], device=logits.device)
+    loss_info = F.cross_entropy(logits, labels)
+    loss = float(getattr(cfg, "lambda_cfm", 1.0)) * loss_flow + float(getattr(cfg, "lambda_align", 0.1)) * loss_info
+    return loss, loss_flow, loss_info
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -172,7 +184,7 @@ def main():
     if is_main():
         print(f"Train batches/rank: {len(train_loader)} | Eval: {len(eval_loader)}")
 
-    # ── BrainEncoder (frozen) ──────────────────────────────────────────────────
+    # ── BrainEncoder (trained) ────────────────────────────────────────────────
     brain_enc = BrainEncoder(cfg, voxels).to(device)
 
     init_from = os.environ.get("INIT_FROM", "").strip()
@@ -197,11 +209,6 @@ def main():
     elif is_main():
         print(f"[SDPrior] WARNING: INIT_FROM={init_from!r} not found — random BrainEncoder init.")
 
-    # Freeze BrainEncoder completely
-    for p in brain_enc.parameters():
-        p.requires_grad_(False)
-    brain_enc.eval()
-
     # ── ClipPrior (trained) ────────────────────────────────────────────────────
     prior = ClipPrior(
         clip_dim=cfg.clip_dim,          # 768
@@ -211,6 +218,7 @@ def main():
         heads=getattr(cfg, "attn_heads", 8),
         dropout=cfg.enc_drop,
         cfg_drop=cfg.cfg_drop_prob,
+        geometry=getattr(cfg, "geometry", getattr(cfg, "clip_prior_geometry", "euclidean")),
     ).to(device)
 
     # Fit CLIP statistics before DDP wrap
@@ -237,6 +245,8 @@ def main():
             resume_path.unlink(missing_ok=True)
         else:
             prior.load_state_dict(prior_sd)
+            if "brain_encoder" in resume:
+                brain_enc.load_state_dict(resume["brain_encoder"], strict=False)
             start_epoch = resume.get("epoch", 0) + 1
             best_cos = resume.get("best_cos", 0.0)
             step = resume.get("step", 0)
@@ -252,13 +262,22 @@ def main():
     if is_main():
         print(f"[SDPrior] ClipPrior params: {n_prior / 1e6:.1f}M (trainable)")
 
-    # ── DDP wrap (prior only — BrainEncoder is frozen eval) ───────────────────
+    # ── DDP wrap ───────────────────────────────────────────────────────────────
     if is_dist():
+        brain_enc_ddp = DDP(
+            brain_enc,
+            device_ids=[device.index] if device.type == "cuda" else None,
+            find_unused_parameters=False,
+            broadcast_buffers=False,
+        )
         prior_ddp = DDP(prior,
                         device_ids=[device.index] if device.type == "cuda" else None,
                         find_unused_parameters=False, broadcast_buffers=True)
+        raw_brain_enc = brain_enc_ddp.module
         raw_prior = prior_ddp.module
     else:
+        brain_enc_ddp = brain_enc
+        raw_brain_enc = brain_enc
         prior_ddp = prior
         raw_prior = prior
 
@@ -267,13 +286,13 @@ def main():
                betas=(0.9, 0.999), eps=1e-8)
     try:
         optimizer = AdamW(
-            [p for p in prior_ddp.parameters() if p.requires_grad],
+            [p for p in list(brain_enc_ddp.parameters()) + list(prior_ddp.parameters()) if p.requires_grad],
             fused=True, **_ok)
     except (TypeError, RuntimeError) as _e:
         if "fused" not in str(_e).lower() and "unexpected keyword" not in str(_e).lower():
             raise
         optimizer = AdamW(
-            [p for p in prior_ddp.parameters() if p.requires_grad], **_ok)
+            [p for p in list(brain_enc_ddp.parameters()) + list(prior_ddp.parameters()) if p.requires_grad], **_ok)
 
     if resume_path.is_file():
         resume = torch.load(resume_path, map_location="cpu")
@@ -337,6 +356,7 @@ def main():
     epochs_no_improve = 0
 
     for epoch in range(start_epoch, cfg.num_epochs + 1):
+        brain_enc_ddp.train()
         prior_ddp.train()
         if hasattr(train_sampler, "set_epoch"):
             train_sampler.set_epoch(epoch)
@@ -351,13 +371,17 @@ def main():
             subject = batch["subject"].to(device)
             clip_gt = batch["clip_emb"].to(device).float()  # (B, 768)
 
-            with torch.no_grad():
-                tokens, _ = brain_enc(fmri, subject)   # (B, N, D), frozen
+            with torch.cuda.amp.autocast(enabled=device.type == "cuda",
+                                         dtype=autocast_dtype):
+                brain_out = brain_enc_ddp(fmri, subject)
+                tokens = brain_out.tokens
+                cls_align = brain_out.cls_align
 
             with torch.cuda.amp.autocast(enabled=device.type == "cuda",
                                          dtype=autocast_dtype):
-                loss = raw_prior.flow_loss(clip_gt, tokens,
-                                           sigma_min=float(cfg.sigma_min))
+                loss, loss_flow, loss_info = compute_sdprior_losses(
+                    raw_prior, tokens, cls_align, clip_gt, cfg
+                )
 
             # Skip NaN/Inf steps (fp16 overflow recovery)
             if not torch.isfinite(loss):
@@ -369,7 +393,7 @@ def main():
             if (bi + 1) % cfg.grad_accum == 0:
                 scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(
-                    [p for p in prior_ddp.parameters() if p.requires_grad],
+                    [p for p in list(brain_enc_ddp.parameters()) + list(prior_ddp.parameters()) if p.requires_grad],
                     cfg.grad_clip)
                 scaler.step(optimizer)
                 scaler.update()
@@ -379,6 +403,8 @@ def main():
                 step += 1
 
             losses["loss"].append(loss.detach())
+            losses["flow"].append(loss_flow.detach())
+            losses["info"].append(loss_info.detach())
             if is_main() and bi % 50 == 0:
                 pbar.set_postfix(loss=f"{loss.item():.4f}",
                                  lr=f"{optimizer.param_groups[0]['lr']:.2e}")
@@ -406,7 +432,7 @@ def main():
                 ema.apply(raw_prior)
 
             eval_metrics = evaluate(
-                brain_enc, raw_prior, eval_loader, device, cfg,
+                raw_brain_enc, raw_prior, eval_loader, device, cfg,
                 n_batches=cfg.eval_batches,
             )
 
@@ -425,8 +451,17 @@ def main():
                 if step >= cfg.ema_start:
                     _best_backup = {k: v.clone() for k, v in raw_prior.state_dict().items()}
                     ema.apply(raw_prior)
-                torch.save(raw_prior.state_dict(),
-                           cfg.output_dir / "best_clip_cos.pt")
+                torch.save(
+                    {
+                        "brain_encoder": raw_brain_enc.state_dict(),
+                        "prior": raw_prior.state_dict(),
+                        "clip_mean": raw_prior.clip_mean.cpu(),
+                        "clip_std": raw_prior.clip_std.cpu(),
+                        "best_cos": best_cos,
+                        "epoch": epoch,
+                    },
+                    cfg.output_dir / "best_clip_cos.pt",
+                )
                 if step >= cfg.ema_start:
                     ema.restore(_best_backup, raw_prior)
                 print(f"  [SDPrior] New best CLIP_Cos={best_cos:.4f} → best_clip_cos.pt")
@@ -437,6 +472,7 @@ def main():
             resume_ckpt = {
                 "epoch": epoch,
                 "step": step,
+                "brain_encoder": raw_brain_enc.state_dict(),
                 "prior": raw_prior.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
@@ -464,12 +500,18 @@ def main():
 
     # ── Final save ────────────────────────────────────────────────────────────
     if is_main():
-        torch.save(raw_prior.state_dict(), cfg.output_dir / "final_raw.pt")
+        torch.save(
+            {"brain_encoder": raw_brain_enc.state_dict(), "prior": raw_prior.state_dict()},
+            cfg.output_dir / "final_raw.pt",
+        )
 
         if step >= cfg.ema_start:
             _final_backup = {k: v.clone() for k, v in raw_prior.state_dict().items()}
             ema.apply(raw_prior)
-        torch.save(raw_prior.state_dict(), cfg.output_dir / "final_ema.pt")
+        torch.save(
+            {"brain_encoder": raw_brain_enc.state_dict(), "prior": raw_prior.state_dict()},
+            cfg.output_dir / "final_ema.pt",
+        )
         if step >= cfg.ema_start:
             ema.restore(_final_backup, raw_prior)
 
