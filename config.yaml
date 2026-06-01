@@ -36,6 +36,8 @@ model:
   stem_drop: 0.15
   n_tokens: 64
   brain_dim: 1024
+  enc_token_attn_layers: 0   # 0 disables token self-attention; try 2 to enable
+  enc_token_attn_heads: 8    # attention heads for encoder token self-attention
   token_drop_prob: 0.1
   stochastic_depth: 0.1
   unet_base_ch: 128
@@ -76,6 +78,8 @@ training:
   mixup_alpha: 0.0         # was 0.2 (mixup is incompatible with hrf source; disabled globally)
   use_mixco: true          # CLIP-space MixCo/BiMixCo for alignment loss
   mixco_alpha: 0.3
+  softclip_start_epoch: -1 # -1 disables SoftCLIP; try 20 to switch after warmup epochs
+  softclip_temp: 0.006     # SoftCLIP teacher temperature for CLIP-CLIP targets
   ema_decay: 0.999         # was 0.9995 (faster ramp-up)
   ema_start: 4000          # was 200 (wait ~2 epochs before EMA)
   eval_freq: 5
