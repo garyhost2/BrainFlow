@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from brainflow.config import load_config
 from brainflow.data import build_dataloaders
-from brainflow.models import BrainFlowV5
+from brainflow.models import BrainFlowV5, migrate_input_proj
 from brainflow.vae import FrozenVAE
 from brainflow.metrics import pixel_correlation, ssim_pytorch
 
@@ -42,6 +42,8 @@ def main():
     ckpt = Path(args.ckpt) if args.ckpt else (cfg.output_dir / "best_pc_v5.pt")
     if ckpt.exists():
         sd = torch.load(ckpt, map_location="cpu")
+        sd = {k.replace("._orig_mod.", "."): v for k, v in sd.items()}
+        sd = migrate_input_proj(sd, model.brain_enc.max_vox)
         model.load_state_dict(sd)
         print(f"Loaded checkpoint: {ckpt}")
     else:
