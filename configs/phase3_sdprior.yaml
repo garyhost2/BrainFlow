@@ -6,7 +6,7 @@ distribution:
 
 data:
   data_dir: "./mindeyev2_cache"
-  subjects: [1]
+  subjects: [1, 2, 3, 4, 5, 6, 7, 8]
 
 dataloader:
   batch_size_per_gpu: 16
@@ -52,6 +52,7 @@ inference:
   cfg_scale: 1.5
   prior_dim: 512
   prior_blocks: 6
+  prior_target: "cls"  # set to "patches" for 256x1024 patch-token SDPrior target
   decoder_model_id: "stabilityai/stable-diffusion-2-1-unclip"
   decoder_num_inference_steps: 30
   decoder_guidance_scale: 7.5

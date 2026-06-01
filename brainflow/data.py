@@ -416,9 +416,12 @@ class NSDDataset(Dataset):
                  augment=False, cfg: Config | None = None,
                  fmri_mu=None, fmri_std=None,
                  clip_patches=None):
-        assert len(fmri) == len(latents) == len(images) == len(clip_embs)
+        if latents is None:
+            assert len(fmri) == len(images) == len(clip_embs)
+        else:
+            assert len(fmri) == len(latents) == len(images) == len(clip_embs)
         self.fmri = fmri.float()
-        self.latents = latents.float()
+        self.latents = None if latents is None else latents.float()
         # Keep images as uint8 in RAM (decode to float on __getitem__)
         self.images = images if images.dtype == torch.uint8 else images.float()
         self.clip_embs = clip_embs.float()
@@ -452,11 +455,12 @@ class NSDDataset(Dataset):
             img = img.float() / 255.0
         result = {
             "fmri": f,
-            "latent": self.latents[i],
             "image": img,
             "clip_emb": self.clip_embs[i],
             "subject": self.subject_id,
         }
+        if self.latents is not None:
+            result["latent"] = self.latents[i]
         if self.clip_patches is not None:
             result["clip_patches"] = self.clip_patches[i].float()  # (256, 1024)
         return result
@@ -466,11 +470,12 @@ def variable_collate(batch):
     """Stack same-subject samples (subject grouping enforced by SubjectBatchSampler)."""
     result = {
         "fmri": torch.stack([b["fmri"] for b in batch]),
-        "latent": torch.stack([b["latent"] for b in batch]),
         "image": torch.stack([b["image"] for b in batch]),
         "clip_emb": torch.stack([b["clip_emb"] for b in batch]),
         "subject": torch.tensor([b["subject"] for b in batch], dtype=torch.long),
     }
+    if "latent" in batch[0]:
+        result["latent"] = torch.stack([b["latent"] for b in batch])
     if "clip_patches" in batch[0]:
         result["clip_patches"] = torch.stack([b["clip_patches"] for b in batch])
     return result
@@ -538,11 +543,15 @@ def build_dataloaders(cfg: Config):
     """
     tensors = build_or_load_tensors(cfg)
     clips = compute_or_load_clip(tensors, cfg)
-    lats = compute_or_load_latents(tensors, cfg)
+    need_latents = getattr(cfg, "training_stage", "") != "sdprior"
+    lats = compute_or_load_latents(tensors, cfg) if need_latents else None
 
-    # Phase 2: load CLIP patch token cache if needed
+    # Phase 2 / SDPrior-patches: load CLIP patch token cache only when needed
     clip_patches_cache = None
-    if getattr(cfg, "training_stage", "").startswith("2"):
+    stage = getattr(cfg, "training_stage", "")
+    prior_target = str(getattr(cfg, "prior_target", "cls")).lower()
+    need_patch_tokens = stage.startswith("2") or (stage == "sdprior" and prior_target == "patches")
+    if need_patch_tokens:
         clip_patches_cache = compute_or_load_clip_patches(tensors, cfg)
 
     fmri_stats = tensors.get("fmri_stats", {})
@@ -555,7 +564,7 @@ def build_dataloaders(cfg: Config):
         te_cp = clip_patches_cache.get(f"clip_patch_test_{subj}") if clip_patches_cache else None
         # Build train dataset first so we can read its normalisation stats
         tr_ds = NSDDataset(
-            tensors[f"fmri_train_{subj}"], lats[f"lat_train_{subj}"],
+            tensors[f"fmri_train_{subj}"], None if lats is None else lats[f"lat_train_{subj}"],
             tensors[f"imgs_train_{subj}"], clips[f"clip_train_{subj}"],
             subject_id=subj, augment=True, cfg=cfg,
             clip_patches=tr_cp,
@@ -569,7 +578,7 @@ def build_dataloaders(cfg: Config):
             te_mu = tr_ds.fmri_mu
             te_std = tr_ds.fmri_std
         test_sets.append(NSDDataset(
-            tensors[f"fmri_test_{subj}"], lats[f"lat_test_{subj}"],
+            tensors[f"fmri_test_{subj}"], None if lats is None else lats[f"lat_test_{subj}"],
             tensors[f"imgs_test_{subj}"], clips[f"clip_test_{subj}"],
             subject_id=subj, augment=False, cfg=cfg,
             fmri_mu=te_mu, fmri_std=te_std,

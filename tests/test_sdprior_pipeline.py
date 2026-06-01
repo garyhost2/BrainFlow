@@ -82,6 +82,40 @@ def test_sdprior_tiny_training_loss_is_finite_and_differentiable():
     assert prior.x_proj.weight.grad is not None
 
 
+def test_sdprior_patch_target_loss_is_finite_and_differentiable():
+    torch.manual_seed(0)
+    cfg = _tiny_cfg()
+    cfg.prior_target = "patches"
+    enc = BrainEncoder(cfg, {1: 12})
+    prior = ClipPrior(
+        clip_dim=cfg.clip_dim,
+        ctx_dim=cfg.brain_dim,
+        dim=32,
+        depth=1,
+        heads=2,
+        cfg_drop=0.0,
+        prior_target="patches",
+        patch_tokens=4,
+        patch_dim=6,
+        patch_valid_tokens=4,
+    )
+
+    fmri = torch.randn(3, 12)
+    subject = torch.ones(3, dtype=torch.long)
+    clip_gt = torch.randn(3, cfg.clip_dim)
+    clip_patches = torch.randn(3, 4, 6)
+    brain_out = enc(fmri, subject)
+    loss, _, _ = compute_sdprior_losses(
+        prior, brain_out.tokens, brain_out.cls_align, clip_gt, cfg, clip_patches=clip_patches
+    )
+
+    assert torch.isfinite(loss)
+    assert loss.grad_fn is not None
+    loss.backward()
+    assert enc.input_proj.weight.grad is not None
+    assert prior.x_proj.weight.grad is not None
+
+
 def test_clip_prior_cross_attention_receives_full_token_sequence():
     prior = ClipPrior(clip_dim=8, ctx_dim=6, dim=16, depth=1, heads=2, cfg_drop=0.0)
     ctx = torch.randn(2, 7, 6)
@@ -132,8 +166,8 @@ def test_eval_sdprior_outputs_cosine_and_2way_keys(monkeypatch):
             return torch.nn.functional.normalize(torch.randn(tokens.shape[0], 8), dim=-1)
 
     class _Decoder:
-        def generate(self, clip_image_embedding, num_inference_steps, guidance_scale):
-            b = clip_image_embedding.shape[0]
+        def generate(self, clip_image_embedding=None, clip_patch_tokens=None, num_inference_steps=1, guidance_scale=1.0):
+            b = (clip_image_embedding if clip_image_embedding is not None else clip_patch_tokens).shape[0]
             return torch.full((b, 3, 64, 64), 0.25)
 
     monkeypatch.setattr(
