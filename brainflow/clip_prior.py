@@ -1,8 +1,10 @@
-"""ClipPrior — CFM DiT that maps fMRI brain tokens → CLIP CLS embedding.
+"""ClipPrior — CFM DiT that maps fMRI brain tokens → CLIP targets.
 
 Phase 3 SDPrior experiment:
   BrainEncoder (frozen) → brain_tokens (B, N, D)
-  ClipPrior (trained)   → sampled CLIP CLS embedding (B, 768)
+  ClipPrior (trained)   → sampled CLIP target:
+                           - CLS mode: (B, 768)
+                           - patch mode: (B, 256, 1024)
   Karlo decoder (frozen) → image (256×256)
 
 Architecture: ~20M-param DiT with cross-attention conditioning on brain tokens.
@@ -268,7 +270,7 @@ class _Block(nn.Module):
 # ── ClipPrior ─────────────────────────────────────────────────────────────────
 
 class ClipPrior(nn.Module):
-    """CFM DiT: brain_tokens → CLIP CLS embedding.
+    """CFM DiT: brain_tokens → CLIP target (CLS or patch tokens).
 
     Args:
         clip_dim:   Dimension of the CLIP CLS embedding (ViT-L/14 = 768).
@@ -283,6 +285,9 @@ class ClipPrior(nn.Module):
                     interpolation and exponential-map retractions; mean/std
                     normalization is **not** applied (the sphere already fixes
                     the scale).  See module docstring for details.
+        prior_target: ``"cls"`` (default) or ``"patches"``.
+        patch_tokens: Token count for patch mode (default 256; first 196 are real).
+        patch_dim: Token width for patch mode (ViT-L/14 patch dim = 1024).
     """
     def __init__(
         self,
@@ -294,19 +299,35 @@ class ClipPrior(nn.Module):
         dropout: float = 0.1,
         cfg_drop: float = 0.10,
         geometry: str = "euclidean",
+        prior_target: str = "cls",
+        patch_tokens: int = 256,
+        patch_dim: int = 1024,
+        patch_valid_tokens: int = 196,
     ):
         super().__init__()
+        if prior_target not in ("cls", "patches"):
+            raise ValueError(
+                f"prior_target must be 'cls' or 'patches', got {prior_target!r}"
+            )
         if geometry not in ("euclidean", "sphere"):
             raise ValueError(
                 f"geometry must be 'euclidean' or 'sphere', got {geometry!r}"
             )
+        if prior_target == "patches":
+            # Patch-token mode uses Euclidean CFM on the token grid.
+            geometry = "euclidean"
         self.clip_dim = clip_dim
         self.ctx_dim = ctx_dim
         self.cfg_drop = cfg_drop
         self.geometry = geometry
+        self.prior_target = prior_target
+        self.patch_tokens = patch_tokens
+        self.patch_dim = patch_dim
+        self.patch_valid_tokens = min(patch_tokens, patch_valid_tokens)
+        self.target_dim = clip_dim if prior_target == "cls" else patch_dim
 
-        # Project noisy CLIP embedding to internal dim
-        self.x_proj = nn.Linear(clip_dim, dim)
+        # Project noisy CLIP target (CLS or patch tokens) to internal dim
+        self.x_proj = nn.Linear(self.target_dim, dim)
         # Time embedding
         self.t_emb = _SinEmb(dim)
         # Null context token (for CFG dropout)
@@ -318,7 +339,7 @@ class ClipPrior(nn.Module):
         ])
 
         self.out_norm = nn.LayerNorm(dim)
-        self.out_proj = nn.Linear(dim, clip_dim)
+        self.out_proj = nn.Linear(dim, self.target_dim)
         nn.init.zeros_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
 
@@ -331,6 +352,8 @@ class ClipPrior(nn.Module):
 
     def fit_stats(self, clip_embs: torch.Tensor):
         """Fit mean/std from a (N, clip_dim) tensor of training CLIP embeddings."""
+        if self.prior_target != "cls":
+            return
         clip_embs = clip_embs.float()
         self.clip_mean.copy_(clip_embs.mean(0))
         self.clip_std.copy_(clip_embs.std(0).clamp(min=1e-2))
@@ -350,7 +373,7 @@ class ClipPrior(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,           # (B, clip_dim) — noisy CLIP embedding
+        x: torch.Tensor,           # (B, clip_dim) or (B, T, patch_dim) — noisy target
         t: torch.Tensor,           # (B,) — flow time in [0, 1]
         ctx: torch.Tensor,         # (B, N, ctx_dim) — brain tokens
         force_drop: bool = False,  # force CFG null condition (for CFG eval)
@@ -365,14 +388,30 @@ class ClipPrior(nn.Module):
         elif force_drop:
             ctx = self.null_ctx.expand(B, ctx.shape[1], self.ctx_dim)
 
-        h = self.x_proj(x).unsqueeze(1)  # (B, 1, dim)
+        if self.prior_target == "cls":
+            h = self.x_proj(x).unsqueeze(1)  # (B, 1, dim)
+        else:
+            h = self.x_proj(x)               # (B, T, dim)
         t_emb = self.t_emb(t)            # (B, dim)
 
         for block in self.blocks:
             h = block(h, ctx, t_emb)
 
-        h = self.out_norm(h.squeeze(1))  # (B, dim)
-        return self.out_proj(h)          # (B, clip_dim) — predicted velocity
+        if self.prior_target == "cls":
+            h = self.out_norm(h.squeeze(1))  # (B, dim)
+            return self.out_proj(h)          # (B, clip_dim) — predicted velocity
+
+        h = self.out_norm(h)                 # (B, T, dim)
+        return self.out_proj(h)              # (B, T, patch_dim) — predicted velocity
+
+    def patches_to_embedding(self, patch_tokens: torch.Tensor) -> torch.Tensor:
+        """Pool (B, 256, 1024) patch tokens into a global embedding for metrics/decoder.
+
+        Stable UnCLIP decoders consume a single embedding vector, not a full token grid.
+        We therefore fall back to mean pooling over the real ViT-L/14 patch tokens
+        (first 196 entries; 197..256 are zero-padding in the cache).
+        """
+        return patch_tokens[:, :self.patch_valid_tokens].mean(dim=1)
 
     # ── CFM loss ──────────────────────────────────────────────────────────────
 
@@ -400,6 +439,17 @@ class ClipPrior(nn.Module):
             computing MSE, ensuring the loss is purely in tangent space.
         """
         B = clip_emb.shape[0]
+        if self.prior_target == "patches":
+            # Euclidean CFM on token grid (B, T, D)
+            with torch.cuda.amp.autocast(enabled=False):
+                x1 = clip_emb.float()
+                eps = torch.randn_like(x1)
+                t = torch.rand(B, device=x1.device)
+                xt = (1 - (1 - sigma_min) * t[:, None, None]) * eps + t[:, None, None] * x1
+                ut = x1 - (1 - sigma_min) * eps
+            v_pred = self.forward(xt.to(clip_emb.dtype), t, ctx)
+            return F.mse_loss(v_pred.float(), ut)
+
         # Force float32 for CFM math — fp16 overflows when std is near zero
         with torch.cuda.amp.autocast(enabled=False):
             if self.geometry == "sphere":
@@ -476,7 +526,10 @@ class ClipPrior(nn.Module):
 
         else:
             # Euclidean mode (original behavior — unchanged)
-            x = torch.randn(B, self.clip_dim, device=device)
+            if self.prior_target == "cls":
+                x = torch.randn(B, self.clip_dim, device=device)
+            else:
+                x = torch.randn(B, self.patch_tokens, self.patch_dim, device=device)
 
             for i in range(n_steps):
                 t_val = i / n_steps
@@ -491,10 +544,11 @@ class ClipPrior(nn.Module):
 
                 x = x + v * dt
 
-            # Denormalize from training space → original CLIP space
-            x = self.denormalize(x)
+            if self.prior_target == "cls":
+                # Denormalize from training space → original CLIP space
+                x = self.denormalize(x)
 
-            if normalize_output:
-                x = F.normalize(x, dim=-1)
+                if normalize_output:
+                    x = F.normalize(x, dim=-1)
 
             return x

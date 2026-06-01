@@ -40,6 +40,7 @@ from brainflow.clip_prior import ClipPrior
 from brainflow.config import load_config
 from brainflow.data import build_dataloaders, is_dist, is_main, rank, world_size
 from brainflow.ema import EMA
+from brainflow.metrics_full import two_way_identification
 from brainflow.models import BrainEncoder, migrate_input_proj
 
 load_dotenv()
@@ -82,6 +83,8 @@ def set_seed(seed: int = 42):
 def fit_clip_stats(prior: ClipPrior, train_loader, device: torch.device,
                    max_samples: int = 20000):
     """Compute CLIP CLS mean/std from training set, broadcast across ranks."""
+    if getattr(prior, "prior_target", "cls") != "cls":
+        return
     if is_main():
         print("[SDPrior] Fitting CLIP embedding statistics …")
     clips: list[torch.Tensor] = []
@@ -120,19 +123,20 @@ def evaluate(
     loader,
     device: torch.device,
     cfg,
-    n_batches: int = 32,
+    n_batches: int | None = None,
 ) -> dict[str, float]:
-    """Sample CLIP embeddings and compute cosine similarity vs GT."""
+    """Sample CLIP targets and compute cosine + 2-way ID on aggregated eval set."""
     brain_enc.eval()
     prior.eval()
-    cos_vals: list[float] = []
+    pred_all: list[torch.Tensor] = []
+    gt_all: list[torch.Tensor] = []
 
     for i, batch in enumerate(loader):
-        if i >= n_batches:
+        if n_batches is not None and i >= n_batches:
             break
         fmri = batch["fmri"].to(device)
         subject = batch["subject"].to(device)
-        clip_gt = batch["clip_emb"].to(device).float()  # (B, 768)
+        clip_gt = batch["clip_emb"].to(device).float()
 
         tokens, _ = brain_enc(fmri, subject)         # (B, N, D)
         sampled = prior.sample(
@@ -140,20 +144,58 @@ def evaluate(
             n_steps=cfg.eval_ode_steps,
             cfg_scale=getattr(cfg, "cfg_scale", 1.5),
             normalize_output=True,
-        )                                             # (B, 768) L2-normalized
+        )
 
-        clip_gt_n = F.normalize(clip_gt, dim=-1)
-        cos = F.cosine_similarity(sampled, clip_gt_n, dim=-1).mean().item()
-        cos_vals.append(cos)
+        if getattr(prior, "prior_target", "cls") == "patches":
+            if "clip_patches" not in batch:
+                raise RuntimeError(
+                    "prior_target='patches' requires batch['clip_patches']; "
+                    "ensure patch cache loading is enabled."
+                )
+            patch_gt = batch["clip_patches"].to(device).float()
+            sampled_metric = prior.patches_to_embedding(sampled)
+            gt_metric = prior.patches_to_embedding(patch_gt)
+        else:
+            sampled_metric = sampled
+            gt_metric = clip_gt
+
+        pred_all.append(sampled_metric.detach().cpu())
+        gt_all.append(gt_metric.detach().cpu())
 
     brain_enc.train()
     prior.train()
-    return {"CLIP_Cos": float(np.mean(cos_vals)) if cos_vals else 0.0}
+    if not pred_all:
+        return {"CLIP_Cos": 0.0, "CLIP_2way": 0.0}
+
+    pred_feats = torch.cat(pred_all, dim=0)
+    gt_feats = torch.cat(gt_all, dim=0)
+    clip_cos = float(
+        F.cosine_similarity(
+            F.normalize(pred_feats, dim=-1),
+            F.normalize(gt_feats, dim=-1),
+            dim=-1,
+        ).mean().item()
+    )
+    clip_2way = two_way_identification(pred_feats, gt_feats)
+    return {"CLIP_Cos": clip_cos, "CLIP_2way": clip_2way}
 
 
-def compute_sdprior_losses(prior: ClipPrior, tokens: torch.Tensor, cls_align: torch.Tensor, clip_gt: torch.Tensor, cfg) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def compute_sdprior_losses(
+    prior: ClipPrior,
+    tokens: torch.Tensor,
+    cls_align: torch.Tensor,
+    clip_gt: torch.Tensor,
+    cfg,
+    clip_patches: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Shared loss helper for tests and training loop."""
-    loss_flow = prior.flow_loss(clip_gt, tokens, sigma_min=float(cfg.sigma_min))
+    if getattr(prior, "prior_target", "cls") == "patches":
+        if clip_patches is None:
+            raise ValueError("clip_patches is required when prior_target='patches'")
+        flow_target = clip_patches
+    else:
+        flow_target = clip_gt
+    loss_flow = prior.flow_loss(flow_target, tokens, sigma_min=float(cfg.sigma_min))
     z1 = F.normalize(cls_align, dim=-1)
     z2 = F.normalize(clip_gt, dim=-1)
     logits = z1 @ z2.t() / float(cfg.infonce_temp)
@@ -179,7 +221,7 @@ def main():
         print(f"[SDPrior] world_size={world_size()} device={device} "
               f"subjects={cfg.subjects}")
 
-    # Data — only needs fmri + clip (no latents, no clip_patches)
+    # Data: SDPrior needs fmri + clip; patch mode additionally loads clip_patches.
     train_loader, test_loader, eval_loader, train_sampler, voxels = build_dataloaders(cfg)
     if is_main():
         print(f"Train batches/rank: {len(train_loader)} | Eval: {len(eval_loader)}")
@@ -219,6 +261,7 @@ def main():
         dropout=cfg.enc_drop,
         cfg_drop=cfg.cfg_drop_prob,
         geometry=getattr(cfg, "geometry", getattr(cfg, "clip_prior_geometry", "euclidean")),
+        prior_target=getattr(cfg, "prior_target", "cls"),
     ).to(device)
 
     # Fit CLIP statistics before DDP wrap
@@ -228,6 +271,7 @@ def main():
     resume_path = cfg.output_dir / "resume.pt"
     start_epoch = 1
     best_cos = 0.0
+    best_2way = 0.0
     step = 0
 
     if resume_path.is_file() and is_main():
@@ -249,6 +293,7 @@ def main():
                 brain_enc.load_state_dict(resume["brain_encoder"], strict=False)
             start_epoch = resume.get("epoch", 0) + 1
             best_cos = resume.get("best_cos", 0.0)
+            best_2way = resume.get("best_2way", 0.0)
             step = resume.get("step", 0)
             if prior.clip_mean.norm() < 1e-6 and "clip_mean" in resume:
                 prior.clip_mean.copy_(resume["clip_mean"])
@@ -256,7 +301,7 @@ def main():
                 prior._stats_fitted = True
             if is_main():
                 print(f"[SDPrior] Resumed from epoch {start_epoch - 1}, "
-                      f"best_cos={best_cos:.4f}")
+                      f"best_cos={best_cos:.4f} best_2way={best_2way:.4f}")
 
     n_prior = sum(p.numel() for p in prior.parameters() if p.requires_grad)
     if is_main():
@@ -370,6 +415,9 @@ def main():
             fmri = batch["fmri"].to(device)
             subject = batch["subject"].to(device)
             clip_gt = batch["clip_emb"].to(device).float()  # (B, 768)
+            clip_patches = batch.get("clip_patches")
+            if clip_patches is not None:
+                clip_patches = clip_patches.to(device).float()
 
             with torch.cuda.amp.autocast(enabled=device.type == "cuda",
                                          dtype=autocast_dtype):
@@ -380,7 +428,7 @@ def main():
             with torch.cuda.amp.autocast(enabled=device.type == "cuda",
                                          dtype=autocast_dtype):
                 loss, loss_flow, loss_info = compute_sdprior_losses(
-                    raw_prior, tokens, cls_align, clip_gt, cfg
+                    raw_prior, tokens, cls_align, clip_gt, cfg, clip_patches=clip_patches
                 )
 
             # Skip NaN/Inf steps (fp16 overflow recovery)
@@ -433,7 +481,7 @@ def main():
 
             eval_metrics = evaluate(
                 raw_brain_enc, raw_prior, eval_loader, device, cfg,
-                n_batches=cfg.eval_batches,
+                n_batches=None,  # full eval set for reliable all-pairs 2-way ID
             )
 
             if _backup_sd is not None:
@@ -445,8 +493,11 @@ def main():
                               if k != "epoch"))
 
             cos = eval_metrics.get("CLIP_Cos", 0.0)
-            if cos > best_cos:
+            clip_2way = eval_metrics.get("CLIP_2way", 0.0)
+            improved = (clip_2way > best_2way) or (clip_2way == best_2way and cos > best_cos)
+            if improved:
                 best_cos = cos
+                best_2way = clip_2way
                 epochs_no_improve = 0
                 if step >= cfg.ema_start:
                     _best_backup = {k: v.clone() for k, v in raw_prior.state_dict().items()}
@@ -458,13 +509,14 @@ def main():
                         "clip_mean": raw_prior.clip_mean.cpu(),
                         "clip_std": raw_prior.clip_std.cpu(),
                         "best_cos": best_cos,
+                        "best_2way": best_2way,
                         "epoch": epoch,
                     },
                     cfg.output_dir / "best_clip_cos.pt",
                 )
                 if step >= cfg.ema_start:
                     ema.restore(_best_backup, raw_prior)
-                print(f"  [SDPrior] New best CLIP_Cos={best_cos:.4f} → best_clip_cos.pt")
+                print(f"  [SDPrior] New best CLIP_2way={best_2way:.4f} (CLIP_Cos={best_cos:.4f}) → best_clip_cos.pt")
             else:
                 epochs_no_improve += 1
 
@@ -479,6 +531,7 @@ def main():
                 "scaler": scaler.state_dict(),
                 "ema": {k: v.clone() for k, v in ema.shadow.items()},
                 "best_cos": best_cos,
+                "best_2way": best_2way,
                 "clip_mean": raw_prior.clip_mean.cpu(),
                 "clip_std": raw_prior.clip_std.cpu(),
             }
@@ -515,7 +568,7 @@ def main():
         if step >= cfg.ema_start:
             ema.restore(_final_backup, raw_prior)
 
-        print(f"[SDPrior] Training done. Best CLIP_Cos={best_cos:.4f}")
+        print(f"[SDPrior] Training done. Best CLIP_2way={best_2way:.4f} (CLIP_Cos={best_cos:.4f})")
         print(f"  Outputs in {cfg.output_dir}")
         print("  Files: best_clip_cos.pt  final_ema.pt  final_raw.pt")
 

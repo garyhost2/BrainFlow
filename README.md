@@ -139,6 +139,12 @@ Additive Phase-3 path:
 - Trained: `BrainEncoder` and `ClipPrior`
 - Frozen: diffusion decoder (`decoder_model_id`, loaded lazily)
 - Eval: `python -m scripts.eval_sdprior` routes outputs into `brainflow.metrics_full.evaluate_full`
+- `prior_target`:
+  - `"cls"` (default): predicts global CLIP embedding
+  - `"patches"`: predicts full CLIP patch-token grid `(256, 1024)` and mean-pools to feed the frozen decoder fallback
+- `configs/phase3_sdprior.yaml` now defaults to all 8 subjects (`[1..8]`)
+- Training eval now reports both `CLIP_Cos` and `CLIP_2way` (all-pairs two-way ID over the full eval set)
+- MindEye2 "CLIP 93%" is a **two-way identification** result, not raw cosine similarity
 
 ```bash
 # train
