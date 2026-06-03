@@ -178,6 +178,7 @@ class Config:
     flux_lr_warmup: int = 500     # linear warmup steps
     flux_grad_clip: float = 1.0
     flux_grad_ckpt: bool = False  # gradient checkpointing in adapter (saves VRAM)
+    flux_offload_t5: bool = True  # offload T5 text encoder to CPU after encode (~9GB saved on V100)
     flux_batch_size: int = 4      # per-GPU batch (FLUX is VRAM-heavy)
     flux_grad_accum: int = 8      # effective batch = flux_batch_size * ngpu * flux_grad_accum
     flux_save_every: int = 500    # save adapter checkpoint every N steps

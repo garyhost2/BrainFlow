@@ -77,6 +77,24 @@ log = logging.getLogger(__name__)
 _FLUX_VAE_SCALE = 0.3611
 
 
+# ── dtype selection ──────────────────────────────────────────────────────────
+
+def _flux_dtype() -> torch.dtype:
+    """Return the best dtype for FLUX on the current hardware.
+
+    V100 (compute capability 7.0) does NOT support bfloat16 natively —
+    PyTorch silently falls back to fp32 which doubles VRAM usage and causes
+    OOM.  We detect CC and use fp16 on V100/older, bfloat16 on Ampere+.
+    """
+    if not torch.cuda.is_available():
+        return torch.float32
+    cc = torch.cuda.get_device_capability()
+    # bfloat16 hardware support requires compute capability >= 8.0 (Ampere)
+    if cc[0] >= 8:
+        return torch.bfloat16
+    return torch.float16
+
+
 # ── logit-normal time sampling (matches FLUX training distribution) ─────────
 
 def _sample_flux_time(B: int, device: torch.device, m: float = 0.0,
@@ -147,6 +165,7 @@ class FLUXBrainDecoder(nn.Module):
         self._pipe        = None
         self._null_cache  = _NullTextCache()
         self._hook_handles: list = []
+        self._flux_dtype  = _flux_dtype()   # fp16 on V100, bf16 on Ampere+
 
         # Side-channel for hooks: populated before each FLUX forward pass.
         # Keys: block_idx → (cond_tokens, uncertainty_gate)
@@ -168,16 +187,35 @@ class FLUXBrainDecoder(nn.Module):
                 "Run: pip install diffusers>=0.30"
             ) from e
 
-        cache_dir = Path(self.cfg.data_dir) / "hf_cache"
-        log.info("Loading FLUX.1-dev from %s (this may take a few minutes)…",
-                 self.cfg.flux_model_id)
+        cache_dir   = Path(self.cfg.data_dir) / "hf_cache"
+        flux_dtype  = self._flux_dtype
+        device      = self._device_anchor.device
+        offload_t5  = getattr(self.cfg, "flux_offload_t5", True)
+        # Split FLUX across all available GPUs to stay within per-GPU VRAM budget
+        n_gpu       = torch.cuda.device_count()
+        device_map  = "balanced" if n_gpu > 1 else None
 
-        pipe = FluxPipeline.from_pretrained(
-            self.cfg.flux_model_id,
-            torch_dtype=torch.bfloat16,
+        log.info(
+            "Loading FLUX.1-dev | dtype=%s | device_map=%s | T5_offload=%s",
+            flux_dtype, device_map, offload_t5,
+        )
+
+        load_kwargs: dict = dict(
+            torch_dtype=flux_dtype,
             cache_dir=cache_dir,
         )
-        pipe = pipe.to(self._device_anchor.device)
+        if device_map is not None:
+            load_kwargs["device_map"] = device_map
+
+        pipe = FluxPipeline.from_pretrained(self.cfg.flux_model_id, **load_kwargs)
+
+        if device_map is None:
+            pipe = pipe.to(device)
+
+        # Offload T5 text encoder to CPU after encoding — saves ~9GB on V100
+        if offload_t5 and hasattr(pipe, "text_encoder_2"):
+            pipe.text_encoder_2.to("cpu")
+            log.info("T5 encoder offloaded to CPU (flux_offload_t5=True).")
 
         # Freeze everything
         pipe.transformer.eval().requires_grad_(False)
@@ -185,7 +223,7 @@ class FLUXBrainDecoder(nn.Module):
         pipe.text_encoder.eval().requires_grad_(False)
         pipe.text_encoder_2.eval().requires_grad_(False)
 
-        # Enable memory-efficient attention in the transformer if available
+        # xformers memory-efficient attention (V100 supports it)
         if hasattr(pipe.transformer, "enable_xformers_memory_efficient_attention"):
             try:
                 pipe.transformer.enable_xformers_memory_efficient_attention()
@@ -194,8 +232,11 @@ class FLUXBrainDecoder(nn.Module):
                 pass
 
         self._pipe = pipe
-        log.info("FLUX.1-dev loaded. Transformer params: %dM (frozen)",
-                 sum(p.numel() for p in pipe.transformer.parameters()) // 1_000_000)
+        log.info(
+            "FLUX.1-dev loaded. Transformer params: %dM (frozen) | dtype: %s",
+            sum(p.numel() for p in pipe.transformer.parameters()) // 1_000_000,
+            flux_dtype,
+        )
         return self._pipe
 
     # ── adapter hook management ──────────────────────────────────────────────
@@ -273,7 +314,7 @@ class FLUXBrainDecoder(nn.Module):
     def _vae_encode(self, images: torch.Tensor) -> torch.Tensor:
         """images (B,3,H,W) ∈ [0,1] → FLUX latents (B,16,H//8,W//8)."""
         pipe  = self._load_pipe()
-        dtype = torch.bfloat16
+        dtype = self._flux_dtype
         # FLUX expects [-1,1]
         x = images.to(dtype=dtype, device=pipe.vae.device) * 2.0 - 1.0
         latents = pipe.vae.encode(x).latent_dist.sample()
@@ -299,7 +340,7 @@ class FLUXBrainDecoder(nn.Module):
         """
         pipe   = self._load_pipe()
         device = self._device_anchor.device
-        dtype  = torch.bfloat16
+        dtype  = self._flux_dtype
 
         B = brain_tokens.shape[0]
 
@@ -342,7 +383,7 @@ class FLUXBrainDecoder(nn.Module):
 
         # 7. FLUX transformer forward — hooks fire inside here
         try:
-            with torch.cuda.amp.autocast(dtype=dtype, enabled=True):
+            with torch.cuda.amp.autocast(dtype=dtype, enabled=torch.cuda.is_available()):
                 noise_pred = pipe.transformer(
                     hidden_states=packed,
                     timestep=t.to(dtype),
