@@ -1,0 +1,87 @@
+# Phase 4 — FLUX.1-dev + BrainIPAdapter
+#
+# Training stages:
+#   1. Run Phase 3 first to get BrainEncoder + ClipPrior checkpoint.
+#   2. Point init_from_phase3 at that checkpoint.
+#   3. Run scripts/train_flux_adapter.py — only BrainIPAdapter is trained.
+#
+# VRAM guide (per GPU):
+#   2× A100 80GB  — use defaults below
+#   1× A100 80GB  — set flux_batch_size: 4, flux_grad_accum: 8
+#   2× A100 40GB  — set ip_n_blocks: 10, flux_batch_size: 2, flux_grad_ckpt: true
+#   V100 32GB     — set ip_n_blocks: 10, flux_batch_size: 1, flux_grad_ckpt: true,
+#                   flux_height: 256, flux_width: 256
+
+distribution:
+  backend: auto
+  init_method: "env://"
+
+data:
+  data_dir: "./mindeyev2_cache"
+  subjects: [1, 2, 3, 4, 5, 6, 7, 8]
+
+dataloader:
+  # FLUX is ~23GB frozen — small batches, aggressive grad accum
+  batch_size_per_gpu: 4
+  num_workers: 4
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+  drop_last_train: true
+  drop_last_test: false
+
+model:
+  # Brain encoder — must match Phase 3 checkpoint
+  enc_hidden: 1024
+  enc_blocks: 4
+  enc_drop: 0.15
+  stem_drop: 0.15
+  n_tokens: 64
+  brain_dim: 1024
+  clip_dim: 768
+  attn_heads: 8
+
+  # IP-Adapter architecture
+  ip_dim: 1024          # brain conditioning projection dimension
+  ip_n_blocks: 19       # FLUX double-stream blocks to inject (max 19)
+                        # reduce to 10 on low-VRAM hardware
+
+flux:
+  flux_model_id: "black-forest-labs/FLUX.1-dev"
+  # Training
+  flux_train_steps: 10000
+  flux_lr: 1.0e-4
+  flux_lr_warmup: 500
+  flux_grad_clip: 1.0
+  flux_grad_ckpt: false  # set true to save ~4GB VRAM at ~15% speed cost
+  flux_batch_size: 4
+  flux_grad_accum: 8     # effective batch = 4 * ngpu * 8
+  flux_save_every: 500
+  # Inference
+  flux_steps: 28
+  flux_guidance: 3.5
+  flux_height: 512
+  flux_width: 512
+
+phase3:
+  # Path to best Phase 3 checkpoint (BrainEncoder + ClipPrior)
+  # Required: training will abort if this file does not exist.
+  init_from_phase3: "outputs/phase3_sdprior/best_clip_cos.pt"
+  # Phase 3 ClipPrior config (must match checkpoint)
+  prior_ode_steps: 20
+  cfg_scale: 1.5
+  prior_dim: 512
+  prior_blocks: 6
+  prior_target: "cls"
+  clip_prior_geometry: "euclidean"
+
+output:
+  output_dir: "./outputs"
+  experiment_name: "phase4_flux"
+
+wandb:
+  wandb_project: "brainflow-v5"
+  wandb_run_name: "phase4_flux_adapter"
+  wandb_mode: "online"
+
+training_stage: "flux_adapter"

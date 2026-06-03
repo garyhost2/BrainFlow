@@ -167,6 +167,28 @@ class Config:
     # Set to [] for multi-subject training (default).
     subject_filter: List[int] = field(default_factory=list)
 
+    # ── Phase 4: FLUX.1-dev IP-Adapter ────────────────────────────────────────
+    flux_model_id: str = "black-forest-labs/FLUX.1-dev"
+    # Adapter architecture
+    ip_dim: int = 1024            # brain conditioning projection dim
+    ip_n_blocks: int = 19         # FLUX double-stream blocks to hook (max 19)
+    # Training
+    flux_train_steps: int = 10000 # total adapter training steps
+    flux_lr: float = 1e-4         # adapter optimizer learning rate
+    flux_lr_warmup: int = 500     # linear warmup steps
+    flux_grad_clip: float = 1.0
+    flux_grad_ckpt: bool = False  # gradient checkpointing in adapter (saves VRAM)
+    flux_batch_size: int = 4      # per-GPU batch (FLUX is VRAM-heavy)
+    flux_grad_accum: int = 8      # effective batch = flux_batch_size * ngpu * flux_grad_accum
+    flux_save_every: int = 500    # save adapter checkpoint every N steps
+    # Inference
+    flux_steps: int = 28          # Euler steps at inference
+    flux_guidance: float = 3.5    # FLUX guidance scale
+    flux_height: int = 512        # output image height (FLUX natively does 1024)
+    flux_width: int = 512         # output image width
+    # Phase 3 checkpoint to initialise BrainEncoder + ClipPrior
+    init_from_phase3: str = ""    # path to phase3_sdprior best checkpoint
+
     # Output
     output_dir: Path = Path("./outputs")
     experiment_name: str = "baseline"
