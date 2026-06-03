@@ -1,0 +1,94 @@
+# Phase 4 — FLUX.1-dev + BrainIPAdapter  [V100 32GB variant]
+#
+# Tuned for 2× V100nv 32GB (64GB total) as found on Panther gpu-all partition.
+# Key differences from phase4_flux.yaml:
+#   - dtype auto-selected to fp16 (V100 has no bfloat16 hardware support)
+#   - device_map="balanced" splits FLUX transformer across both GPUs
+#   - T5 encoder offloaded to CPU after encoding (saves ~9GB)
+#   - ip_n_blocks: 10  (hook only first 10 of 19 double-stream blocks)
+#   - flux_batch_size: 2 + flux_grad_accum: 16  (same effective batch = 32)
+#   - flux_grad_ckpt: true  (recompute adapter activations, save ~4GB)
+#   - flux_height/width: 256  (FLUX VAE at 256px uses ~4× less activation memory)
+#
+# VRAM budget (2× V100 32GB = 64GB total):
+#   FLUX transformer fp16 split  : ~24 GB  (12 per GPU via device_map)
+#   FLUX VAE fp16                :  ~1 GB
+#   CLIP-L text encoder          :  ~0.5 GB
+#   T5 (CPU, not GPU)            :   0 GB  (offloaded)
+#   BrainEncoder + ClipPrior     :  ~2 GB
+#   BrainIPAdapter fp32          :  ~1.5 GB  (10 blocks only)
+#   Activations (bs=2, 256px)    :  ~3 GB
+#   ───────────────────────────────────────
+#   Total GPU                    : ~32 GB  ← fits in 2× V100 with ~32GB headroom
+
+distribution:
+  backend: auto
+  init_method: "env://"
+
+data:
+  data_dir: "./mindeyev2_cache"
+  subjects: [1, 2, 3, 4, 5, 6, 7, 8]
+
+dataloader:
+  batch_size_per_gpu: 2
+  num_workers: 2          # fewer workers to keep host RAM usage down
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+  drop_last_train: true
+  drop_last_test: false
+
+model:
+  enc_hidden: 1024
+  enc_blocks: 4
+  enc_drop: 0.15
+  stem_drop: 0.15
+  n_tokens: 64
+  brain_dim: 1024
+  clip_dim: 768
+  attn_heads: 8
+
+  # Reduced to 10 blocks — first 10 double-stream blocks carry most semantic info
+  ip_dim: 1024
+  ip_n_blocks: 10
+
+flux:
+  flux_model_id: "black-forest-labs/FLUX.1-dev"
+  # dtype chosen automatically: fp16 on V100, bf16 on Ampere+ (no config needed)
+  flux_offload_t5: true       # T5 to CPU → frees ~9GB GPU VRAM
+
+  # Training
+  flux_train_steps: 10000
+  flux_lr: 1.0e-4
+  flux_lr_warmup: 500
+  flux_grad_clip: 1.0
+  flux_grad_ckpt: true        # saves ~4GB at ~15% speed cost — essential on V100
+  flux_batch_size: 2
+  flux_grad_accum: 16         # effective batch = 2 * 2gpu * 16 = 64
+  flux_save_every: 500
+
+  # Inference — 256px keeps activation memory low; upsample post-hoc if needed
+  flux_steps: 28
+  flux_guidance: 3.5
+  flux_height: 256
+  flux_width: 256
+
+phase3:
+  init_from_phase3: "outputs/phase3_sdprior/best_clip_cos.pt"
+  prior_ode_steps: 20
+  cfg_scale: 1.5
+  prior_dim: 512
+  prior_blocks: 6
+  prior_target: "cls"
+  clip_prior_geometry: "euclidean"
+
+output:
+  output_dir: "./outputs"
+  experiment_name: "phase4_flux_v100"
+
+wandb:
+  wandb_project: "brainflow-v5"
+  wandb_run_name: "phase4_flux_v100"
+  wandb_mode: "online"
+
+training_stage: "flux_adapter"
