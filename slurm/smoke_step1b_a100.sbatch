@@ -10,6 +10,7 @@
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
 #SBATCH -p gpu-A100
+#SBATCH --account=a100_intern
 #SBATCH --qos=a100_intern
 #SBATCH --gres=gpu:A100_80GB:1
 #SBATCH -c 8
