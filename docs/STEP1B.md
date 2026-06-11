@@ -57,9 +57,20 @@ the ridge→decoder baseline), then switch to `prior` for the flow-refined token
   come entirely from `ckpt["state_dict"]`. `first_stage` target overridden to
   `sgm.models.autoencoder.AutoencoderKL`.
 
+## Multi-subject (the MindEye2-competitive scaling step)
+The model is already shared-backbone + per-subject input proj (`TokenBackbone.
+input_proj` is a per-subject `ModuleDict`); the loader pools subjects with a
+`SubjectSampler` that keeps each batch single-subject. To pool subjects, just pass
+more of them — targets build per subject and standardization is pooled globally:
+```bash
+SUBJECTS="1 2 5 7" sbatch slurm/train_step1b_a100.sbatch   # MindEye2's 4 full-data subjects
+```
+The sbatch runs a **disk preflight** and aborts before the build if space is short.
+
 ## Resource notes
-- **bigG target cache is large**: ~`N×256×1664×2 B` ≈ **7–8 GB fp16 per subject**
-  (train). Start with one subject; for all 8 you need ~70 GB disk.
+- **bigG target cache is large**: ~`N×256×1664×2 B` ≈ **~26 GB fp16 per subject**
+  (~24 GB train + ~2.5 GB test; ~27.7k train trials). Subjects 1,2,5,7 ≈ **~104 GB**;
+  all 8 ≈ **~208 GB**. Start with one subject; check `df -h` before scaling.
 - **Decoding is slow**: 38 diffusion steps at 768² per image, one at a time. Use
   `--decode-n 16` during training and a capped `--max-images` for eval sweeps.
 - Batch 48 fits comfortably on an A100 80GB; the (B,256,1664) targets dominate

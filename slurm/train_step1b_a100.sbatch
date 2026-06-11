@@ -48,10 +48,43 @@ echo "Node: $(hostname)"; nvidia-smi || true
 MINDEYE_SRC="${MINDEYE_SRC:-third_party/MindEyeV2/src}"
 UNCLIP_CKPT="${UNCLIP_CKPT:-third_party/unclip6_epoch0_step110000.ckpt}"
 
-# First launch also builds the bigG target cache (~8 GB/subject) via the embedder.
+# Subjects to pool (shared backbone + per-subject input proj, MindEye2-style).
+#   Default: the 4 full-data subjects MindEye2 reports on (1,2,5,7) — directly
+#   comparable. Override for all 8:  SUBJECTS="1 2 3 4 5 6 7 8" sbatch ...
+SUBJECTS="${SUBJECTS:-1 2 5 7}"
+CACHE_DIR="${CACHE_DIR:-./mindeyev2_cache}"
+
+# ── Disk preflight ──────────────────────────────────────────────────────────
+# Each subject's bigG token cache is ~26 GB fp16 (train ~24 GB + test ~2.5 GB):
+#   ~27.7k train trials × 256 tok × 1664 dim × 2 B ≈ 23.6 GB. Refuse to start a
+# multi-subject build that would exceed free space rather than die mid-encode.
+mkdir -p "${CACHE_DIR}"
+N_SUBJ=$(echo ${SUBJECTS} | wc -w)
+NEED_GB=$(( N_SUBJ * 26 ))
+# subtract already-built per-subject caches from the requirement
+HAVE_GB=0
+for s in ${SUBJECTS}; do
+    f="${CACHE_DIR}/step1b_bigg_s${s}.pt"
+    [ -f "$f" ] && HAVE_GB=$(( HAVE_GB + $(du -m "$f" 2>/dev/null | cut -f1) / 1024 ))
+done
+NEED_GB=$(( NEED_GB > HAVE_GB ? NEED_GB - HAVE_GB : 0 ))
+FREE_GB=$(df -BG "${CACHE_DIR}" 2>/dev/null | tail -1 | awk '{print $4}' | tr -dc '0-9')
+FREE_GB=${FREE_GB:-0}
+echo "── disk preflight ──────────────────────────────────────────────"
+echo "subjects=[${SUBJECTS}]  to-build≈${NEED_GB}G (already cached≈${HAVE_GB}G)  free=${FREE_GB}G on ${CACHE_DIR}"
+df -h "${CACHE_DIR}" || true
+command -v quota >/dev/null 2>&1 && quota -s 2>/dev/null || true
+if [ "${FREE_GB}" -lt "$(( NEED_GB + 10 ))" ]; then
+    echo "ERROR: need ~${NEED_GB}G (+10G headroom) for the bigG target build but only ${FREE_GB}G free." >&2
+    echo "       Free space, point CACHE_DIR at a larger volume, or train fewer subjects." >&2
+    exit 1
+fi
+echo "────────────────────────────────────────────────────────────────"
+
+# First launch also builds the bigG target cache (~26 GB/subject) via the embedder.
 python -m scripts.train_step1b \
-    --data-dir ./mindeyev2_cache \
-    --subjects 1 \
+    --data-dir "${CACHE_DIR}" \
+    --subjects ${SUBJECTS} \
     --mindeye-src "${MINDEYE_SRC}" \
     --ckpt-path "${UNCLIP_CKPT}" \
     --epochs 150 --batch-size 48 --lr 3e-4 \

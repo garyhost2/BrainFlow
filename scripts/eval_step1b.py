@@ -18,6 +18,7 @@ from tqdm.auto import tqdm
 
 from brainflow.step1.model_tokens import TokenStep1Config, TokenStep1Model
 from brainflow.step1.targets import TargetStats
+from brainflow.step1.targets_bigg import build_or_load_bigg_targets
 from brainflow.step1.data import build_step1_loaders
 from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder
 from brainflow.step1.metrics import pixcorr, ssim, CLIPMetric
@@ -28,7 +29,8 @@ def parse_args():
     ap.add_argument("--ckpt", type=str, required=True)
     ap.add_argument("--data-dir", type=str, default="./mindeyev2_cache")
     ap.add_argument("--tensor-cache", type=str, default="all_subjects_tensors.pt")
-    ap.add_argument("--target-cache", type=str, default="step1b_targets_bigg.pt")
+    ap.add_argument("--target-dir", type=str, default="./mindeyev2_cache",
+                    help="dir holding per-subject bigG target files (step1b_bigg_s{N}.pt)")
     ap.add_argument("--mindeye-src", type=str, default="third_party/MindEyeV2/src")
     ap.add_argument("--ckpt-path", type=str, default="third_party/unclip6_epoch0_step110000.ckpt")
     ap.add_argument("--cond-source", type=str, default="prior",
@@ -66,7 +68,22 @@ def main():
     model = model.to(device).eval()
 
     tensors = torch.load(data_dir / args.tensor_cache, map_location="cpu")
-    targets = torch.load(data_dir / args.target_cache, map_location="cpu")
+    # Targets: eval only needs the per-subject test embeddings the loader attaches
+    # (global stats come from the checkpoint). Prefer the legacy single-file cache
+    # (step1b_targets_bigg.pt) when it already covers every requested subject — this
+    # lets a subject-1 baseline reuse the existing 23 GB cache with no re-encode.
+    # Otherwise fall back to the per-subject, memory-mapped files used for
+    # multi-subject training.
+    targets = None
+    legacy = data_dir / "step1b_targets_bigg.pt"
+    if legacy.exists():
+        blob = torch.load(legacy, map_location="cpu")
+        if all(f"emb_train_{s}" in blob and f"emb_test_{s}" in blob for s in subjects):
+            print(f"✓ using legacy target cache: {legacy}")
+            targets = blob
+    if targets is None:
+        targets = build_or_load_bigg_targets(
+            tensors, subjects, args.target_dir, device, args.mindeye_src, hf_cache=hf_cache)
     bundle = build_step1_loaders(tensors, targets, subjects, batch_size=32, num_workers=8)
 
     decoder = SDXLUnCLIPDecoder(device, args.mindeye_src, args.ckpt_path,
