@@ -36,7 +36,8 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", type=str, default="./mindeyev2_cache")
     ap.add_argument("--tensor-cache", type=str, default="all_subjects_tensors.pt")
-    ap.add_argument("--target-cache", type=str, default="step1b_targets_bigg.pt")
+    ap.add_argument("--target-dir", type=str, default="./mindeyev2_cache",
+                    help="dir for per-subject bigG target files (step1b_bigg_s{N}.pt)")
     ap.add_argument("--mindeye-src", type=str, default="third_party/MindEyeV2/src")
     ap.add_argument("--ckpt-path", type=str, default="third_party/unclip6_epoch0_step110000.ckpt")
     ap.add_argument("--subjects", type=int, nargs="+", default=[1])
@@ -90,7 +91,7 @@ def main():
 
     tensors = torch.load(data_dir / args.tensor_cache, map_location="cpu")
     targets = build_or_load_bigg_targets(
-        tensors, args.subjects, data_dir / args.target_cache, device, args.mindeye_src,
+        tensors, args.subjects, args.target_dir, device, args.mindeye_src,
         hf_cache=hf_cache)
     stats: TargetStats = targets["_stats"]
     bundle = build_step1_loaders(tensors, targets, args.subjects, args.batch_size,

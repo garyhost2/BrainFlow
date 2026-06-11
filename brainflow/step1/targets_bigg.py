@@ -6,13 +6,17 @@ token grid lands in exactly the space the SDXL-unCLIP decoder was trained on.
 
 CRITICAL (verified against sgm source): the embedder does its OWN preprocessing
 (resize 224 bicubic, then `(x+1)/2`, then CLIP-normalize).  MindEye2 feeds images
-in [0,1] directly — so do we (do NOT pre-normalize).  The `(x+1)/2` maps [0,1] ->
-[0.5,1]; this is the (quirky but self-consistent) distribution the decoder learned.
+in [0,1] directly — so do we (do NOT pre-normalize).
+
+Storage: ONE FILE PER SUBJECT (`step1b_bigg_s{subj}.pt`), each holding fp16
+`emb_train`/`emb_test` plus a tiny per-subject stats accumulator.  Files are
+**memory-mapped** on load so multi-subject training never pulls 95 GB+ into RAM.
+Global standardization (mean/std) is reconstructed by summing the per-subject
+accumulators — no need to hold all embeddings at once.
 """
 from __future__ import annotations
 
 import gc
-import os
 import sys
 from pathlib import Path
 
@@ -30,8 +34,7 @@ def _add_sgm_to_path(mindeye_src: Path):
     gm = mindeye_src / "generative_models"
     if not gm.exists():
         raise FileNotFoundError(
-            f"Vendored sgm not found at {gm}. Run scripts/setup_step1b.sh first "
-            f"(it clones MedARC-AI/MindEyeV2) or set --mindeye-src to its `src/` dir.")
+            f"Vendored sgm not found at {gm}. Run scripts/setup_step1b.sh first.")
     for p in (str(mindeye_src), str(gm)):
         if p not in sys.path:
             sys.path.insert(0, p)
@@ -60,48 +63,72 @@ def _encode(emb, imgs, device, bs=16):
         if x.dtype == torch.uint8:
             x = x.float() / 255.0
         x = x.clamp(0, 1).to(device)
-        tok = emb(x)                       # (B, 256, 1664) — embedder does resize+normalize
-        outs.append(tok.float().cpu().half())
+        outs.append(emb(x).float().cpu().half())
     return torch.cat(outs)
 
 
-def build_or_load_bigg_targets(tensors, subjects, cache_path, device, mindeye_src,
-                               hf_cache=None, force_rebuild=False):
-    cache_path = Path(cache_path)
-    if cache_path.exists() and not force_rebuild:
-        print(f"✓ Loading bigG target cache: {cache_path}")
-        blob = torch.load(cache_path, map_location="cpu")
-        blob["_stats"] = TargetStats.from_dict(blob["_stats"])
-        return blob
-
-    emb = _load_embedder(device, mindeye_src)
-    out = {}
+def _accum_stats(e_tr_fp16, chunk=1024):
+    """Per-channel count/sum/sqsum over (N,256,1664) train tokens (chunked, f64)."""
     cnt = 0
-    s_sum = torch.zeros(TOKEN_DIM, dtype=torch.float64)
-    s_sqsum = torch.zeros(TOKEN_DIM, dtype=torch.float64)
-    for subj in subjects:
-        print(f"  bigG encode subj{subj:02d}")
-        e_tr = _encode(emb, tensors[f"imgs_train_{subj}"], device)
-        e_te = _encode(emb, tensors[f"imgs_test_{subj}"], device)
-        out[f"emb_train_{subj}"] = e_tr
-        out[f"emb_test_{subj}"] = e_te
-        # accumulate per-channel stats over TRAIN tokens (flatten N and 256)
-        flat = e_tr.float().reshape(-1, TOKEN_DIM)
-        cnt += flat.shape[0]
-        s_sum += flat.sum(0).double()
-        s_sqsum += (flat * flat).sum(0).double()
+    s = torch.zeros(TOKEN_DIM, dtype=torch.float64)
+    sq = torch.zeros(TOKEN_DIM, dtype=torch.float64)
+    for i in range(0, len(e_tr_fp16), chunk):
+        f = e_tr_fp16[i:i + chunk].float().reshape(-1, TOKEN_DIM)
+        cnt += f.shape[0]
+        s += f.sum(0).double()
+        sq += (f * f).sum(0).double()
+    return cnt, s, sq
 
-    mean = (s_sum / cnt).float()
-    var = (s_sqsum / cnt - (s_sum / cnt) ** 2).clamp_min(1e-12).float()
-    stats = TargetStats(mean=mean, std=var.sqrt().clamp_min(1e-6))
-    out["_stats"] = stats.to_dict()
+
+def _subj_file(cache_dir: Path, subj: int) -> Path:
+    return Path(cache_dir) / f"step1b_bigg_s{subj}.pt"
+
+
+def build_or_load_bigg_targets(tensors, subjects, cache_dir, device, mindeye_src,
+                               hf_cache=None, force_rebuild=False):
+    """Build (missing) / load per-subject bigG target files, memory-mapped.
+
+    Returns dict with emb_train_{s}, emb_test_{s} (mmap fp16) and _stats (global).
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    embedder = None
+    out = {}
+    tot_cnt = 0
+    tot_s = torch.zeros(TOKEN_DIM, dtype=torch.float64)
+    tot_sq = torch.zeros(TOKEN_DIM, dtype=torch.float64)
+
+    for s in subjects:
+        fp = _subj_file(cache_dir, s)
+        if not fp.exists() or force_rebuild:
+            if embedder is None:
+                embedder = _load_embedder(device, mindeye_src)
+            print(f"  bigG encode subj{s:02d}")
+            e_tr = _encode(embedder, tensors[f"imgs_train_{s}"], device)
+            e_te = _encode(embedder, tensors[f"imgs_test_{s}"], device)
+            cnt, ssum, sqsum = _accum_stats(e_tr)
+            torch.save({"emb_train": e_tr, "emb_test": e_te,
+                        "accum": {"count": cnt, "sum": ssum, "sqsum": sqsum}}, fp)
+            print(f"  ✓ saved {fp} ({fp.stat().st_size/1e9:.1f} GB)")
+            del e_tr, e_te
+            gc.collect()
+        # Reload memory-mapped so we never hold the full tensor in RAM.
+        blob = torch.load(fp, map_location="cpu", mmap=True)
+        out[f"emb_train_{s}"] = blob["emb_train"]
+        out[f"emb_test_{s}"] = blob["emb_test"]
+        a = blob["accum"]
+        tot_cnt += int(a["count"])
+        tot_s += a["sum"].double()
+        tot_sq += a["sqsum"].double()
+
+    if embedder is not None:
+        del embedder
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    mean = (tot_s / tot_cnt).float()
+    var = (tot_sq / tot_cnt - (tot_s / tot_cnt) ** 2).clamp_min(1e-12).float()
+    out["_stats"] = TargetStats(mean=mean, std=var.sqrt().clamp_min(1e-6))
     out["_meta"] = {"embedder": "ViT-bigG-14/laion2b_s39b_b160k",
                     "token_len": TOKEN_LEN, "token_dim": TOKEN_DIM, "norm": "raw_tokens"}
-
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(out, cache_path)
-    print(f"✓ bigG target cache saved: {cache_path}  ({cache_path.stat().st_size/1e9:.1f} GB)")
-    del emb
-    gc.collect(); torch.cuda.empty_cache()
-    out["_stats"] = stats
     return out

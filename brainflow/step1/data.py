@@ -20,7 +20,9 @@ class Step1Dataset(Dataset):
                  augment=False, noise_std=0.0):
         assert len(fmri) == len(target_emb) == len(images)
         self.fmri = ((fmri.float() - fmri_mu) / fmri_std)
-        self.emb = target_emb.float()
+        # Keep targets in their stored dtype (fp16, possibly memory-mapped) — do
+        # NOT .float() the whole array or multi-subject blows up RAM. Cast per item.
+        self.emb = target_emb
         self.images = images  # uint8
         self.subject_id = int(subject_id)
         self.augment = augment
@@ -36,7 +38,7 @@ class Step1Dataset(Dataset):
         img = self.images[i]
         if img.dtype == torch.uint8:
             img = img.float() / 255.0
-        return {"fmri": f, "emb": self.emb[i], "image": img, "subject": self.subject_id}
+        return {"fmri": f, "emb": self.emb[i].float(), "image": img, "subject": self.subject_id}
 
 
 def _collate(batch):
