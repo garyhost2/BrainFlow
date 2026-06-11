@@ -47,6 +47,13 @@ class SDXLUnCLIPDecoder:
         p["first_stage_config"]["target"] = "sgm.models.autoencoder.AutoencoderKL"
         p["sampler_config"]["params"]["num_steps"] = num_steps
         self.offset_noise_level = p["loss_fn_config"]["params"]["offset_noise_level"]
+        # The VAE decoder's attn_type 'vanilla-xformers' hard-crashes without
+        # xformers (it doesn't fall back like the UNet does). Force native
+        # attention — same weights, identical math, no xformers dependency.
+        try:
+            p["first_stage_config"]["params"]["ddconfig"]["attn_type"] = "vanilla"
+        except (KeyError, TypeError):
+            pass
 
         engine = DiffusionEngine(
             network_config=p["network_config"],
