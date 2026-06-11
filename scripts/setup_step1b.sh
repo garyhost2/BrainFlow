@@ -28,9 +28,12 @@ fi
 echo "▶ Installing Step-1b deps (sgm / bigG / decoder)…"
 pip install --upgrade pip
 pip install \
+  "numpy<2" "setuptools<81" \
   "open_clip_torch==2.24.0" "kornia==0.7.1" "omegaconf==2.3.0" \
   "pytorch-lightning==2.0.1" "transformers>=4.37" "diffusers>=0.23" \
   "torchmetrics>=1.3" einops ftfy regex "huggingface_hub>=0.20" safetensors
+# Pins that bit on Panther: torch 2.1.0 needs numpy<2 (ABI); pytorch-lightning
+# 2.0.1 needs pkg_resources, removed from setuptools>=81.
 # xformers is optional (sgm uses softmax-xformers attn); install if your CUDA matches:
 #   pip install xformers==0.0.22.post7
 
