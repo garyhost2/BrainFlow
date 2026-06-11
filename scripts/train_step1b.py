@@ -115,6 +115,7 @@ def main():
         clip_metric = CLIPMetric(device, hf_cache=hf_cache)
 
     best_cos = -1.0
+    best_clip = -1.0
     step = 0
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -166,11 +167,18 @@ def main():
                     "stats": stats.to_dict(), "voxels": bundle.voxels,
                     "subjects": args.subjects, "epoch": epoch}
             torch.save(ckpt, out_dir / "last.pt")
+            # token_cos tracks the (auxiliary) regression head and plateaus early.
+            # The flow prior — which actually generates the images — is best tracked
+            # by CLIP_2way, so select the kept checkpoint on that when available.
+            if args.decode_eval and im["CLIP_2way"] > best_clip:
+                best_clip = im["CLIP_2way"]
+                torch.save(ckpt, out_dir / "best_clip2way.pt")
             if cos > best_cos:
                 best_cos = cos
                 torch.save(ckpt, out_dir / "best_cos.pt")
 
-    print(f"Done. best token_cos={best_cos:.4f}. Checkpoints in {out_dir}")
+    print(f"Done. best token_cos={best_cos:.4f}, best CLIP_2way={best_clip:.4f}. "
+          f"Checkpoints in {out_dir}")
 
 
 def _save_grid(pred, gt, path, n=8):
