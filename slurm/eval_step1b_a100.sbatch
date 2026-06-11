@@ -48,10 +48,13 @@ UNCLIP_CKPT="${UNCLIP_CKPT:-third_party/unclip6_epoch0_step110000.ckpt}"
 # selected and generatively weaker — use last.pt for the baseline number.
 CKPT="${CKPT:-outputs/step1b/last.pt}"
 OUT="${OUT:-eval_last}"
+DATA_DIR="${DATA_DIR:-./mindeyev2_cache}"          # tensor cache + hf_cache
+TARGET_DIR="${TARGET_DIR:-${DATA_DIR}}"            # per-subject bigG files (match training)
 
 python -m scripts.eval_step1b \
     --ckpt "${CKPT}" \
-    --data-dir ./mindeyev2_cache \
+    --data-dir "${DATA_DIR}" \
+    --target-dir "${TARGET_DIR}" \
     --mindeye-src "${MINDEYE_SRC}" \
     --ckpt-path "${UNCLIP_CKPT}" \
     --cond-source prior --cfg-scale 3.0 --steps 50 \
