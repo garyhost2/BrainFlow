@@ -57,6 +57,9 @@ UNCLIP_CKPT="${UNCLIP_CKPT:-third_party/unclip6_epoch0_step110000.ckpt}"
 SUBJECTS="${SUBJECTS:-1 2 5 7}"
 DATA_DIR="${DATA_DIR:-./mindeyev2_cache}"        # tensor cache (all_subjects_tensors.pt) + hf_cache
 TARGET_DIR="${TARGET_DIR:-${DATA_DIR}}"          # big per-subject bigG files (~26 GB each) land here
+# Distinct output dir so the multi-subject run does NOT overwrite the single-subject
+# baseline in outputs/step1b. Override with OUT=... for other configs.
+OUT="${OUT:-outputs/step1b_ms}"
 
 # ── Disk preflight ──────────────────────────────────────────────────────────
 # Each subject's bigG token cache is ~26 GB fp16 (train ~24 GB + test ~2.5 GB):
@@ -95,6 +98,6 @@ python -m scripts.train_step1b \
     --ckpt-path "${UNCLIP_CKPT}" \
     --epochs 150 --batch-size 48 --lr 3e-4 \
     --eval-freq 10 --decode-eval --decode-n 16 \
-    --out outputs/step1b
+    --out "${OUT}"
 
-echo "Done at $(date)"
+echo "Done at $(date). Checkpoints in ${OUT}"
