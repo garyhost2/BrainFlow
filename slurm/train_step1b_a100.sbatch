@@ -9,11 +9,13 @@
 #SBATCH -J step1b
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
-#SBATCH -p gpu-all
-#SBATCH --gres=gpu:a100_80GB:1
+#SBATCH -p gpu-A100
+#SBATCH --gres=gpu:A100_80GB:1
 #SBATCH -c 8
 #SBATCH --mem=120G
 #SBATCH -t 2-00:00:00
+# For an H200 instead (bigger/faster): change the two lines above to
+#   -p gpu-H200   and   --gres=gpu:H200_141GB:1   (no other changes needed).
 
 set -euo pipefail
 
