@@ -28,7 +28,7 @@ fi
 echo "▶ Installing Step-1b deps (sgm / bigG / decoder)…"
 pip install --upgrade pip
 pip install \
-  "numpy<2" "setuptools<81" \
+  "numpy<2" "setuptools<81" scipy \
   "open_clip_torch==2.24.0" "kornia==0.7.1" "omegaconf==2.3.0" \
   "pytorch-lightning==2.0.1" "transformers>=4.37" "diffusers>=0.23" \
   "torchmetrics>=1.3" einops ftfy regex "huggingface_hub>=0.20" safetensors
