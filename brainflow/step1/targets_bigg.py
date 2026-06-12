@@ -113,7 +113,8 @@ def build_or_load_bigg_targets(tensors, subjects, cache_dir, device, mindeye_src
             del e_tr, e_te
             gc.collect()
         # Reload memory-mapped so we never hold the full tensor in RAM.
-        blob = torch.load(fp, map_location="cpu", mmap=True)
+        # NB: torch.load(mmap=True) requires a str path, not a pathlib.Path.
+        blob = torch.load(str(fp), map_location="cpu", mmap=True)
         out[f"emb_train_{s}"] = blob["emb_train"]
         out[f"emb_test_{s}"] = blob["emb_test"]
         a = blob["accum"]
