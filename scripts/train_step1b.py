@@ -118,6 +118,7 @@ def main():
     best_cos = -1.0
     best_clip = -1.0
     step = 0
+    nan_skips = 0
     for epoch in range(1, args.epochs + 1):
         model.train()
         bundle.train_sampler.set_epoch(epoch)
@@ -134,34 +135,55 @@ def main():
                 ld = model.training_step(fmri, batch["subject"], tgt_std)
                 loss = ld["loss"]
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            opt.step(); ema.update(model); step += 1
+            gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            # A single non-finite gradient (a rare bf16 spike — ~300k steps/run with
+            # 8 subjects) makes clip_grad_norm_'s rescale 0*inf=NaN, and opt.step()
+            # then writes NaN into every weight + AdamW moment + EMA shadow, killing
+            # the run permanently. Drop the batch instead of poisoning the model.
+            if torch.isfinite(gnorm):
+                opt.step(); ema.update(model)
+            else:
+                nan_skips += 1
+            step += 1
             if step % 50 == 0:
                 pbar.set_postfix(flow=f"{ld['flow']:.3f}", reg=f"{ld['reg']:.3f}",
-                                 cos=f"{ld['cos']:.3f}", lr=f"{lr:.1e}")
+                                 cos=f"{ld['cos']:.3f}", lr=f"{lr:.1e}", skip=nan_skips)
 
         if epoch % args.eval_freq == 0 or epoch == args.epochs:
             ema.store(model); ema.copy_to(model)
             cos = eval_token_cosine(model, bundle.eval, stats, device)
             msg = f"Ep{epoch:4d} | token_cos={cos:.4f}"
             if args.decode_eval:
-                preds, gts, got = [], [], 0
+                # Stratify the decode sample ACROSS subjects. The eval loader is
+                # subject-ordered, so the old "first decode_n" took only subject-1's
+                # first N images — a tiny, non-representative slice with ~0.1 SE on
+                # CLIP_2way (hence the epoch-to-epoch noise). Take an even quota per
+                # subject so the metric (and best-ckpt selection) is trustworthy.
+                n_subj = max(1, len(args.subjects))
+                per_subj = max(1, args.decode_n // n_subj)
+                preds, gts, got = [], [], {}
                 with torch.no_grad():
                     for batch in bundle.eval:
-                        fmri = batch["fmri"].to(device, non_blocking=True)
+                        s = int(batch["subject"])
+                        if got.get(s, 0) >= per_subj:
+                            continue
+                        take = min(batch["fmri"].shape[0], per_subj - got.get(s, 0))
+                        fmri = batch["fmri"][:take].to(device, non_blocking=True)
                         tok = model.predict_tokens(fmri, batch["subject"], stats,
                                                    cond_source=cfg.cond_source)
-                        preds.append(decoder.decode(tok)); gts.append(batch["image"])
-                        got += tok.shape[0]
-                        if got >= args.decode_n:
+                        preds.append(decoder.decode(tok)); gts.append(batch["image"][:take])
+                        got[s] = got.get(s, 0) + take
+                        if len(got) == n_subj and all(v >= per_subj for v in got.values()):
                             break
-                pred = torch.cat(preds)[:args.decode_n]; gt = torch.cat(gts)[:args.decode_n]
+                pred = torch.cat(preds); gt = torch.cat(gts)
                 im = {"PixCorr": pixcorr(pred, gt), "SSIM": ssim(pred, gt)}
                 im.update(clip_metric.score(pred, gt))
                 msg += (f" | PixCorr={im['PixCorr']:.3f} SSIM={im['SSIM']:.3f} "
                         f"CLIP_cos={im['CLIP_cos']:.3f} CLIP_2way={im['CLIP_2way']:.3f}")
                 _save_grid(pred, gt, out_dir / f"recon_ep{epoch}.png")
             ema.restore(model)
+            if nan_skips:
+                msg += f" | nan_skips={nan_skips}"
             print(msg)
 
             ckpt = {"model": model.state_dict(), "ema": ema.shadow, "cfg": cfg,

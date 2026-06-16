@@ -213,7 +213,9 @@ class TokenStep1Model(nn.Module):
 
         reg = self.reg_head(brain)
         loss_reg = F.mse_loss(reg, target_std)
-        loss_cos = 1.0 - F.cosine_similarity(reg, target_std, dim=-1).mean()
+        # fp32 cosine: its gradient scales as 1/‖reg‖ and is the most likely bf16
+        # overflow source; compute it in fp32 to keep the spike from ever starting.
+        loss_cos = 1.0 - F.cosine_similarity(reg.float(), target_std.float(), dim=-1).mean()
 
         x1 = target_std
         x0 = torch.randn_like(x1)
