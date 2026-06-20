@@ -23,6 +23,19 @@ import torch.nn.functional as F
 from .model import ResMLP, SinusoidalTime
 
 
+def soft_clip_loss(preds: torch.Tensor, targs: torch.Tensor, temp: float) -> torch.Tensor:
+    """MindEye2 SoftCLIP: soft labels from the CLIP-CLIP similarity matrix.
+
+    preds, targs are L2-normalized (B, C). Symmetric brain<->CLIP contrastive.
+    """
+    clip_clip = (targs @ targs.T) / temp
+    brain_clip = (preds @ targs.T) / temp
+    soft = clip_clip.softmax(dim=-1)
+    loss1 = -(brain_clip.log_softmax(dim=-1) * soft).sum(dim=-1).mean()
+    loss2 = -(brain_clip.T.log_softmax(dim=-1) * soft).sum(dim=-1).mean()
+    return (loss1 + loss2) / 2
+
+
 @dataclass
 class TokenStep1Config:
     token_len: int = 256
@@ -48,6 +61,11 @@ class TokenStep1Config:
     lambda_flow: float = 1.0
     lambda_reg: float = 1.0
     lambda_cos: float = 0.5
+    # MindEye2-style contrastive alignment (the ingredient step1b was missing).
+    # Forces brain tokens to land DISCRIMINATIVELY in CLIP space instead of
+    # regressing to the mean token. clip_temp matches MindEye2's softclip_temp.
+    lambda_clip: float = 1.0       # SoftCLIP weight; 0 disables
+    clip_temp: float = 0.006
     # inference
     n_steps: int = 50
     cfg_scale: float = 3.0
@@ -200,6 +218,13 @@ class TokenStep1Model(nn.Module):
         self.backbone = TokenBackbone(cfg, voxels_per_subject)
         self.reg_head = TokenRegHead(cfg)
         self.prior = TokenFlowPrior(cfg)
+        # Contrastive projector: pooled brain tokens -> CLIP space for SoftCLIP.
+        # Decoupled from reg_head (MindEye2 keeps retrieval/recon heads separate).
+        self.clip_proj = nn.Sequential(
+            nn.LayerNorm(cfg.brain_dim),
+            nn.Linear(cfg.brain_dim, cfg.brain_dim), nn.GELU(),
+            nn.Linear(cfg.brain_dim, cfg.token_dim),
+        )
 
     def _sample_t(self, B, device):
         z = torch.randn(B, device=device) * self.cfg.logit_normal_s + self.cfg.logit_normal_m
@@ -217,6 +242,15 @@ class TokenStep1Model(nn.Module):
         # overflow source; compute it in fp32 to keep the spike from ever starting.
         loss_cos = 1.0 - F.cosine_similarity(reg.float(), target_std.float(), dim=-1).mean()
 
+        # Contrastive alignment (SoftCLIP) on pooled brain proj vs pooled target.
+        # fp32 + L2-norm; this is the MindEye2 retrieval signal step1b lacked.
+        if cfg.lambda_clip > 0:
+            b = F.normalize(self.clip_proj(brain.mean(dim=1)).float(), dim=-1)
+            z = F.normalize(target_std.mean(dim=1).float(), dim=-1)
+            loss_clip = soft_clip_loss(b, z, cfg.clip_temp)
+        else:
+            loss_clip = torch.zeros((), device=device)
+
         x1 = target_std
         x0 = torch.randn_like(x1)
         t = self._sample_t(B, device)
@@ -229,9 +263,10 @@ class TokenStep1Model(nn.Module):
         loss_flow = F.mse_loss(v, ut)
 
         total = (cfg.lambda_flow * loss_flow + cfg.lambda_reg * loss_reg
-                 + cfg.lambda_cos * loss_cos)
+                 + cfg.lambda_cos * loss_cos + cfg.lambda_clip * loss_clip)
         return {"loss": total, "flow": loss_flow.detach(),
-                "reg": loss_reg.detach(), "cos": loss_cos.detach()}
+                "reg": loss_reg.detach(), "cos": loss_cos.detach(),
+                "clip": loss_clip.detach()}
 
     @torch.no_grad()
     def _sample_prior(self, brain, n_steps, cfg_scale, solver):
