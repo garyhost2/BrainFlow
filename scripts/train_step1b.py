@@ -44,6 +44,11 @@ def parse_args():
     ap.add_argument("--epochs", type=int, default=150)
     ap.add_argument("--batch-size", type=int, default=48)
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--enc-hidden", type=int, default=2048,
+                    help="backbone width; 4096 matches MindEye2 capacity")
+    ap.add_argument("--lambda-clip", type=float, default=1.0,
+                    help="SoftCLIP contrastive weight (0 disables)")
+    ap.add_argument("--clip-temp", type=float, default=0.006)
     ap.add_argument("--weight-decay", type=float, default=0.02)
     ap.add_argument("--warmup-epochs", type=int, default=5)
     ap.add_argument("--min-lr", type=float, default=1e-6)
@@ -97,7 +102,8 @@ def main():
     bundle = build_step1_loaders(tensors, targets, args.subjects, args.batch_size,
                                  num_workers=args.num_workers, fmri_noise_std=args.fmri_noise_std)
 
-    cfg = TokenStep1Config(subjects=args.subjects)
+    cfg = TokenStep1Config(subjects=args.subjects, enc_hidden=args.enc_hidden,
+                           lambda_clip=args.lambda_clip, clip_temp=args.clip_temp)
     model = TokenStep1Model(cfg, bundle.voxels).to(device)
     if args.compile:
         model = torch.compile(model)
@@ -147,7 +153,8 @@ def main():
             step += 1
             if step % 50 == 0:
                 pbar.set_postfix(flow=f"{ld['flow']:.3f}", reg=f"{ld['reg']:.3f}",
-                                 cos=f"{ld['cos']:.3f}", lr=f"{lr:.1e}", skip=nan_skips)
+                                 cos=f"{ld['cos']:.3f}", clip=f"{ld['clip']:.3f}",
+                                 lr=f"{lr:.1e}", skip=nan_skips)
 
         if epoch % args.eval_freq == 0 or epoch == args.epochs:
             ema.store(model); ema.copy_to(model)
