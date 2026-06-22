@@ -1,0 +1,117 @@
+"""Step-1b evaluation: fMRI -> bigG tokens -> SDXL-unCLIP -> metrics.
+
+    python -m scripts.eval_step1b \
+        --ckpt outputs/step1b/best_cos.pt --data-dir ./mindeyev2_cache \
+        --mindeye-src third_party/MindEyeV2/src \
+        --ckpt-path third_party/unclip6_epoch0_step110000.ckpt \
+        --cond-source prior --cfg-scale 3.0 --steps 50 \
+        --out outputs/step1b/eval
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import torch
+from tqdm.auto import tqdm
+
+from brainflow.step1.model_tokens import TokenStep1Config, TokenStep1Model
+from brainflow.step1.targets import TargetStats
+from brainflow.step1.targets_bigg import build_or_load_bigg_targets
+from brainflow.step1.data import build_step1_loaders
+from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder
+from brainflow.step1.metrics import pixcorr, ssim, CLIPMetric
+
+
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ckpt", type=str, required=True)
+    ap.add_argument("--data-dir", type=str, default="./mindeyev2_cache")
+    ap.add_argument("--tensor-cache", type=str, default="all_subjects_tensors.pt")
+    ap.add_argument("--target-dir", type=str, default="./mindeyev2_cache",
+                    help="dir holding per-subject bigG target files (step1b_bigg_s{N}.pt)")
+    ap.add_argument("--mindeye-src", type=str, default="third_party/MindEyeV2/src")
+    ap.add_argument("--ckpt-path", type=str, default="third_party/unclip6_epoch0_step110000.ckpt")
+    ap.add_argument("--cond-source", type=str, default="prior",
+                    choices=["regression", "prior", "blend"])
+    ap.add_argument("--cfg-scale", type=float, default=3.0)
+    ap.add_argument("--steps", type=int, default=50)
+    ap.add_argument("--solver", type=str, default="heun", choices=["euler", "heun"])
+    ap.add_argument("--decode-steps", type=int, default=38)
+    ap.add_argument("--max-images", type=int, default=10_000)
+    ap.add_argument("--out", type=str, default="outputs/step1b/eval")
+    return ap.parse_args()
+
+
+def main():
+    args = parse_args()
+    torch.set_float32_matmul_precision("high")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = Path(args.data_dir); hf_cache = data_dir / "hf_cache"
+
+    ckpt = torch.load(args.ckpt, map_location="cpu")
+    cfg: TokenStep1Config = ckpt["cfg"]
+    cfg.cond_source = args.cond_source; cfg.cfg_scale = args.cfg_scale
+    cfg.n_steps = args.steps; cfg.solver = args.solver
+    stats = TargetStats.from_dict(ckpt["stats"])
+    subjects = ckpt["subjects"]; voxels = ckpt["voxels"]
+
+    model = TokenStep1Model(cfg, voxels)
+    model.load_state_dict(ckpt["model"])
+    if "ema" in ckpt:
+        sd = model.state_dict()
+        for k, v in ckpt["ema"].items():
+            sd[k].copy_(v)
+        model.load_state_dict(sd)
+    model = model.to(device).eval()
+
+    tensors = torch.load(data_dir / args.tensor_cache, map_location="cpu")
+    # Targets: eval only needs the per-subject test embeddings the loader attaches
+    # (global stats come from the checkpoint). Prefer the legacy single-file cache
+    # (step1b_targets_bigg.pt) when it already covers every requested subject — this
+    # lets a subject-1 baseline reuse the existing 23 GB cache with no re-encode.
+    # Otherwise fall back to the per-subject, memory-mapped files used for
+    # multi-subject training.
+    targets = None
+    legacy = data_dir / "step1b_targets_bigg.pt"
+    if legacy.exists():
+        blob = torch.load(legacy, map_location="cpu")
+        if all(f"emb_train_{s}" in blob and f"emb_test_{s}" in blob for s in subjects):
+            print(f"✓ using legacy target cache: {legacy}")
+            targets = blob
+    if targets is None:
+        targets = build_or_load_bigg_targets(
+            tensors, subjects, args.target_dir, device, args.mindeye_src, hf_cache=hf_cache)
+    bundle = build_step1_loaders(tensors, targets, subjects, batch_size=32, num_workers=8)
+
+    decoder = SDXLUnCLIPDecoder(device, args.mindeye_src, args.ckpt_path,
+                                num_steps=args.decode_steps)
+    clip_metric = CLIPMetric(device, hf_cache=hf_cache)
+
+    preds, gts = [], []
+    with torch.no_grad():
+        for batch in tqdm(bundle.eval, desc="eval"):
+            fmri = batch["fmri"].to(device, non_blocking=True)
+            tok = model.predict_tokens(fmri, batch["subject"], stats)
+            preds.append(decoder.decode(tok)); gts.append(batch["image"])
+            if sum(p.shape[0] for p in preds) >= args.max_images:
+                break
+    pred = torch.cat(preds); gt = torch.cat(gts)
+
+    metrics = {"PixCorr": pixcorr(pred, gt), "SSIM": ssim(pred, gt), "n": pred.shape[0]}
+    metrics.update(clip_metric.score(pred, gt))
+    print(json.dumps(metrics, indent=2))
+    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    try:
+        from torchvision.utils import save_image
+        k = min(16, pred.shape[0])
+        save_image(torch.cat([gt[:k], pred[:k]]), str(out_dir / "recon_grid.png"), nrow=k)
+        print(f"✓ grid -> {out_dir/'recon_grid.png'}")
+    except Exception as e:
+        print(f"[grid skipped] {e}")
+
+
+if __name__ == "__main__":
+    main()
