@@ -6,27 +6,46 @@ v5.1: Phase 1 bugfix patch — data leak (B1), DDP (B3), trial averaging (B4),
 
 v5.2 (Phase 2): Hierarchical VFM — Flow_CLIP DiT + VFM objective +
       CLIP-conditioned Flow_VAE + unified solver API.
-"""
-from .config import load_config, Config
-from .models import BrainFlowV5, BrainEncoder, FlowUNet
-from .ema import EMA
-from .vae import FrozenVAE
-from .vfm import vfm_loss, cfm_loss, velocity_from_posterior, flow_loss
-from .flow_clip_dit import FlowCLIPDiT
-from .flow_unet import FlowUNet as FlowUNetV2
-from .phase2_model import BrainFlowPhase2
-from .clip_prior import ClipPrior
-from .solvers import solve, make_t_grid
 
-__all__ = [
-    "load_config", "Config",
-    "BrainFlowV5", "BrainEncoder", "FlowUNet",
-    "EMA", "FrozenVAE",
-    # Phase 2
-    "vfm_loss", "cfm_loss", "velocity_from_posterior", "flow_loss",
-    "FlowCLIPDiT",
-    "FlowUNetV2",
-    "BrainFlowPhase2",
-    "ClipPrior",
-    "solve", "make_t_grid",
-]
+Top-level names are imported LAZILY (PEP 562) so that lightweight subpackages
+(e.g. ``brainflow.step1``) can be imported without pulling in the entire v5
+stack (diffusers, Phase-2 chain, …).  ``from brainflow import BrainFlowV5`` still
+works exactly as before — the import just happens on first access.
+"""
+import importlib
+
+_LAZY = {
+    "load_config": (".config", "load_config"),
+    "Config": (".config", "Config"),
+    "BrainFlowV5": (".models", "BrainFlowV5"),
+    "BrainEncoder": (".models", "BrainEncoder"),
+    "FlowUNet": (".models", "FlowUNet"),
+    "EMA": (".ema", "EMA"),
+    "FrozenVAE": (".vae", "FrozenVAE"),
+    "vfm_loss": (".vfm", "vfm_loss"),
+    "cfm_loss": (".vfm", "cfm_loss"),
+    "velocity_from_posterior": (".vfm", "velocity_from_posterior"),
+    "flow_loss": (".vfm", "flow_loss"),
+    "FlowCLIPDiT": (".flow_clip_dit", "FlowCLIPDiT"),
+    "FlowUNetV2": (".flow_unet", "FlowUNet"),
+    "BrainFlowPhase2": (".phase2_model", "BrainFlowPhase2"),
+    "ClipPrior": (".clip_prior", "ClipPrior"),
+    "solve": (".solvers", "solve"),
+    "make_t_grid": (".solvers", "make_t_grid"),
+}
+
+__all__ = list(_LAZY)
+
+
+def __getattr__(name):
+    if name in _LAZY:
+        module, attr = _LAZY[name]
+        mod = importlib.import_module(module, __name__)
+        value = getattr(mod, attr)
+        globals()[name] = value          # cache so subsequent access is direct
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals().keys()) + list(_LAZY))
