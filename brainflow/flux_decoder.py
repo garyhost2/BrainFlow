@@ -1,60 +1,3 @@
-"""FLUXBrainDecoder — frozen FLUX.1-dev + BrainIPAdapter.
-
-Architecture
-------------
-* FLUX.1-dev (12B, bf16) is loaded fully frozen.  No gradients, no weight
-  updates.  Only the BrainIPAdapter (~120M fp32) is trained.
-
-Adapter injection
------------------
-FLUX.1-dev uses MM-DiT "double-stream" blocks where image tokens and text
-tokens evolve in parallel.  We inject the adapter into each double-stream
-block by registering a forward hook on the block's image-attention output.
-The hook fires **after** the block's own attention but **before** the MLP,
-so the adapter cross-attends to brain tokens at every resolution of the
-image stream.
-
-Hook safety
------------
-* Hooks store state via a per-block side-channel (self._adapter_inputs)
-  populated once before the FLUX forward pass from the encoded brain signals.
-* Hooks are removed and re-registered every call to avoid accumulation.
-
-Training loss
--------------
-FLUX is itself a Rectified Flow model.  The training objective is the same
-flow-matching velocity MSE used in Phase 1/2, now applied in FLUX's 16-ch
-latent space (FLUX VAE, scale factor 0.3611).
-
-    z  = flux_vae.encode(images)  ×  0.3611
-    t  ~ logit_normal(0, 1)       (FLUX's own time sampling distribution)
-    ε  ~ N(0, I)
-    z_t = (1-t)*ε + t*z
-    v_pred = flux_transformer(z_t, t, txt="", brain_conditioning)
-    loss   = MSE(v_pred, z - ε)
-
-FLUX.1-dev uses guidance distillation: we pass guidance=1.0 during training
-(no CFG split needed) and guidance=3.5 at inference.
-
-Inference
----------
-Euler integration with FLUX's own scheduler, 28 steps default.  The adapter
-conditioning is injected identically to training.  No text prompt needed —
-we pass an empty string that FLUX's T5/CLIP encoders map to a fixed null
-embedding.
-
-Memory layout on 2× A100 80GB
-------------------------------
-  FLUX transformer (bf16) : ~23 GB
-  FLUX VAE (bf16)          :  ~1 GB
-  T5 encoder (bf16)        :  ~9 GB  (loaded once, kept resident)
-  CLIP-L encoder (bf16)    :  ~0.5 GB
-  BrainIPAdapter (fp32)    :  ~2 GB
-  Activations  (bs=4)      :  ~8 GB
-  ──────────────────────────────────
-  Total                    : ~44 GB  → fits 2× A100 80GB or 1× A100 80GB
-  Low-VRAM variant         : offload T5 after encoding, ip_n_blocks=10 → ~32 GB
-"""
 from __future__ import annotations
 
 import gc
@@ -72,42 +15,23 @@ from .config import Config
 
 log = logging.getLogger(__name__)
 
-
-# ── FLUX VAE scale factor (matches FLUX.1-dev training) ────────────────────
 _FLUX_VAE_SCALE = 0.3611
 
-
-# ── dtype selection ──────────────────────────────────────────────────────────
-
 def _flux_dtype() -> torch.dtype:
-    """Return the best dtype for FLUX on the current hardware.
-
-    V100 (compute capability 7.0) does NOT support bfloat16 natively —
-    PyTorch silently falls back to fp32 which doubles VRAM usage and causes
-    OOM.  We detect CC and use fp16 on V100/older, bfloat16 on Ampere+.
-    """
     if not torch.cuda.is_available():
         return torch.float32
     cc = torch.cuda.get_device_capability()
-    # bfloat16 hardware support requires compute capability >= 8.0 (Ampere)
+
     if cc[0] >= 8:
         return torch.bfloat16
     return torch.float16
 
-
-# ── logit-normal time sampling (matches FLUX training distribution) ─────────
-
 def _sample_flux_time(B: int, device: torch.device, m: float = 0.0,
                       s: float = 1.0) -> torch.Tensor:
-    """Sample t from logit-normal(m, s) — FLUX's own time distribution."""
     u = torch.randn(B, device=device) * s + m
     return torch.sigmoid(u)
 
-
-# ── null-text embedding cache ────────────────────────────────────────────────
-
 class _NullTextCache:
-    """Cache the null-text embeddings so T5/CLIP are only called once."""
 
     def __init__(self):
         self._prompt_embeds    = None
@@ -136,18 +60,7 @@ class _NullTextCache:
             self._text_ids.to(device),
         )
 
-
-# ── main module ──────────────────────────────────────────────────────────────
-
 class FLUXBrainDecoder(nn.Module):
-    """Frozen FLUX.1-dev with a trainable BrainIPAdapter.
-
-    Parameters
-    ----------
-    cfg : Config
-        BrainFlow config dataclass — reads flux_model_id, ip_dim, ip_n_blocks,
-        flux_guidance, flux_steps, data_dir.
-    """
 
     def __init__(self, cfg: Config):
         super().__init__()
@@ -161,20 +74,14 @@ class FLUXBrainDecoder(nn.Module):
             use_gradient_checkpointing=getattr(cfg, "flux_grad_ckpt", False),
         )
 
-        # Lazily loaded FLUX pipeline (avoids import at module load time)
         self._pipe        = None
         self._null_cache  = _NullTextCache()
         self._hook_handles: list = []
-        self._flux_dtype  = _flux_dtype()   # fp16 on V100, bf16 on Ampere+
+        self._flux_dtype  = _flux_dtype()
 
-        # Side-channel for hooks: populated before each FLUX forward pass.
-        # Keys: block_idx → (cond_tokens, uncertainty_gate)
         self._adapter_inputs: dict = {}
 
-        # register a buffer so .to(device) moves this module cleanly
         self.register_buffer("_device_anchor", torch.zeros(1), persistent=False)
-
-    # ── lazy load ─────────────────────────────────────────────────────────────
 
     def _load_pipe(self):
         if self._pipe is not None:
@@ -191,7 +98,7 @@ class FLUXBrainDecoder(nn.Module):
         flux_dtype  = self._flux_dtype
         device      = self._device_anchor.device
         offload_t5  = getattr(self.cfg, "flux_offload_t5", True)
-        # Split FLUX across all available GPUs to stay within per-GPU VRAM budget
+
         n_gpu       = torch.cuda.device_count()
         device_map  = "balanced" if n_gpu > 1 else None
 
@@ -212,18 +119,15 @@ class FLUXBrainDecoder(nn.Module):
         if device_map is None:
             pipe = pipe.to(device)
 
-        # Offload T5 text encoder to CPU after encoding — saves ~9GB on V100
         if offload_t5 and hasattr(pipe, "text_encoder_2"):
             pipe.text_encoder_2.to("cpu")
             log.info("T5 encoder offloaded to CPU (flux_offload_t5=True).")
 
-        # Freeze everything
         pipe.transformer.eval().requires_grad_(False)
         pipe.vae.eval().requires_grad_(False)
         pipe.text_encoder.eval().requires_grad_(False)
         pipe.text_encoder_2.eval().requires_grad_(False)
 
-        # xformers memory-efficient attention (V100 supports it)
         if hasattr(pipe.transformer, "enable_xformers_memory_efficient_attention"):
             try:
                 pipe.transformer.enable_xformers_memory_efficient_attention()
@@ -239,21 +143,12 @@ class FLUXBrainDecoder(nn.Module):
         )
         return self._pipe
 
-    # ── adapter hook management ──────────────────────────────────────────────
-
     def _remove_hooks(self):
         for h in self._hook_handles:
             h.remove()
         self._hook_handles.clear()
 
     def _register_hooks(self, pipe):
-        """Register a forward hook on each FLUX double-stream block.
-
-        The hook adds the adapter residual to the image-token stream
-        immediately after the block's own attention output, before the MLP.
-        FLUX double-stream blocks expose `hidden_states` as the first return
-        value (img tokens) and `encoder_hidden_states` as the second (txt).
-        """
         transformer = pipe.transformer
 
         def _make_hook(block_idx: int):
@@ -263,8 +158,6 @@ class FLUXBrainDecoder(nn.Module):
 
                 cond_tokens, gate = self._adapter_inputs[block_idx]
 
-                # FLUX double-stream blocks return (img_out, txt_out) or a
-                # single tensor depending on diffusers version.
                 if isinstance(output, tuple):
                     img_out, *rest = output
                 else:
@@ -280,7 +173,6 @@ class FLUXBrainDecoder(nn.Module):
 
             return hook
 
-        # FLUX.1-dev double-stream blocks are at transformer.transformer_blocks
         blocks = getattr(transformer, "transformer_blocks", None)
         if blocks is None:
             raise AttributeError(
@@ -299,7 +191,6 @@ class FLUXBrainDecoder(nn.Module):
         mu_clip: torch.Tensor,
         log_sigma: torch.Tensor,
     ):
-        """Pre-compute conditioning tokens and gate; store for hooks."""
         cond_tokens, gate = self.ip_adapter.build_conditioning(
             brain_tokens, mu_clip, log_sigma
         )
@@ -308,57 +199,39 @@ class FLUXBrainDecoder(nn.Module):
             for i in range(self.cfg.ip_n_blocks)
         }
 
-    # ── VAE encode / decode ───────────────────────────────────────────────────
-
     @torch.no_grad()
     def _vae_encode(self, images: torch.Tensor) -> torch.Tensor:
-        """images (B,3,H,W) ∈ [0,1] → FLUX latents (B,16,H//8,W//8)."""
         pipe  = self._load_pipe()
         dtype = self._flux_dtype
-        # FLUX expects [-1,1]
+
         x = images.to(dtype=dtype, device=pipe.vae.device) * 2.0 - 1.0
         latents = pipe.vae.encode(x).latent_dist.sample()
         return latents * _FLUX_VAE_SCALE
 
-    # ── training loss ─────────────────────────────────────────────────────────
-
     def compute_loss(
         self,
-        brain_tokens: torch.Tensor,   # (B, N, brain_dim)
-        mu_clip: torch.Tensor,         # (B, clip_dim)
-        log_sigma: torch.Tensor,       # (B, clip_dim)
-        target_images: torch.Tensor,   # (B, 3, H, W)  ∈ [0,1]
+        brain_tokens: torch.Tensor,
+        mu_clip: torch.Tensor,
+        log_sigma: torch.Tensor,
+        target_images: torch.Tensor,
     ) -> torch.Tensor:
-        """FLUX flow-matching denoising loss with brain IP-Adapter conditioning.
-
-        Only the BrainIPAdapter receives gradients.  FLUX is always in eval
-        mode and no_grad is applied to its parameters.
-
-        Returns
-        -------
-        loss : scalar tensor
-        """
         pipe   = self._load_pipe()
         device = self._device_anchor.device
         dtype  = self._flux_dtype
 
         B = brain_tokens.shape[0]
 
-        # 1. Encode target images to FLUX latent space (no grad)
         with torch.no_grad():
-            z = self._vae_encode(target_images.to(device))  # (B,16,H/8,W/8)
+            z = self._vae_encode(target_images.to(device))
 
-        # 2. Logit-normal time sampling (FLUX distribution)
         t = _sample_flux_time(B, device)
 
-        # 3. Linear interpolant  z_t = (1-t)*eps + t*z
         eps  = torch.randn_like(z)
         t4   = t.view(B, 1, 1, 1)
         z_t  = (1.0 - t4) * eps + t4 * z
-        # velocity target
-        v_target = z - eps                                    # (B,16,H/8,W/8)
 
-        # 4. Pre-compute adapter conditioning and register hooks
+        v_target = z - eps
+
         self._set_adapter_inputs(
             brain_tokens.to(device),
             mu_clip.to(device),
@@ -366,22 +239,19 @@ class FLUXBrainDecoder(nn.Module):
         )
         self._register_hooks(pipe)
 
-        # 5. Null-text embeddings (fixed; T5 + CLIP-L)
         with torch.no_grad():
             prompt_embeds, pooled_embeds, text_ids = self._null_cache.get(
                 pipe, device, dtype
             )
-            # expand to batch
+
             prompt_embeds = prompt_embeds.expand(B, -1, -1)
             pooled_embeds = pooled_embeds.expand(B, -1)
 
-        # 6. Patchify latents for FLUX transformer (pack into sequence)
         latent_image_ids = pipe._prepare_latent_image_ids(
             B, z_t.shape[2], z_t.shape[3], device, dtype
         )
         packed = pipe._pack_latents(z_t.to(dtype), *z_t.shape[2:])
 
-        # 7. FLUX transformer forward — hooks fire inside here
         try:
             with torch.cuda.amp.autocast(dtype=dtype, enabled=torch.cuda.is_available()):
                 noise_pred = pipe.transformer(
@@ -395,38 +265,28 @@ class FLUXBrainDecoder(nn.Module):
                     return_dict=False,
                 )[0]
         finally:
-            # Always remove hooks even if forward fails
+
             self._remove_hooks()
             self._adapter_inputs.clear()
 
-        # 8. Unpack prediction back to latent shape
         v_pred = pipe._unpack_latents(
             noise_pred, z_t.shape[2], z_t.shape[3], pipe.vae_scale_factor
         )
 
-        # 9. Flow-matching MSE loss in fp32 for numerical stability
         loss = F.mse_loss(v_pred.float(), v_target.float())
         return loss
-
-    # ── inference ─────────────────────────────────────────────────────────────
 
     @torch.no_grad()
     def generate(
         self,
-        brain_tokens: torch.Tensor,    # (B, N, brain_dim)
-        mu_clip: torch.Tensor,          # (B, clip_dim)
-        log_sigma: torch.Tensor,        # (B, clip_dim)
+        brain_tokens: torch.Tensor,
+        mu_clip: torch.Tensor,
+        log_sigma: torch.Tensor,
         height: int = 512,
         width:  int = 512,
         n_steps: Optional[int] = None,
         guidance: Optional[float] = None,
     ) -> torch.Tensor:
-        """Generate images conditioned on brain signals.
-
-        Returns
-        -------
-        images : (B, 3, H, W)  float32  ∈ [0, 1]
-        """
         pipe    = self._load_pipe()
         device  = self._device_anchor.device
         dtype   = torch.bfloat16
@@ -434,7 +294,6 @@ class FLUXBrainDecoder(nn.Module):
         n_steps = n_steps or self.cfg.flux_steps
         guidance_val = guidance if guidance is not None else self.cfg.flux_guidance
 
-        # Pre-compute adapter conditioning
         self._set_adapter_inputs(
             brain_tokens.to(device),
             mu_clip.to(device),
@@ -463,10 +322,8 @@ class FLUXBrainDecoder(nn.Module):
             self._remove_hooks()
             self._adapter_inputs.clear()
 
-        images = result.images.clamp(0.0, 1.0)  # (B, 3, H, W)
+        images = result.images.clamp(0.0, 1.0)
         return images
-
-    # ── device / dtype plumbing ───────────────────────────────────────────────
 
     def to(self, *args, **kwargs):
         out = super().to(*args, **kwargs)
@@ -475,7 +332,6 @@ class FLUXBrainDecoder(nn.Module):
         return out
 
     def trainable_parameters(self):
-        """Iterator over only the adapter parameters (for optimizer)."""
         return self.ip_adapter.parameters()
 
     def num_trainable_parameters(self) -> int:

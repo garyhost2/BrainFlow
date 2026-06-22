@@ -1,10 +1,3 @@
-"""Step-1 data: reuse the existing tensor cache, attach decoder-target embeddings.
-
-We deliberately do NOT couple to the full multi-phase `build_dataloaders`.  We
-load the already-built `all_subjects_tensors.pt` (fMRI + uint8 images + train
-stats) and the Step-1 target-embedding cache, then build simple per-subject
-datasets.  Single-subject batches (homogeneous voxel shape) via SubjectSampler.
-"""
 from __future__ import annotations
 
 import random
@@ -13,17 +6,14 @@ from dataclasses import dataclass
 import torch
 from torch.utils.data import Dataset, DataLoader, ConcatDataset, Sampler
 
-
 class Step1Dataset(Dataset):
-    """fMRI (z-scored with TRAIN stats) + raw target embedding + image (for eval)."""
     def __init__(self, fmri, target_emb, images, subject_id, fmri_mu, fmri_std,
                  augment=False, noise_std=0.0):
         assert len(fmri) == len(target_emb) == len(images)
         self.fmri = ((fmri.float() - fmri_mu) / fmri_std)
-        # Keep targets in their stored dtype (fp16, possibly memory-mapped) — do
-        # NOT .float() the whole array or multi-subject blows up RAM. Cast per item.
+
         self.emb = target_emb
-        self.images = images  # uint8
+        self.images = images
         self.subject_id = int(subject_id)
         self.augment = augment
         self.noise_std = noise_std
@@ -40,18 +30,15 @@ class Step1Dataset(Dataset):
             img = img.float() / 255.0
         return {"fmri": f, "emb": self.emb[i].float(), "image": img, "subject": self.subject_id}
 
-
 def _collate(batch):
     return {
         "fmri": torch.stack([b["fmri"] for b in batch]),
         "emb": torch.stack([b["emb"] for b in batch]),
         "image": torch.stack([b["image"] for b in batch]),
-        "subject": int(batch[0]["subject"]),  # homogeneous batch
+        "subject": int(batch[0]["subject"]),
     }
 
-
 class SubjectSampler(Sampler):
-    """Single-subject batches across a ConcatDataset of per-subject datasets."""
     def __init__(self, lengths, batch_size, shuffle=True, drop_last=True, seed=0):
         self.lengths = list(lengths)
         self.bs = batch_size
@@ -91,14 +78,12 @@ class SubjectSampler(Sampler):
     def __len__(self):
         return sum(L // self.bs for L in self.lengths)
 
-
 @dataclass
 class LoaderBundle:
     train: DataLoader
     eval: DataLoader
     voxels: dict
     train_sampler: SubjectSampler
-
 
 def build_step1_loaders(tensors: dict, targets: dict, subjects: list[int],
                         batch_size: int, num_workers: int = 8,

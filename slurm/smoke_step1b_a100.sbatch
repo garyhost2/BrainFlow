@@ -1,11 +1,5 @@
 #!/bin/bash -l
-# ─────────────────────────────────────────────────────────────────────────────
-# Step-1b decoder smoke test on an A100 — decode GROUND-TRUTH bigG tokens.
-# Validates the SDXL-unCLIP decoder path before committing to training.
-# Run AFTER scripts/setup_step1b.sh has finished (env + sgm + ckpt present).
-#   Submit:  sbatch slurm/smoke_step1b_a100.sbatch
-#   Output:  outputs/step1b/smoke/smoke_grid.png  (top=GT, bottom=decoded-from-GT)
-# ─────────────────────────────────────────────────────────────────────────────
+
 #SBATCH -J step1b_smoke
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err

@@ -1,17 +1,5 @@
 #!/bin/bash -l
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 1b — FULL PIPELINE in one job: train fMRI -> bigG token flow prior, then
-# auto-run a trustworthy full-test-set eval on the trained checkpoint.
-#
-# This is the whole step1b pipeline (fMRI -> bigG CLIP tokens -> SDXL-unCLIP)
-# end to end. There is no Phase 1/2/3/4 hand-off — step1b is standalone.
-#
-#   All 8 subjects (MindEye2 pretraining set; put bigG cache on scratch):
-#     SUBJECTS="1 2 3 4 5 6 7 8" TARGET_DIR=/scratch/$USER/bigg \
-#       sbatch slurm/step1b_full_a100.sbatch
-#   Default (4 full-data subjects, cache in home):
-#     sbatch slurm/step1b_full_a100.sbatch
-# ─────────────────────────────────────────────────────────────────────────────
+
 #SBATCH -J step1b_full
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
@@ -22,7 +10,6 @@
 #SBATCH -c 8
 #SBATCH --mem=120G
 #SBATCH -t 2-00:00:00
-# H200 instead: -p gpu-H200  and  --gres=gpu:H200_141GB:1
 
 set -euo pipefail
 
@@ -54,15 +41,11 @@ SUBJECTS="${SUBJECTS:-1 2 5 7}"
 DATA_DIR="${DATA_DIR:-./mindeyev2_cache}"
 TARGET_DIR="${TARGET_DIR:-${DATA_DIR}}"
 OUT="${OUT:-outputs/step1b_ms}"
-# Trustworthy in-loop eval: stratified across subjects (see train_step1b.py).
-# 128 decodes/eval is ~16 per subject for 8 subjects — enough to make CLIP_2way
-# steerable instead of 16-image noise. Bump EVAL_N for an even tighter signal.
+
 EVAL_N="${EVAL_N:-128}"
-# Full-set eval at the end: 982 = subject-1's complete averaged test set (a real,
-# benchmark-comparable number). Raise to cover more subjects (slower).
+
 FULL_EVAL_N="${FULL_EVAL_N:-982}"
 
-# ── Disk preflight (bigG token cache ~26 GB/subject) ─────────────────────────
 mkdir -p "${TARGET_DIR}"
 N_SUBJ=$(echo ${SUBJECTS} | wc -w)
 NEED_GB=$(( N_SUBJ * 26 )); HAVE_GB=0
@@ -79,7 +62,6 @@ if [ "${FREE_GB}" -lt "$(( NEED_GB + 20 ))" ]; then
     exit 1
 fi
 
-# ── STAGE 1: train (also builds the bigG target cache on first launch) ───────
 echo "════════════════ STAGE 1/2: TRAIN ════════════════"
 python -m scripts.train_step1b \
     --data-dir "${DATA_DIR}" \
@@ -91,7 +73,6 @@ python -m scripts.train_step1b \
     --eval-freq 10 --decode-eval --decode-n "${EVAL_N}" \
     --out "${OUT}"
 
-# ── STAGE 2: full-test-set eval on the trained model (the real number) ───────
 echo "════════════════ STAGE 2/2: FULL EVAL ════════════════"
 EVAL_CKPT="${OUT}/best_clip2way.pt"
 [ -f "${EVAL_CKPT}" ] || EVAL_CKPT="${OUT}/last.pt"

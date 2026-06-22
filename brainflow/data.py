@@ -1,4 +1,3 @@
-"""Multi-subject MindEyeV2 data pipeline with DDP support."""
 from __future__ import annotations
 import os, io, gc, random, subprocess
 from pathlib import Path
@@ -23,8 +22,6 @@ _LATENT_CACHE_FORMAT_V2 = "v2_sdvae_scaled"
 _CLIP_MEAN = torch.tensor([0.48145466, 0.4578275, 0.40821073])
 _CLIP_STD = torch.tensor([0.26862954, 0.26130258, 0.27577711])
 
-
-
 def is_dist() -> bool:
     return dist.is_available() and dist.is_initialized()
 
@@ -37,7 +34,6 @@ def world_size() -> int:
 def is_main() -> bool:
     return rank() == 0
 
-
 def _git_sha() -> str:
     try:
         root = Path(__file__).resolve().parent.parent
@@ -47,7 +43,6 @@ def _git_sha() -> str:
     except Exception:
         return "unknown"
 
-
 def _v2_cache_meta() -> dict[str, str]:
     return {
         "format": _CACHE_FORMAT_V2,
@@ -55,7 +50,6 @@ def _v2_cache_meta() -> dict[str, str]:
         "pretrained": "openai",
         "git_sha": _git_sha(),
     }
-
 
 def _assert_v2_cache(cache: Path, payload: dict) -> None:
     meta = payload.get("_meta")
@@ -65,13 +59,11 @@ def _assert_v2_cache(cache: Path, payload: dict) -> None:
             f"Set force_rebuild: true to rebuild this cache."
         )
 
-
 def _latent_cache_meta() -> dict[str, str]:
     return {
         "format": _LATENT_CACHE_FORMAT_V2,
         "git_sha": _git_sha(),
     }
-
 
 def _assert_latent_cache(cache: Path, payload: dict) -> None:
     meta = payload.get("_meta")
@@ -81,8 +73,6 @@ def _assert_latent_cache(cache: Path, payload: dict) -> None:
             f"Set force_rebuild: true to rebuild this cache."
         )
 
-
-# ─── HF download ──────────────────────────────────────────────────────────────
 def dl_hf(fname: str, data_dir: Path, repo: str) -> Path:
     p = data_dir / fname
     if p.exists():
@@ -92,7 +82,6 @@ def dl_hf(fname: str, data_dir: Path, repo: str) -> Path:
         repo_id=repo, filename=fname, repo_type="dataset",
         local_dir=str(data_dir), token=HF_TOKEN,
     ))
-
 
 def prefetch_subject_files(subject: int, cfg: Config) -> dict:
     s = f"0{subject}"
@@ -110,8 +99,6 @@ def prefetch_subject_files(subject: int, cfg: Config) -> dict:
                 pass
     return results
 
-
-# ─── Per-subject loader (raw fMRI + images) ───────────────────────────────────
 def load_subject(subject: int, coco_h5: Path, cfg: Config) -> dict:
     s = f"0{subject}"
     file_map = prefetch_subject_files(subject, cfg)
@@ -159,8 +146,7 @@ def load_subject(subject: int, coco_h5: Path, cfg: Config) -> dict:
     if imgs.shape[-1] != cfg.img_size:
         imgs = F.interpolate(imgs, cfg.img_size, mode="bilinear",
                              align_corners=False).clamp(0, 1)
-    # Store images as uint8 to keep cache small (~4× smaller than float32).
-    # Decoded back to float in NSDDataset / CLIP / VAE encoders.
+
     imgs = (imgs * 255.0).round().clamp(0, 255).to(torch.uint8)
 
     fmri_train = torch.tensor(fmri[:n_tr], dtype=torch.float32)
@@ -168,11 +154,9 @@ def load_subject(subject: int, coco_h5: Path, cfg: Config) -> dict:
     imgs_train = imgs[:n_tr]
     imgs_test_raw = imgs[n_tr:]
 
-    # B4: Average test betas across repetitions of the same coco_id
-    # NSD shows each test image 3× per subject; average for cleaner signal
     n_before = len(te_coco)
     unique_coco = np.unique(te_coco)
-    # Build averaged fmri and deduplicated images per unique coco_id (te_coco is already a numpy array)
+
     avg_fmri_rows = []
     avg_img_rows = []
     for uid in unique_coco:
@@ -184,7 +168,6 @@ def load_subject(subject: int, coco_h5: Path, cfg: Config) -> dict:
     n_after = len(fmri_test)
     print(f"  subj{subject:02d}: test trials averaged {n_before} → {n_after} unique images")
 
-    # Compute train fMRI statistics (used to normalise test set in NSDDataset)
     fmri_mu = fmri_train.mean(0)
     fmri_std = fmri_train.std(0).clamp(1e-6)
 
@@ -198,8 +181,6 @@ def load_subject(subject: int, coco_h5: Path, cfg: Config) -> dict:
         "fmri_mu": fmri_mu,
         "fmri_std": fmri_std,
     }
-
-
 
 def build_or_load_tensors(cfg: Config) -> dict:
     cache = cfg.data_dir / cfg.tensor_cache
@@ -232,8 +213,6 @@ def build_or_load_tensors(cfg: Config) -> dict:
     if is_dist(): dist.barrier()
     return out
 
-
-# ─── CLIP encoding (rank-0 only, cached) ──────────────────────────────────────
 def compute_or_load_clip(tensors: dict, cfg: Config) -> dict:
     cache = cfg.data_dir / cfg.clip_cache
     if cache.exists() and not cfg.force_rebuild:
@@ -282,8 +261,6 @@ def compute_or_load_clip(tensors: dict, cfg: Config) -> dict:
     if is_dist(): dist.barrier()
     return res
 
-
-# ─── VAE latent encoding (rank-0 only, cached) ────────────────────────────────
 def compute_or_load_latents(tensors: dict, cfg: Config) -> dict:
     from .vae import FrozenVAE
     cache = cfg.data_dir / cfg.latent_cache
@@ -325,14 +302,7 @@ def compute_or_load_latents(tensors: dict, cfg: Config) -> dict:
     if is_dist(): dist.barrier()
     return res
 
-
-# ─── CLIP patch token encoding (rank-0 only, cached) ──────────────────────────
 def compute_or_load_clip_patches(tensors: dict, cfg: Config) -> dict:
-    """Extract and cache ViT-L/14 patch tokens (196 → 256 zero-padded, fp16).
-
-    Returns dict with keys "clip_patch_train_{subj}" and "clip_patch_test_{subj}",
-    each a (N, 256, 1024) fp16 tensor stored on CPU.
-    """
     cache = cfg.data_dir / cfg.clip_patch_cache
     if cache.exists() and not cfg.force_rebuild:
         if is_main():
@@ -356,32 +326,25 @@ def compute_or_load_clip_patches(tensors: dict, cfg: Config) -> dict:
 
     @torch.no_grad()
     def _vit_patch_tokens(visual, x: torch.Tensor) -> torch.Tensor:
-        """Unrolled ViT-L/14 forward → patch tokens (B, 196, 1024).
 
-        Compatible with all open_clip versions (avoids output_tokens kwarg
-        which was added in open_clip >= 2.20.0).
-        Applies ln_post to patch tokens only (no projection).
-        """
-        # Patch embedding: (B, C, H, W) → (B, 196, 1024)
-        x = visual.conv1(x)                                          # (B, 1024, 14, 14)
-        x = x.reshape(x.shape[0], x.shape[1], -1).permute(0, 2, 1) # (B, 196, 1024)
+        x = visual.conv1(x)
+        x = x.reshape(x.shape[0], x.shape[1], -1).permute(0, 2, 1)
         B = x.shape[0]
-        # Prepend CLS token
+
         cls = visual.class_embedding.to(x.dtype).reshape(1, 1, -1).expand(B, -1, -1)
-        x = torch.cat([cls, x], dim=1)                               # (B, 197, 1024)
+        x = torch.cat([cls, x], dim=1)
         x = x + visual.positional_embedding.to(x.dtype)
         x = visual.ln_pre(x)
-        # Transformer (open_clip uses LND layout internally)
-        x = x.permute(1, 0, 2)   # NLD → LND
+
+        x = x.permute(1, 0, 2)
         x = visual.transformer(x)
-        x = x.permute(1, 0, 2)   # LND → NLD
-        # Apply ln_post to patch tokens only (drop CLS at index 0)
-        patch_tok = visual.ln_post(x[:, 1:, :])                      # (B, 196, 1024)
+        x = x.permute(1, 0, 2)
+
+        patch_tok = visual.ln_post(x[:, 1:, :])
         return patch_tok
 
     @torch.no_grad()
     def _extract_patches(imgs, bs=16):
-        """imgs: (N, 3, H, W) uint8. Returns (N, 256, 1024) fp16."""
         out = []
         for i in tqdm(range(0, len(imgs), bs), desc="CLIP patches", leave=False):
             chunk = imgs[i:i + bs]
@@ -390,11 +353,11 @@ def compute_or_load_clip_patches(tensors: dict, cfg: Config) -> dict:
             b = F.interpolate(chunk, 224, mode="bilinear",
                               align_corners=False).to(device)
             b = (b - _CLIP_MEAN.to(device).view(1, 3, 1, 1)) / _CLIP_STD.to(device).view(1, 3, 1, 1)
-            patch_tok = _vit_patch_tokens(m.visual, b)               # (B, 196, 1024)
-            # Zero-pad 196 → 256 so the grid is exactly 16×16
+            patch_tok = _vit_patch_tokens(m.visual, b)
+
             padded = F.pad(patch_tok.float(), (0, 0, 0, 256 - patch_tok.shape[1]))
             out.append(padded.cpu().half())
-        return torch.cat(out)  # (N, 256, 1024) fp16
+        return torch.cat(out)
 
     res = {}
     for subj in cfg.subjects:
@@ -410,7 +373,6 @@ def compute_or_load_clip_patches(tensors: dict, cfg: Config) -> dict:
     if is_dist(): dist.barrier()
     return res
 
-
 class NSDDataset(Dataset):
     def __init__(self, fmri, latents, images, clip_embs, subject_id,
                  augment=False, cfg: Config | None = None,
@@ -422,15 +384,13 @@ class NSDDataset(Dataset):
             assert len(fmri) == len(latents) == len(images) == len(clip_embs)
         self.fmri = fmri.float()
         self.latents = None if latents is None else latents.float()
-        # Keep images as uint8 in RAM (decode to float on __getitem__)
+
         self.images = images if images.dtype == torch.uint8 else images.float()
         self.clip_embs = clip_embs.float()
         self.subject_id = int(subject_id)
         self.augment = augment
         self.cfg = cfg
-        # B1: Z-score normalise fMRI per-subject using train statistics.
-        # If fmri_mu/fmri_std are provided (test set), use them to avoid
-        # data leak from normalising with test-set statistics.
+
         if fmri_mu is not None and fmri_std is not None:
             self.fmri_mu = fmri_mu
             self.fmri_std = fmri_std
@@ -438,7 +398,7 @@ class NSDDataset(Dataset):
             self.fmri_mu = self.fmri.mean(0)
             self.fmri_std = self.fmri.std(0).clamp(1e-6)
         self.fmri = (self.fmri - self.fmri_mu) / self.fmri_std
-        # Phase 2: optional patch tokens (N, 256, 1024) fp16
+
         self.clip_patches = clip_patches
 
     def __len__(self): return len(self.fmri)
@@ -462,12 +422,10 @@ class NSDDataset(Dataset):
         if self.latents is not None:
             result["latent"] = self.latents[i]
         if self.clip_patches is not None:
-            result["clip_patches"] = self.clip_patches[i].float()  # (256, 1024)
+            result["clip_patches"] = self.clip_patches[i].float()
         return result
 
-
 def variable_collate(batch):
-    """Stack same-subject samples (subject grouping enforced by SubjectBatchSampler)."""
     result = {
         "fmri": torch.stack([b["fmri"] for b in batch]),
         "image": torch.stack([b["image"] for b in batch]),
@@ -480,11 +438,9 @@ def variable_collate(batch):
         result["clip_patches"] = torch.stack([b["clip_patches"] for b in batch])
     return result
 
-
 from torch.utils.data import Sampler
 
 class SubjectBatchSampler(Sampler):
-    """Yields same-subject batches across `ConcatDataset` of per-subject datasets, DDP-aware."""
     def __init__(self, dataset_lengths, batch_size, shuffle=True, drop_last=True,
                  num_replicas=1, rank=0, seed=0):
         self.lengths = list(dataset_lengths)
@@ -534,19 +490,12 @@ class SubjectBatchSampler(Sampler):
             total += n_full
         return total // self.num_replicas
 
-
 def build_dataloaders(cfg: Config):
-    """Returns (train_loader, test_loader, eval_loader, train_sampler, voxels_per_subject).
-
-    eval_loader is identical to test_loader but NOT sharded across DDP ranks
-    (num_replicas=1, rank=0) so rank-0 evaluation sees the full test set.
-    """
     tensors = build_or_load_tensors(cfg)
     clips = compute_or_load_clip(tensors, cfg)
     need_latents = getattr(cfg, "training_stage", "") != "sdprior"
     lats = compute_or_load_latents(tensors, cfg) if need_latents else None
 
-    # Phase 2 / SDPrior-patches: load CLIP patch token cache only when needed
     clip_patches_cache = None
     stage = getattr(cfg, "training_stage", "")
     prior_target = str(getattr(cfg, "prior_target", "cls")).lower()
@@ -562,7 +511,7 @@ def build_dataloaders(cfg: Config):
             voxels[subj] = tensors[f"fmri_train_{subj}"].shape[1]
         tr_cp = clip_patches_cache.get(f"clip_patch_train_{subj}") if clip_patches_cache else None
         te_cp = clip_patches_cache.get(f"clip_patch_test_{subj}") if clip_patches_cache else None
-        # Build train dataset first so we can read its normalisation stats
+
         tr_ds = NSDDataset(
             tensors[f"fmri_train_{subj}"], None if lats is None else lats[f"lat_train_{subj}"],
             tensors[f"imgs_train_{subj}"], clips[f"clip_train_{subj}"],
@@ -570,7 +519,7 @@ def build_dataloaders(cfg: Config):
             clip_patches=tr_cp,
         )
         train_sets.append(tr_ds)
-        # B1: Pass train fmri stats to test dataset to avoid data leak
+
         if subj in fmri_stats:
             te_mu = fmri_stats[subj]["mu"]
             te_std = fmri_stats[subj]["std"]
@@ -598,7 +547,7 @@ def build_dataloaders(cfg: Config):
         shuffle=False, drop_last=cfg.drop_last_test,
         num_replicas=world_size(), rank=rank(),
     )
-    # Eval sampler: always rank=0, num_replicas=1 → full test set on rank-0
+
     eval_sampler = SubjectBatchSampler(
         [len(d) for d in test_sets], cfg.batch_size_per_gpu,
         shuffle=False, drop_last=False,

@@ -1,6 +1,4 @@
-"""EMA wrapper."""
 import torch
-
 
 class EMA:
     def __init__(self, model, decay=0.9995):

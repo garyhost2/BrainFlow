@@ -1,13 +1,5 @@
 #!/bin/bash -l
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 3 SDPrior — ClipPrior training on 1×V100 32GB.
-# Trainable BrainEncoder + ClipPrior (~20M params).
-# If enabling `prior_target: patches`, keep RAM headroom and consider
-# lowering batch_size_per_gpu (e.g. 16 -> 8) for V100 32GB.
-# Expected: ~4h for 100 epochs.
-#
-#   Submit:  sbatch slurm/train_phase3_sdprior_v100_32gb.sbatch
-# ─────────────────────────────────────────────────────────────────────────────
+
 #SBATCH -J phase3_sdprior_v100_32
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
@@ -48,12 +40,10 @@ export OMP_NUM_THREADS=4
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 export DDP_TIMEOUT=1800
-export DISABLE_COMPILE=1        # V100 compute cap 7.0 — no torch.compile
+export DISABLE_COMPILE=1
 
-# ── Phase 3 SDPrior config ───────────────────────────────────────────────────
 export BRAINFLOW_CONFIG="${REPO_DIR}/configs/phase3_sdprior.yaml"
 
-# Warm-start BrainEncoder weights from best Phase 1 checkpoint
 export INIT_FROM="${REPO_DIR}/outputs/mc_xl_v100_32/best_pc_v5.pt"
 
 torchrun \

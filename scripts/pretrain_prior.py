@@ -1,27 +1,3 @@
-"""Stage-1 pretraining: BrainEncoder + CLIPPrior only.
-
-Trains just the fMRI encoder and the CLIP-space flow prior with:
-  - L_align = 1 - cos(cls_pred, clip_emb)
-  - L_prior = CFM loss in CLIP space conditioned on cls_pred
-
-Skips the heavy VAE-latent flow (DiT/UNet), perceptual loss, mixup, etc.
-~10x faster per epoch than full training. After convergence, the resulting
-encoder + prior weights can be loaded into the full BrainFlowV5 model with
-strict=False to warm-start joint training.
-
-Usage (single GPU, ~6h on V100):
-    python -m scripts.pretrain_prior
-
-Multi-GPU:
-    torchrun --standalone --nproc_per_node=$NGPUS -m scripts.pretrain_prior
-
-Env knobs (subset of full train.py):
-    SUBJECTS, ENC_HIDDEN, ENC_BLOCKS, PRIOR_DIM, PRIOR_BLOCKS,
-    BATCH_SIZE_PER_GPU, NUM_EPOCHS, EXPERIMENT_NAME, LR
-    LAMBDA_ALIGN  (default 1.0)
-    LAMBDA_PRIOR  (default 1.0)
-    METHOD must be "dit" (only DiT model owns clip_prior)
-"""
 from __future__ import annotations
 import os, sys, math, gc, random
 from collections import defaultdict
@@ -52,7 +28,6 @@ from brainflow.ema import EMA
 
 load_dotenv()
 
-
 def setup_ddp(backend_cfg: str, init_method: str) -> torch.device:
     if "LOCAL_RANK" not in os.environ:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -69,23 +44,19 @@ def setup_ddp(backend_cfg: str, init_method: str) -> torch.device:
                             timeout=timedelta(seconds=timeout_sec))
     return device
 
-
 def cleanup_ddp():
     if is_dist():
         dist.destroy_process_group()
-
 
 def set_seed(seed=42):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-
 class PriorOnlyModel(nn.Module):
-    """Wrapper holding encoder + prior, exposing a single training_step."""
     def __init__(self, cfg, voxels_per_subject):
         super().__init__()
-        # Force DiT method so CLIPPrior is the right one (and clip_dim is wired)
+
         cfg.method = "dit"
         self.cfg = cfg
         self.brain_enc = BrainEncoder(cfg, voxels_per_subject)
@@ -103,12 +74,6 @@ class PriorOnlyModel(nn.Module):
 
         _, cls_emb = self.encode_fmri(fmri, subject)
 
-        # Alignment loss: cls_emb -> CLIP cos
-        # cls_emb is in brain_dim space; CLIPPrior conditions on it directly.
-        # For alignment we project cls -> clip_dim via the prior's cond_proj is wrong;
-        # instead use cosine between cls_emb and the *prior-sampled* CLIP token.
-        # Simpler/standard: compute alignment as 1 - cos(cls_emb, clip_emb) only when
-        # brain_dim == clip_dim. Otherwise rely solely on prior loss.
         if cls_emb.shape[-1] == clip_emb.shape[-1]:
             cos = F.cosine_similarity(cls_emb, clip_emb, dim=-1)
             loss_align = (1.0 - cos).mean()
@@ -117,7 +82,6 @@ class PriorOnlyModel(nn.Module):
 
         loss_prior = self.clip_prior.flow_loss(clip_emb, cls_emb)
 
-        # Sanity: NaN guard on losses (kills the run cleanly instead of silently NaN'ing)
         if not torch.isfinite(loss_prior) or not torch.isfinite(loss_align):
             raise RuntimeError(
                 f"NaN/Inf in losses: align={loss_align.item()} prior={loss_prior.item()}")
@@ -131,7 +95,6 @@ class PriorOnlyModel(nn.Module):
 
     @torch.no_grad()
     def eval_step(self, batch, device, n_steps: int = 10):
-        """Sample CLIP from prior, return cosine similarity to ground truth."""
         fmri = batch["fmri"].to(device, non_blocking=True)
         clip_emb = batch["clip_emb"].to(device, non_blocking=True)
         subject = batch["subject"].to(device, non_blocking=True)
@@ -140,16 +103,13 @@ class PriorOnlyModel(nn.Module):
         clip_gt_norm = F.normalize(clip_emb, dim=-1)
         return F.cosine_similarity(clip_pred, clip_gt_norm, dim=-1).mean().item()
 
-
 def main():
     set_seed(42)
     cfg = load_config()
     cfg = apply_env_overrides(cfg)
 
-    # Force DiT (the only method that has CLIPPrior)
     cfg.method = "dit"
 
-    # Default experiment name for stage-1
     if cfg.experiment_name in ("baseline", "v5"):
         cfg.experiment_name = "stage1_prior"
 
@@ -209,7 +169,7 @@ def main():
     if device.type == "cuda":
         cc = torch.cuda.get_device_capability(device)
         use_bf16 = (cc[0] >= 8)
-    # NaN-prone with fp16 + large batch on tiny CLIP-space CFM. Allow opt-out via env.
+
     use_amp = os.environ.get("USE_AMP", "0") == "1"
     scaler = torch.cuda.amp.GradScaler(
         enabled=(use_amp and device.type == "cuda" and not use_bf16))
@@ -323,10 +283,8 @@ def main():
 
     cleanup_ddp()
 
-
 @torch.no_grad()
 def _eval_clip_cos(model, loader, device, max_batches: int = 50, n_steps: int = 10):
-    """Average cosine similarity between prior-sampled CLIP and true CLIP."""
     model.eval()
     cosines = []
     for bi, batch in enumerate(loader):
@@ -336,7 +294,6 @@ def _eval_clip_cos(model, loader, device, max_batches: int = 50, n_steps: int = 
         cosines.append(c)
     model.train()
     return float(np.mean(cosines)) if cosines else 0.0
-
 
 if __name__ == "__main__":
     main()

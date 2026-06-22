@@ -1,4 +1,3 @@
-"""Evaluation metrics: PixCorr, SSIM, CLIP similarity."""
 from __future__ import annotations
 import gc
 import numpy as np
@@ -6,18 +5,13 @@ import torch
 import torch.nn.functional as F
 from scipy.stats import pearsonr
 
-# ImageNet normalization constants for CLIP preprocessing.
-# ViT-L/14 (openai) was trained with these exact values.
-# Using wrong mean/std breaks all CLIP-based metrics (phase-2 bugfix §0).
 _CLIP_MEAN = torch.tensor([0.48145466, 0.4578275, 0.40821073])
 _CLIP_STD  = torch.tensor([0.26862954, 0.26130258, 0.27577711])
-
 
 def pixel_correlation(pred, target):
     p = pred.flatten(1).cpu().numpy()
     t = target.flatten(1).cpu().numpy()
     return float(np.nanmean([pearsonr(pi, ti)[0] for pi, ti in zip(p, t)]))
-
 
 def ssim_pytorch(pred, target, ws=11, sigma=1.5):
     C1, C2 = 0.01 ** 2, 0.03 ** 2
@@ -34,10 +28,7 @@ def ssim_pytorch(pred, target, ws=11, sigma=1.5):
     return float(((2 * mx * my + C1) * (2 * sxy + C2) /
                   ((mx ** 2 + my ** 2 + C1) * (sx + sy + C2))).mean())
 
-
-# Module-level CLIP singleton — loaded once and kept on GPU for all eval calls
 _CLIP_ENC = None
-
 
 def _get_clip(device):
     global _CLIP_ENC
@@ -50,32 +41,16 @@ def _get_clip(device):
         _CLIP_ENC = m
     return _CLIP_ENC
 
-
 @torch.no_grad()
 def _clip_preprocess(images: torch.Tensor, device: torch.device) -> torch.Tensor:
-    """Resize to 224×224 and apply CLIP ImageNet normalisation.
-
-    Args:
-        images: (B, 3, H, W) float tensor in [0, 1]
-        device: target device
-
-    Returns:
-        (B, 3, 224, 224) normalised tensor
-    """
     imgs_224 = F.interpolate(images.cpu(), 224, mode="bilinear", align_corners=False)
     mean = _CLIP_MEAN.view(1, 3, 1, 1)
     std  = _CLIP_STD.view(1, 3, 1, 1)
     return ((imgs_224 - mean) / std).to(device)
 
-
 @torch.no_grad()
 def evaluate(model, vae, loader, device, cfg, n_batches=9999,
              n_steps=None, solver=None):
-    """Evaluate model on loader.
-
-    n_steps: ODE steps (defaults to cfg.ode_steps)
-    solver:  ODE solver (defaults to "midpoint")
-    """
     model.eval(); vae.to(device)
     clip_enc = _get_clip(device)
     if n_steps is None:
@@ -93,7 +68,7 @@ def evaluate(model, vae, loader, device, cfg, n_batches=9999,
         tokens, cls = raw.encode_fmri(fmri, subject)
         pl = raw.sample(tokens, n_steps=n_steps, cfg_scale=cfg.cfg_scale,
                         solver=solver, cls=cls)
-        pi = vae.decode(pl)  # FrozenVAE.decode already maps to [0,1]
+        pi = vae.decode(pl)
         pi = pi.clamp(0, 1)
         pcs.append(pixel_correlation(pi, images))
         sss.append(ssim_pytorch(pi.cpu(), images.cpu()))
@@ -103,7 +78,6 @@ def evaluate(model, vae, loader, device, cfg, n_batches=9999,
         et = F.normalize(clip_enc.encode_image(gt_r).float(), dim=-1)
         css.append(float((ep * et).sum(-1).mean()))
 
-    # Keep clip_enc and vae on GPU for next eval call (no del / vae.cpu())
     model.train()
     return {
         "PixCorr": float(np.mean(pcs)) if pcs else 0.0,

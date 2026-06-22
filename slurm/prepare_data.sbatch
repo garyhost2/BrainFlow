@@ -1,6 +1,5 @@
 #!/bin/bash -l
-# One-shot CPU job to download + cache MindEyeV2 (run before training).
-# Also pre-builds the Phase 2 CLIP patch token cache (~40 GB fp16).
+
 #SBATCH -J brainflow_prep
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
@@ -27,9 +26,6 @@ cd "${REPO_DIR}"
 [ -f .env ] && { set -a; source .env; set +a; }
 mkdir -p logs
 
-# Imports the data builder which downloads + precomputes CLIP & VAE caches,
-# then also builds the Phase 2 CLIP patch token cache (ViT-L/14 patch tokens,
-# 196 → 256 padded, fp16, ~40 GB for all 8 subjects).
 python -c "
 from brainflow.config import load_config
 from brainflow.data import build_or_load_tensors, compute_or_load_clip, compute_or_load_latents, compute_or_load_clip_patches

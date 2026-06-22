@@ -1,9 +1,5 @@
 #!/bin/bash -l
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 2 Stage 2B — Joint fine-tune: BrainEncoder + FlowCLIPDiT + FlowUNet.
-# Two V100 32GB GPUs; effective batch = 16 * 2 * 4 = 128.
-#   Submit:  sbatch slurm/train_phase2_2b_v100_32gb.sbatch
-# ─────────────────────────────────────────────────────────────────────────────
+
 #SBATCH -J phase2_2b_v100_32
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
@@ -44,13 +40,10 @@ export OMP_NUM_THREADS=4
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 export DDP_TIMEOUT=1800
-export DISABLE_COMPILE=1        # V100 compute cap 7.0 — no torch.compile
+export DISABLE_COMPILE=1
 
-# ── Phase 2 Stage 2B config ──────────────────────────────────────────────────
-# BRAINFLOW_CONFIG selects the phase2_stage2b.yaml config
 export BRAINFLOW_CONFIG="${REPO_DIR}/configs/phase2_stage2b.yaml"
 
-# Warm-start all weights from the best Stage 2A checkpoint
 export INIT_FROM="${REPO_DIR}/outputs/phase2_stage2a/best_clip_cos.pt"
 
 torchrun \

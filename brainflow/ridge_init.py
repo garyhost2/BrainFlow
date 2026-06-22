@@ -6,11 +6,9 @@ import torch
 
 from .config import Config
 
-
 def ridge_init_path(cfg: Config) -> Path:
     raw = Path(getattr(cfg, "ridge_init_cache", "ridge_init.pt"))
     return raw if raw.is_absolute() else cfg.data_dir / raw
-
 
 def _solve_ridge(x: torch.Tensor, y: torch.Tensor, ridge_lambda: float) -> tuple[torch.Tensor, torch.Tensor]:
     x = x.float()
@@ -32,7 +30,6 @@ def _solve_ridge(x: torch.Tensor, y: torch.Tensor, ridge_lambda: float) -> tuple
         w = x_centered.T @ alpha
     b = (y_mean - x_mean @ w).squeeze(0)
     return w, b
-
 
 def compute_ridge_init(tensors: dict, clips: dict, cfg: Config) -> dict:
     subjects = list(getattr(cfg, "subjects", []))
@@ -57,14 +54,12 @@ def compute_ridge_init(tensors: dict, clips: dict, cfg: Config) -> dict:
         "ridge_lambda": float(getattr(cfg, "ridge_lambda", 1e3)),
     }
 
-
 def save_ridge_init(tensors: dict, clips: dict, cfg: Config) -> Path:
     payload = compute_ridge_init(tensors, clips, cfg)
     path = ridge_init_path(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, path)
     return path
-
 
 def load_ridge_init_state(cfg: Config, max_vox: int, clip_dim: int) -> dict | None:
     path = ridge_init_path(cfg)
