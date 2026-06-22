@@ -1,24 +1,5 @@
 #!/bin/bash -l
-# ─────────────────────────────────────────────────────────────────────────────
-# Force-rebuild CLIP CLS and VAE latent caches to v2 format.
-#
-# WHY THIS IS NEEDED (PR #6 — brainflow-v6-full-refactor):
-#   1. CLIP CLS bug fix: compute_or_load_clip() now applies ImageNet
-#      normalization (mean/std) before ViT-L/14 encoding. Old caches have
-#      incorrect CLIP embeddings — CLIP_Sim was inflated by ~0.02–0.05.
-#   2. Cache validation: both clip and latent caches now require a _meta key.
-#      Old caches without _meta raise RuntimeError on load.
-#
-# WHAT IS REBUILT:
-#   all_subjects_clip_v2.pt      — CLIP CLS embeddings (corrected norm)
-#   all_subjects_latents_v2.pt   — VAE latents (unchanged math, adds _meta)
-#
-# NOTE: all_subjects_tensors.pt and all_subjects_clip_patches_v2.pt are NOT
-# rebuilt here (tensors are large/slow; patches are unaffected by this PR).
-# If patch cache also lacks _meta, add compute_or_load_clip_patches(t, cfg).
-#
-#   Submit:  sbatch slurm/rebuild_cache_v2.sbatch
-# ─────────────────────────────────────────────────────────────────────────────
+
 #SBATCH -J brainflow_rebuild_cache
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
@@ -56,21 +37,18 @@ from brainflow.config import load_config
 from brainflow.data import build_or_load_tensors, compute_or_load_clip, compute_or_load_latents
 
 cfg = load_config()
-cfg.force_rebuild = True        # skip cache-hit checks, overwrite existing files
+cfg.force_rebuild = True
 print('Subjects:', cfg.subjects)
 print('Data dir:', cfg.data_dir)
 
-# Tensors must already exist (run prepare_data.sbatch first if not)
 print('Loading existing tensors (not rebuilding)...')
-cfg.force_rebuild = False       # keep tensors as-is
+cfg.force_rebuild = False
 t = build_or_load_tensors(cfg)
 
-# Rebuild CLIP CLS cache — applies corrected ImageNet normalisation
 cfg.force_rebuild = True
 print('Rebuilding CLIP CLS cache (with corrected ImageNet norm)...')
 c = compute_or_load_clip(t, cfg)
 
-# Rebuild latent cache — same VAE math, adds _meta key
 print('Rebuilding VAE latent cache (adds _meta key)...')
 l = compute_or_load_latents(t, cfg)
 

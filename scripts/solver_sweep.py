@@ -1,20 +1,3 @@
-"""Solver sweep: compare all 5 ODE solvers across an NFE grid.
-
-Runs each (solver, NFE) combination on a held-out batch, computes
-PixCorr / SSIM / CLIP_Sim, and writes a markdown table to
-BENCHMARK_NOTES.md (appendix material).
-
-Works on a tiny dummy model without any real data for quick CI validation.
-
-Usage (dummy mode — no data required):
-    python scripts/solver_sweep.py --dummy
-
-Usage (real checkpoint):
-    python scripts/solver_sweep.py \\
-        --config configs/phase2_stage2c_sweep.yaml \\
-        --checkpoint outputs/phase2_stage2b/best.pt \\
-        --out BENCHMARK_NOTES.md
-"""
 from __future__ import annotations
 
 import argparse
@@ -27,44 +10,27 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Brainflow solvers
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from brainflow.solvers import solve, make_t_grid
 
-
-# ────────────────────────────────────────────────────────────────────────────
-# Dummy velocity model for CI / quick validation
-# ────────────────────────────────────────────────────────────────────────────
-
 class DummyLinearVel(nn.Module):
-    """Trivial linear ODE: dx/dt = -x.  Exact solution: x(t) = x0 * exp(-t).
-    Used to validate that all solvers converge to the correct endpoint."""
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        return -x  # velocity = -x (constant w.r.t. t for this ODE)
-
+        return -x
 
 def dummy_vel_fn(x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
     return -x
 
-
 def exact_solution(x0: torch.Tensor, t_end: float = 1.0) -> torch.Tensor:
     return x0 * math.exp(-t_end)
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Sweep runner
-# ────────────────────────────────────────────────────────────────────────────
 
 SOLVERS = ["euler", "midpoint", "heun", "dpm_pp_2m", "adaptive_rk45"]
 NFE_GRID = [5, 10, 25, 50]
 
-
 def run_dummy_sweep(device: str = "cpu") -> list[dict]:
-    """Run sweep on the dummy dy/dt = -y ODE and collect results."""
     dev = torch.device(device)
-    x0 = torch.ones(4, 8, device=dev)          # (B=4, D=8)
+    x0 = torch.ones(4, 8, device=dev)
     x_exact = exact_solution(x0, t_end=1.0)
 
     results = []
@@ -94,12 +60,10 @@ def run_dummy_sweep(device: str = "cpu") -> list[dict]:
 
     return results
 
-
 def run_model_sweep(vel_fn: Callable, x0: torch.Tensor,
                     solvers: list[str] | None = None,
                     nfe_grid: list[int] | None = None,
                     device: str = "cpu") -> list[dict]:
-    """Run sweep on a real velocity model."""
     solvers = solvers or SOLVERS
     nfe_grid = nfe_grid or NFE_GRID
     dev = torch.device(device)
@@ -128,16 +92,10 @@ def run_model_sweep(vel_fn: Callable, x0: torch.Tensor,
             })
     return results
 
-
-# ────────────────────────────────────────────────────────────────────────────
-# Markdown table formatter
-# ────────────────────────────────────────────────────────────────────────────
-
 def _fmt(v, fmt=".4f"):
     if isinstance(v, float) and math.isnan(v):
         return "N/A"
     return format(v, fmt)
-
 
 def results_to_markdown(results: list[dict], title: str = "Solver sweep") -> str:
     lines = [
@@ -154,23 +112,17 @@ def results_to_markdown(results: list[dict], title: str = "Solver sweep") -> str
         )
     return "\n".join(lines) + "\n"
 
-
 def append_to_benchmark_notes(markdown: str, out_path: Path) -> None:
     out_path = Path(out_path)
     if out_path.exists():
         existing = out_path.read_text()
-        # Remove old sweep section if present
+
         if "## Appendix: Solver sweep" in existing:
             existing = existing[:existing.index("## Appendix: Solver sweep")]
         out_path.write_text(existing.rstrip() + "\n\n" + markdown)
     else:
         out_path.write_text(markdown)
     print(f"[solver_sweep] Results written to {out_path}")
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# CLI
-# ────────────────────────────────────────────────────────────────────────────
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
@@ -186,7 +138,6 @@ def parse_args():
                    help="Device: cpu | cuda")
     return p.parse_args()
 
-
 def main():
     args = parse_args()
     device = args.device
@@ -200,7 +151,6 @@ def main():
         print("[solver_sweep] Done.")
         return
 
-    # Real model sweep
     try:
         from brainflow.config import load_config
     except ImportError:
@@ -213,8 +163,6 @@ def main():
     if args.checkpoint is None:
         print("WARNING: No checkpoint provided — using random weights.")
 
-    # Build a minimal velocity function from the trained model
-    # (simplified: just wrap FlowUNet with cfg_scale=1.0)
     from brainflow.flow_unet import FlowUNet
     flow_model = FlowUNet(cfg).to(device).eval()
 
@@ -230,7 +178,7 @@ def main():
 
     B = 4
     x0 = torch.randn(B, cfg.latent_ch, cfg.latent_res, cfg.latent_res, device=device)
-    # Use zero brain context for sweep (no real data)
+
     brain_ctx = torch.zeros(B, cfg.n_tokens, cfg.brain_dim, device=device)
 
     def vel_fn(xt, t):
@@ -246,7 +194,6 @@ def main():
     md = results_to_markdown(results, title="Solver sweep (Flow_VAE)")
     append_to_benchmark_notes(md, Path(args.out))
     print("[solver_sweep] Done.")
-
 
 if __name__ == "__main__":
     main()

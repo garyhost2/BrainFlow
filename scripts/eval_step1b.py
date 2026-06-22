@@ -1,12 +1,3 @@
-"""Step-1b evaluation: fMRI -> bigG tokens -> SDXL-unCLIP -> metrics.
-
-    python -m scripts.eval_step1b \
-        --ckpt outputs/step1b/best_cos.pt --data-dir ./mindeyev2_cache \
-        --mindeye-src third_party/MindEyeV2/src \
-        --ckpt-path third_party/unclip6_epoch0_step110000.ckpt \
-        --cond-source prior --cfg-scale 3.0 --steps 50 \
-        --out outputs/step1b/eval
-"""
 from __future__ import annotations
 
 import argparse
@@ -22,7 +13,6 @@ from brainflow.step1.targets_bigg import build_or_load_bigg_targets
 from brainflow.step1.data import build_step1_loaders
 from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder
 from brainflow.step1.metrics import pixcorr, ssim, CLIPMetric
-
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -42,7 +32,6 @@ def parse_args():
     ap.add_argument("--max-images", type=int, default=10_000)
     ap.add_argument("--out", type=str, default="outputs/step1b/eval")
     return ap.parse_args()
-
 
 def main():
     args = parse_args()
@@ -68,12 +57,7 @@ def main():
     model = model.to(device).eval()
 
     tensors = torch.load(data_dir / args.tensor_cache, map_location="cpu")
-    # Targets: eval only needs the per-subject test embeddings the loader attaches
-    # (global stats come from the checkpoint). Prefer the legacy single-file cache
-    # (step1b_targets_bigg.pt) when it already covers every requested subject — this
-    # lets a subject-1 baseline reuse the existing 23 GB cache with no re-encode.
-    # Otherwise fall back to the per-subject, memory-mapped files used for
-    # multi-subject training.
+
     targets = None
     legacy = data_dir / "step1b_targets_bigg.pt"
     if legacy.exists():
@@ -111,7 +95,6 @@ def main():
         print(f"✓ grid -> {out_dir/'recon_grid.png'}")
     except Exception as e:
         print(f"[grid skipped] {e}")
-
 
 if __name__ == "__main__":
     main()

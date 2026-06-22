@@ -1,11 +1,3 @@
-"""Step-1 evaluation: fMRI -> embedding -> frozen unCLIP decoder -> metrics.
-
-    python -m scripts.eval_step1 \
-        --ckpt outputs/step1/best_cos.pt \
-        --data-dir ./mindeyev2_cache \
-        --cond-source prior --cfg-scale 3.0 --steps 50 \
-        --decode-steps 25 --guidance 10 --out outputs/step1/eval
-"""
 from __future__ import annotations
 
 import argparse
@@ -20,7 +12,6 @@ from brainflow.step1.targets import TargetStats
 from brainflow.step1.data import build_step1_loaders
 from brainflow.step1.decoder import UnCLIPDecoder
 from brainflow.step1.metrics import pixcorr, ssim, CLIPMetric
-
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -39,7 +30,6 @@ def parse_args():
     ap.add_argument("--max-images", type=int, default=10_000)
     ap.add_argument("--out", type=str, default="outputs/step1/eval")
     return ap.parse_args()
-
 
 def main():
     args = parse_args()
@@ -92,7 +82,6 @@ def main():
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
     _save_grid(pred, gt, out_dir / "recon_grid.png")
 
-
 def _save_grid(pred, gt, path, n=16):
     try:
         from torchvision.utils import save_image
@@ -101,7 +90,6 @@ def _save_grid(pred, gt, path, n=16):
         print(f"✓ grid -> {path}")
     except Exception as e:
         print(f"[grid skipped] {e}")
-
 
 if __name__ == "__main__":
     main()

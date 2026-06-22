@@ -1,8 +1,3 @@
-"""Evaluate a trained BrainFlow model on the test set.
-
-Usage:
-    python -m scripts.eval --checkpoint outputs/best_combined_v5.pt
-"""
 from __future__ import annotations
 import sys, argparse
 from pathlib import Path
@@ -19,7 +14,6 @@ from brainflow.models import BrainFlowV5, migrate_input_proj
 from brainflow.vae import FrozenVAE
 from brainflow.metrics import evaluate
 
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True,
@@ -32,12 +26,11 @@ def main():
                         help="Device to run on (cuda or cpu)")
     args = parser.parse_args()
 
-    # Load config
     cfg = load_config()
     cfg = apply_env_overrides(cfg)
     cfg.cfg_scale = args.cfg_scale
     cfg.ode_steps = args.ode_steps
-    
+
     print(f"[Evaluation Config]")
     print(f"  Checkpoint: {args.checkpoint}")
     print(f"  CFG scale: {args.cfg_scale}")
@@ -45,20 +38,18 @@ def main():
     print(f"  Device: {args.device}")
     print()
 
-    # Build dataloaders (we only need test loader)
     print("Loading data...")
     _, _, eval_loader, _, voxels = build_dataloaders(cfg)
     print(f"  Test batches: {len(eval_loader)}")
     print(f"  Voxels per subject: {voxels}")
     print()
 
-    # Load model
     device = torch.device(args.device)
     print("Loading model...")
     model = BrainFlowV5(cfg, voxels).to(device)
-    
+
     ckpt = torch.load(args.checkpoint, map_location=device)
-    # Strip torch.compile's "_orig_mod." prefix if present
+
     ckpt = {k.replace("._orig_mod.", "."): v for k, v in ckpt.items()}
     ckpt = migrate_input_proj(ckpt, model.brain_enc.max_vox)
     missing, unexpected = model.load_state_dict(ckpt, strict=False)
@@ -67,28 +58,25 @@ def main():
     if unexpected:
         print(f"  [warn] unexpected keys: {len(unexpected)} (e.g. {unexpected[:3]})")
     model.eval()
-    
+
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Total parameters: {n_params/1e6:.1f}M")
     print()
 
-    # Load VAE
     print("Loading VAE...")
     vae = FrozenVAE(cache_dir=cfg.data_dir / "hf_cache").to(device)
     print()
 
-    # Evaluate
     print("Running evaluation...")
     with torch.no_grad():
         metrics = evaluate(model, vae, eval_loader, device, cfg, n_batches=9999)
-    
+
     print("\n" + "="*50)
     print("EVALUATION RESULTS")
     print("="*50)
     for k, v in metrics.items():
         print(f"  {k:12s}: {v:.4f}")
     print("="*50)
-
 
 if __name__ == "__main__":
     main()

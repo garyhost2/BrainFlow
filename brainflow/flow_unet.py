@@ -1,25 +1,3 @@
-"""Flow_VAE UNet with optional CLIP context cross-attention.
-
-Extends the original FlowUNet (from models.py) with a parallel cross-attention
-stack `ea_clip` that attends to decoded CLIP patch tokens.  The new forward
-signature is:
-
-    forward(x, t, brain_ctx, clip_ctx=None)
-
-Backward compatibility: if `clip_ctx` is None, the CLIP cross-attention is
-skipped entirely, so v9 checkpoints can still load and run without modification.
-
-CLIP context projection:
-    clip_context_proj: Linear(1024, d_model)
-    Projects ViT-L/14 1024-dim CLIP tokens to the UNet's channel dimension
-    before passing to ea_clip cross-attention blocks.
-
-Block execution order (each encoder/bottleneck/decoder block):
-    h = res(h, te)
-    h = attn_brain(h, brain_ctx)      # existing brain cross-attention
-    if clip_ctx is not None:
-        h = attn_clip(h, clip_ctx)    # new CLIP cross-attention
-"""
 from __future__ import annotations
 
 import math
@@ -28,11 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .config import Config
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Shared building blocks (copied from models.py to keep this file self-contained)
-# ────────────────────────────────────────────────────────────────────────────
 
 def _double_gamma_hrf(length: int, peak: float = 6.0, undershoot: float = 16.0,
                       ratio: float = 6.0, dt: float = 1.0) -> torch.Tensor:
@@ -43,7 +16,6 @@ def _double_gamma_hrf(length: int, peak: float = 6.0, undershoot: float = 16.0,
     h = gamma_pdf(t, peak) - gamma_pdf(t, undershoot) / ratio
     h = h / (abs(h).sum() + 1e-12)
     return torch.tensor(h, dtype=torch.float32)
-
 
 class SinusoidalTimeEmbedding(nn.Module):
     def __init__(self, dim: int):
@@ -58,7 +30,6 @@ class SinusoidalTimeEmbedding(nn.Module):
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         t = t.unsqueeze(-1) * self.freqs
         return self.mlp(torch.cat([t.sin(), t.cos()], dim=-1))
-
 
 class CrossAttention(nn.Module):
     def __init__(self, qd: int, cd: int, nh: int = 8, hd: int = 64):
@@ -86,7 +57,6 @@ class CrossAttention(nn.Module):
         out = F.scaled_dot_product_attention(Q, K, V)
         return res + self.to_out(out.transpose(1, 2).reshape(B, L, -1))
 
-
 class UNetResBlock(nn.Module):
     def __init__(self, ic: int, oc: int, td: int):
         super().__init__()
@@ -109,22 +79,7 @@ class UNetResBlock(nn.Module):
         h = self.c2(h)
         return h + self.skip(x)
 
-
-# ────────────────────────────────────────────────────────────────────────────
-# FlowUNet with CLIP context
-# ────────────────────────────────────────────────────────────────────────────
-
 class FlowUNet(nn.Module):
-    """UNet-based flow velocity field with brain + optional CLIP cross-attention.
-
-    New parameters vs. original:
-      - ea_clip: ModuleList of CrossAttention blocks attending to CLIP tokens
-      - clip_context_proj: Linear(1024 → d_model) projecting CLIP token dim
-
-    Backward-compatible: if clip_ctx=None in forward(), CLIP cross-attention
-    is skipped and the model behaves identically to the original FlowUNet.
-    This means v9 checkpoints load with strict=False without any issues.
-    """
 
     def __init__(self, cfg: Config):
         super().__init__()
@@ -134,40 +89,37 @@ class FlowUNet(nn.Module):
         td = cfg.time_emb_dim
         nh = cfg.attn_heads
         chs = [bc, bc * 2, bc * 4, bc * 4]
-        clip_token_dim = 1024  # ViT-L/14
+        clip_token_dim = 1024
 
         self.te = SinusoidalTimeEmbedding(td)
         self.ip = nn.Conv2d(ic, bc, 3, padding=1)
         self.null_tokens = nn.Parameter(torch.randn(1, cfg.n_tokens, bd) * 0.01)
 
-        # Encoder blocks: residual + brain attention + downsampling
         self.eb = nn.ModuleList()
-        self.ea = nn.ModuleList()   # brain cross-attention
-        self.ea_clip = nn.ModuleList()  # CLIP cross-attention (new)
-        self.ed = nn.ModuleList()   # downsampling
+        self.ea = nn.ModuleList()
+        self.ea_clip = nn.ModuleList()
+        self.ed = nn.ModuleList()
 
         ch = bc
         for i, co in enumerate(chs):
             self.eb.append(UNetResBlock(ch, co, td))
             self.ea.append(CrossAttention(co, bd, nh))
-            self.ea_clip.append(CrossAttention(co, bd, nh))  # bd after clip_context_proj
+            self.ea_clip.append(CrossAttention(co, bd, nh))
             self.ed.append(
                 nn.Conv2d(co, co, 4, stride=2, padding=1)
                 if i < len(chs) - 1 else nn.Identity()
             )
             ch = co
 
-        # Bottleneck
         self.m1 = UNetResBlock(chs[-1], chs[-1], td)
-        self.ma = CrossAttention(chs[-1], bd, nh)       # brain
-        self.ma_clip = CrossAttention(chs[-1], bd, nh)  # CLIP (new)
+        self.ma = CrossAttention(chs[-1], bd, nh)
+        self.ma_clip = CrossAttention(chs[-1], bd, nh)
         self.m2 = UNetResBlock(chs[-1], chs[-1], td)
 
-        # Decoder blocks: upsample + residual + brain attention
         self.du = nn.ModuleList()
         self.db = nn.ModuleList()
-        self.da = nn.ModuleList()       # brain cross-attention
-        self.da_clip = nn.ModuleList()  # CLIP cross-attention (new)
+        self.da = nn.ModuleList()
+        self.da_clip = nn.ModuleList()
 
         for i, co in enumerate(reversed(chs)):
             self.du.append(nn.Sequential(
@@ -179,17 +131,13 @@ class FlowUNet(nn.Module):
             self.da_clip.append(CrossAttention(co, bd, nh))
             ch = co
 
-        # Output head
         self.on = nn.GroupNorm(min(32, bc), bc)
         self.op = nn.Conv2d(bc, ic, 3, padding=1)
         nn.init.zeros_(self.op.weight)
         nn.init.zeros_(self.op.bias)
 
-        # CLIP context projector: maps 1024-dim CLIP tokens → brain_dim
-        # so ea_clip can use the same CrossAttention config as ea
         self.clip_context_proj = nn.Linear(clip_token_dim, bd)
 
-        # ── Optional HRF velocity bias (cfg.method == "hrf") ──
         self._hrf_enabled = (getattr(cfg, "method", "baseline") == "hrf")
         if self._hrf_enabled:
             hrf_len = int(getattr(cfg, "hrf_len", cfg.n_tokens))
@@ -208,7 +156,6 @@ class FlowUNet(nn.Module):
             nn.init.zeros_(self.hrf_to_map.weight)
 
     def _hrf_bias(self, ctx: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        """Compute sin(pi*t) * HRF-convolved velocity bias. ctx: (B, N, D)."""
         B, N, D = ctx.shape
         x = ctx.transpose(1, 2)
         kernel = self.hrf_kernel.expand(D, 1, -1)
@@ -226,7 +173,6 @@ class FlowUNet(nn.Module):
 
     def _apply_attn(self, h: torch.Tensor, attn: CrossAttention,
                     ctx: torch.Tensor) -> torch.Tensor:
-        """Apply cross-attention in the spatial domain (B,C,H,W) → (B,C,H,W)."""
         B, C, H, W = h.shape
         h_flat = h.permute(0, 2, 3, 1).reshape(B, H * W, C)
         h_flat = attn(h_flat, ctx)
@@ -235,21 +181,9 @@ class FlowUNet(nn.Module):
     def forward(self, x: torch.Tensor, t: torch.Tensor,
                 brain_ctx: torch.Tensor,
                 clip_ctx: torch.Tensor | None = None) -> torch.Tensor:
-        """Compute velocity field.
 
-        Args:
-            x:          noisy latent (B, latent_ch, latent_res, latent_res)
-            t:          time values (B,)
-            brain_ctx:  brain conditioning tokens (B, n_tokens, brain_dim)
-            clip_ctx:   CLIP patch tokens (B, 256, 1024) or (B, 16*16, 1024)
-                        If None, CLIP cross-attention is skipped (backward-compat).
-
-        Returns:
-            velocity field (B, latent_ch, latent_res, latent_res)
-        """
-        # Project CLIP tokens to brain_dim if provided
         if clip_ctx is not None:
-            clip_ctx_proj = self.clip_context_proj(clip_ctx)  # (B, 256, bd)
+            clip_ctx_proj = self.clip_context_proj(clip_ctx)
         else:
             clip_ctx_proj = None
 
@@ -257,7 +191,6 @@ class FlowUNet(nn.Module):
         h = self.ip(x)
         sk = []
 
-        # Encoder
         for res, attn_b, attn_c, dn in zip(self.eb, self.ea, self.ea_clip, self.ed):
             h = res(h, te)
             h = self._apply_attn(h, attn_b, brain_ctx)
@@ -266,14 +199,12 @@ class FlowUNet(nn.Module):
             sk.append(h)
             h = dn(h)
 
-        # Bottleneck
         h = self.m1(h, te)
         h = self._apply_attn(h, self.ma, brain_ctx)
         if clip_ctx_proj is not None:
             h = self._apply_attn(h, self.ma_clip, clip_ctx_proj)
         h = self.m2(h, te)
 
-        # Decoder
         for i, (up, res, attn_b, attn_c) in enumerate(
             zip(self.du, self.db, self.da, self.da_clip)
         ):
