@@ -1,15 +1,3 @@
-"""Phase 2 DDP training entrypoint: FlowCLIPDiT (2A) + Joint (2B).
-
-Stage 2A (FlowCLIPDiT only, BrainEncoder frozen):
-    BRAINFLOW_CONFIG=configs/phase2_stage2a.yaml \\
-    INIT_FROM=outputs/mc_xl_v100_32/best_pc_v5.pt \\
-    torchrun --nproc_per_node=1 -m scripts.train_phase2
-
-Stage 2B (joint fine-tune):
-    BRAINFLOW_CONFIG=configs/phase2_stage2b.yaml \\
-    INIT_FROM=outputs/phase2_stage2a/best_clip_cos.pt \\
-    torchrun --nproc_per_node=2 -m scripts.train_phase2
-"""
 from __future__ import annotations
 import os, sys, math, gc, random
 from collections import defaultdict
@@ -42,9 +30,6 @@ from brainflow.metrics import evaluate
 
 load_dotenv()
 
-
-# ── DDP helpers ────────────────────────────────────────────────────────────────
-
 def setup_ddp(backend_cfg: str, init_method: str) -> torch.device:
     if "LOCAL_RANK" not in os.environ:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -61,28 +46,21 @@ def setup_ddp(backend_cfg: str, init_method: str) -> torch.device:
                             timeout=timedelta(seconds=timeout_sec))
     return device
 
-
 def cleanup_ddp():
     if is_dist():
         dist.destroy_process_group()
-
 
 def set_seed(seed=42):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-
 def _trainable_params(module: nn.Module) -> int:
     return sum(p.numel() for p in module.parameters() if p.requires_grad)
-
-
-# ── Stage 2A eval: CLIP patch cosine similarity ────────────────────────────────
 
 @torch.no_grad()
 def evaluate_2a(raw_model: BrainFlowPhase2, loader, device, cfg,
                 n_batches: int = 32) -> dict[str, float]:
-    """Evaluate FlowCLIPDiT: sample patch tokens and compare cosine sim to GT."""
     raw_model.eval()
     cos_vals: list[float] = []
     for i, batch in enumerate(loader):
@@ -90,19 +68,18 @@ def evaluate_2a(raw_model: BrainFlowPhase2, loader, device, cfg,
             break
         fmri = batch["fmri"].to(device)
         subject = batch["subject"].to(device)
-        clip_patches = batch["clip_patches"].to(device).float()  # (B, 256, 1024)
+        clip_patches = batch["clip_patches"].to(device).float()
 
         tokens, _ = raw_model.brain_enc(fmri, subject)
         sampled = raw_model.flow_clip.sample(
-            tokens, n_steps=cfg.eval_ode_steps, solver=cfg.eval_solver)  # (B, 1024, 16, 16)
+            tokens, n_steps=cfg.eval_ode_steps, solver=cfg.eval_solver)
         B = sampled.shape[0]
         sampled_flat = sampled.permute(0, 2, 3, 1).reshape(B, 256, 1024)
         if raw_model.flow_clip._standardization_fitted:
             sampled_flat = raw_model.flow_clip.destandardize(sampled_flat)
 
-        # Mean-pool over spatial tokens then compare
-        sampled_cls = sampled_flat.mean(1)           # (B, 1024)
-        gt_cls = clip_patches.mean(1)                # (B, 1024)
+        sampled_cls = sampled_flat.mean(1)
+        gt_cls = clip_patches.mean(1)
         cos = F.cosine_similarity(
             F.normalize(sampled_cls, dim=-1),
             F.normalize(gt_cls, dim=-1), dim=-1
@@ -112,12 +89,8 @@ def evaluate_2a(raw_model: BrainFlowPhase2, loader, device, cfg,
     raw_model.train()
     return {"CLIP_Cos": float(np.mean(cos_vals)) if cos_vals else 0.0}
 
-
-# ── CLIP standardization fitting ───────────────────────────────────────────────
-
 def fit_standardization(raw_model: BrainFlowPhase2, train_loader,
                         device: torch.device, max_samples: int = 12000):
-    """Fit clip_token_mean/std from training patch tokens, broadcast across ranks."""
     if is_main():
         print("[Phase2] Fitting CLIP patch token standardization …")
     patches_list: list[torch.Tensor] = []
@@ -130,15 +103,15 @@ def fit_standardization(raw_model: BrainFlowPhase2, train_loader,
             raise RuntimeError("clip_patches missing from batch — check cfg.training_stage")
         patches_list.append(cp.float())
         n_collected += cp.shape[0]
-    all_patches = torch.cat(patches_list, dim=0)[:max_samples]  # (N, 256, 1024)
+    all_patches = torch.cat(patches_list, dim=0)[:max_samples]
     if is_main():
         raw_model.flow_clip.fit_standardization(all_patches)
         print(f"[Phase2] Standardization fitted on {len(all_patches)} samples.")
-    # Broadcast fitted buffers from rank-0 to all ranks
+
     if is_dist():
         dist.broadcast(raw_model.flow_clip.clip_token_mean, src=0)
         dist.broadcast(raw_model.flow_clip.clip_token_std, src=0)
-        # Sync flag
+
         flag = torch.tensor([1.0 if raw_model.flow_clip._standardization_fitted else 0.0],
                              device=device)
         dist.broadcast(flag, src=0)
@@ -146,12 +119,9 @@ def fit_standardization(raw_model: BrainFlowPhase2, train_loader,
             raw_model.flow_clip._standardization_fitted = True
         dist.barrier()
 
-
-# ── Main ───────────────────────────────────────────────────────────────────────
-
 def main():
     set_seed(42)
-    cfg = load_config()   # reads BRAINFLOW_CONFIG env var automatically
+    cfg = load_config()
     stage = cfg.training_stage
     if stage not in ("2a", "2b"):
         raise ValueError(f"train_phase2.py expects training_stage 2a or 2b, got {stage!r}")
@@ -167,12 +137,11 @@ def main():
     if is_main():
         print(f"Train batches/rank: {len(train_loader)} | Test: {len(test_loader)}")
 
-    # ── Build / warm-start model ───────────────────────────────────────────────
     init_from = os.environ.get("INIT_FROM", "").strip()
     raw_model = BrainFlowPhase2(cfg, voxels)
     if init_from and Path(init_from).is_file():
         ckpt = torch.load(init_from, map_location="cpu")
-        # Strip torch.compile prefix if present
+
         ckpt = {k.replace("._orig_mod.", "."): v for k, v in ckpt.items()}
         ckpt = migrate_input_proj(ckpt, raw_model.brain_enc.max_vox)
         missing, unexpected = raw_model.load_state_dict(ckpt, strict=False)
@@ -189,7 +158,6 @@ def main():
     elif init_from and is_main():
         print(f"[Phase2] INIT_FROM={init_from!r} not found — random init.")
 
-    # Set stage BEFORE DDP so frozen params are not tracked
     if stage == "2a":
         raw_model.set_stage_2a()
     else:
@@ -207,7 +175,6 @@ def main():
             print(f"  {name}: {n_sub:,}")
         print(f"  total: {n_total:,}")
 
-    # Fit CLIP standardization on rank-0, then broadcast
     if stage == "2a":
         fit_standardization(raw_model, train_loader, device)
 
@@ -222,7 +189,6 @@ def main():
             pass
         raw_model = model.module
 
-    # A.5: torch.compile on FlowCLIPDiT (always active) — skip on V100 via env
     _disable_compile = os.environ.get("DISABLE_COMPILE", "0") == "1"
     if not _disable_compile and hasattr(torch, "compile"):
         try:
@@ -258,7 +224,6 @@ def main():
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    # fp16 + GradScaler on V100 (compute cap < 8.0); bf16 on Ampere+
     use_bf16 = False
     if device.type == "cuda":
         cc = torch.cuda.get_device_capability(device)
@@ -266,12 +231,10 @@ def main():
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and not use_bf16))
     autocast_dtype = torch.bfloat16 if use_bf16 else torch.float16
 
-    # VAE for Stage 2B eval
     eval_vae = None
     if stage == "2b":
         eval_vae = FrozenVAE(cache_dir=cfg.data_dir / "hf_cache").to(device)
 
-    # WandB
     use_wandb = False
     if is_main() and cfg.wandb_mode != "disabled":
         try:
@@ -433,7 +396,6 @@ def main():
             import wandb; wandb.finish()
 
     cleanup_ddp()
-
 
 if __name__ == "__main__":
     main()

@@ -1,17 +1,3 @@
-"""Step-1 training: fMRI -> CLIP image embedding (regression + rectified-flow prior).
-
-Single-A100 optimized.  Run:
-
-    python -m scripts.train_step1 \
-        --data-dir ./mindeyev2_cache \
-        --subjects 1 \
-        --epochs 150 --batch-size 256 --lr 3e-4 \
-        --out outputs/step1
-
-The frozen unCLIP decoder is only needed for *image* eval; pass --decode-eval to
-decode a small subset every few epochs (slow).  Embedding-cosine eval is cheap
-and runs every epoch.
-"""
 from __future__ import annotations
 
 import argparse
@@ -28,14 +14,12 @@ from brainflow.step1.targets import build_or_load_targets, TargetStats
 from brainflow.step1.data import build_step1_loaders
 from brainflow.step1.metrics import EMA, pixcorr, ssim, CLIPMetric
 
-
 def setup_a100():
-    # TF32: big free speedup for fp32 matmul/conv on Ampere.
+
     torch.set_float32_matmul_precision("high")
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
-
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -61,28 +45,24 @@ def parse_args():
     ap.add_argument("--seed", type=int, default=0)
     return ap.parse_args()
 
-
 def lr_at(step, total_steps, warmup_steps, base_lr, min_lr):
     if step < warmup_steps:
-        return base_lr * (step + 1) / max(1, warmup_steps)   # never 0
+        return base_lr * (step + 1) / max(1, warmup_steps)
     prog = (step - warmup_steps) / max(1, total_steps - warmup_steps)
     return min_lr + 0.5 * (base_lr - min_lr) * (1 + math.cos(math.pi * prog))
 
-
 @torch.no_grad()
 def eval_embedding_cosine(model, loader, stats, device):
-    """Cheap proxy: cosine(predicted raw emb, target raw emb) on the eval set."""
     model.eval()
     cos_sum, n = 0.0, 0
     for batch in loader:
         fmri = batch["fmri"].to(device, non_blocking=True)
-        emb_raw = batch["emb"].to(device, non_blocking=True)   # raw target
+        emb_raw = batch["emb"].to(device, non_blocking=True)
         subj = batch["subject"]
         pred_raw = model.predict_embedding(fmri, subj, stats, cond_source="regression")
         cos_sum += F.cosine_similarity(pred_raw, emb_raw, dim=-1).sum().item()
         n += fmri.shape[0]
     return cos_sum / max(1, n)
-
 
 @torch.no_grad()
 def eval_images(model, loader, stats, device, decoder, clip_metric, n_max, cond_source):
@@ -102,7 +82,6 @@ def eval_images(model, loader, stats, device, decoder, clip_metric, n_max, cond_
     out.update(clip_metric.score(pred, gt))
     return out, pred, gt
 
-
 def main():
     args = parse_args()
     setup_a100()
@@ -112,7 +91,6 @@ def main():
     data_dir = Path(args.data_dir)
     hf_cache = data_dir / "hf_cache"
 
-    # ── data ──
     tensors = torch.load(data_dir / args.tensor_cache, map_location="cpu")
     targets = build_or_load_targets(
         tensors, args.subjects, data_dir / args.target_cache, device, hf_cache=hf_cache)
@@ -121,7 +99,6 @@ def main():
         tensors, targets, args.subjects, args.batch_size,
         num_workers=args.num_workers, fmri_noise_std=args.fmri_noise_std)
 
-    # ── model ──
     cfg = Step1Config(subjects=args.subjects)
     model = Step1Model(cfg, bundle.voxels).to(device)
     if args.compile:
@@ -162,7 +139,7 @@ def main():
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 ld = model.training_step(fmri, subj, target_std)
                 loss = ld["loss"]
-            loss.backward()                       # bf16 -> no GradScaler needed
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             opt.step()
             ema.update(model)
@@ -171,7 +148,6 @@ def main():
                 pbar.set_postfix(flow=f"{ld['flow']:.3f}", reg=f"{ld['reg']:.3f}",
                                  cos=f"{ld['cos']:.3f}", lr=f"{lr:.1e}")
 
-        # ── eval (on EMA weights, swapped in-place then restored) ──
         if epoch % args.eval_freq == 0 or epoch == args.epochs:
             ema.store(model); ema.copy_to(model)
             cos = eval_embedding_cosine(model, bundle.eval, stats, device)
@@ -196,7 +172,6 @@ def main():
 
     print(f"Done. best embed_cos={best_cos:.4f}. Checkpoints in {out_dir}")
 
-
 def _save_grid(pred, gt, path, n=8):
     try:
         from torchvision.utils import save_image
@@ -205,7 +180,6 @@ def _save_grid(pred, gt, path, n=8):
         save_image(grid, str(path), nrow=n)
     except Exception as e:
         print(f"[grid save skipped] {e}")
-
 
 if __name__ == "__main__":
     main()

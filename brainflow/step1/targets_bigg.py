@@ -1,19 +1,3 @@
-"""bigG token-grid targets (Step 1b) — extracted with MindEye2's *exact* embedder.
-
-We use the vendored sgm `FrozenOpenCLIPImageEmbedder` (ViT-bigG/14,
-laion2b_s39b_b160k, output_tokens=True, only_tokens=True) so the (256, 1664)
-token grid lands in exactly the space the SDXL-unCLIP decoder was trained on.
-
-CRITICAL (verified against sgm source): the embedder does its OWN preprocessing
-(resize 224 bicubic, then `(x+1)/2`, then CLIP-normalize).  MindEye2 feeds images
-in [0,1] directly — so do we (do NOT pre-normalize).
-
-Storage: ONE FILE PER SUBJECT (`step1b_bigg_s{subj}.pt`), each holding fp16
-`emb_train`/`emb_test` plus a tiny per-subject stats accumulator.  Files are
-**memory-mapped** on load so multi-subject training never pulls 95 GB+ into RAM.
-Global standardization (mean/std) is reconstructed by summing the per-subject
-accumulators — no need to hold all embeddings at once.
-"""
 from __future__ import annotations
 
 import gc
@@ -28,7 +12,6 @@ from .targets import TargetStats
 TOKEN_LEN = 256
 TOKEN_DIM = 1664
 
-
 def _add_sgm_to_path(mindeye_src: Path):
     mindeye_src = Path(mindeye_src)
     gm = mindeye_src / "generative_models"
@@ -38,7 +21,6 @@ def _add_sgm_to_path(mindeye_src: Path):
     for p in (str(mindeye_src), str(gm)):
         if p not in sys.path:
             sys.path.insert(0, p)
-
 
 @torch.no_grad()
 def _load_embedder(device, mindeye_src: Path):
@@ -53,10 +35,8 @@ def _load_embedder(device, mindeye_src: Path):
         p.requires_grad_(False)
     return emb
 
-
 @torch.no_grad()
 def _encode(emb, imgs, device, bs=16):
-    """imgs (N,3,H,W) uint8/[0,1] -> (N,256,1664) fp16. Embedder preprocesses internally."""
     outs = []
     for i in tqdm(range(0, len(imgs), bs), desc="bigG tokens", leave=False):
         x = imgs[i:i + bs]
@@ -66,9 +46,7 @@ def _encode(emb, imgs, device, bs=16):
         outs.append(emb(x).float().cpu().half())
     return torch.cat(outs)
 
-
 def _accum_stats(e_tr_fp16, chunk=1024):
-    """Per-channel count/sum/sqsum over (N,256,1664) train tokens (chunked, f64)."""
     cnt = 0
     s = torch.zeros(TOKEN_DIM, dtype=torch.float64)
     sq = torch.zeros(TOKEN_DIM, dtype=torch.float64)
@@ -79,17 +57,11 @@ def _accum_stats(e_tr_fp16, chunk=1024):
         sq += (f * f).sum(0).double()
     return cnt, s, sq
 
-
 def _subj_file(cache_dir: Path, subj: int) -> Path:
     return Path(cache_dir) / f"step1b_bigg_s{subj}.pt"
 
-
 def build_or_load_bigg_targets(tensors, subjects, cache_dir, device, mindeye_src,
                                hf_cache=None, force_rebuild=False):
-    """Build (missing) / load per-subject bigG target files, memory-mapped.
-
-    Returns dict with emb_train_{s}, emb_test_{s} (mmap fp16) and _stats (global).
-    """
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     embedder = None
@@ -112,8 +84,7 @@ def build_or_load_bigg_targets(tensors, subjects, cache_dir, device, mindeye_src
             print(f"  ✓ saved {fp} ({fp.stat().st_size/1e9:.1f} GB)")
             del e_tr, e_te
             gc.collect()
-        # Reload memory-mapped so we never hold the full tensor in RAM.
-        # NB: torch.load(mmap=True) requires a str path, not a pathlib.Path.
+
         blob = torch.load(str(fp), map_location="cpu", mmap=True)
         out[f"emb_train_{s}"] = blob["emb_train"]
         out[f"emb_test_{s}"] = blob["emb_test"]

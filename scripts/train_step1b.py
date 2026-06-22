@@ -1,13 +1,3 @@
-"""Step-1b training: fMRI -> bigG token grid (256x1664) flow prior.
-
-Target = OpenCLIP ViT-bigG/14 tokens (MindEye2 space).  Decoder = SDXL-unCLIP.
-Run setup first:  bash scripts/setup_step1b.sh
-
-    python -m scripts.train_step1b \
-        --data-dir ./mindeyev2_cache --subjects 1 \
-        --mindeye-src third_party/MindEyeV2/src \
-        --epochs 150 --batch-size 48 --lr 3e-4 --out outputs/step1b
-"""
 from __future__ import annotations
 
 import argparse
@@ -24,13 +14,11 @@ from brainflow.step1.targets import TargetStats
 from brainflow.step1.data import build_step1_loaders
 from brainflow.step1.metrics import EMA, pixcorr, ssim, CLIPMetric
 
-
 def setup_a100():
     torch.set_float32_matmul_precision("high")
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
-
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -64,13 +52,11 @@ def parse_args():
     ap.add_argument("--seed", type=int, default=0)
     return ap.parse_args()
 
-
 def lr_at(step, total, warm, base, mn):
     if step < warm:
         return base * (step + 1) / max(1, warm)
     prog = (step - warm) / max(1, total - warm)
     return mn + 0.5 * (base - mn) * (1 + math.cos(math.pi * prog))
-
 
 @torch.no_grad()
 def eval_token_cosine(model, loader, stats, device):
@@ -78,13 +64,12 @@ def eval_token_cosine(model, loader, stats, device):
     cos_sum, n = 0.0, 0
     for batch in loader:
         fmri = batch["fmri"].to(device, non_blocking=True)
-        tgt = batch["emb"].to(device, non_blocking=True)         # raw target tokens
+        tgt = batch["emb"].to(device, non_blocking=True)
         pred = model.predict_tokens(fmri, batch["subject"], stats, cond_source="regression")
-        # per-token cosine, averaged over tokens then summed over batch
-        c = F.cosine_similarity(pred, tgt, dim=-1).mean(dim=-1)   # (B,)
+
+        c = F.cosine_similarity(pred, tgt, dim=-1).mean(dim=-1)
         cos_sum += c.sum().item(); n += fmri.shape[0]
     return cos_sum / max(1, n)
-
 
 def main():
     args = parse_args()
@@ -142,10 +127,7 @@ def main():
                 loss = ld["loss"]
             loss.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            # A single non-finite gradient (a rare bf16 spike — ~300k steps/run with
-            # 8 subjects) makes clip_grad_norm_'s rescale 0*inf=NaN, and opt.step()
-            # then writes NaN into every weight + AdamW moment + EMA shadow, killing
-            # the run permanently. Drop the batch instead of poisoning the model.
+
             if torch.isfinite(gnorm):
                 opt.step(); ema.update(model)
             else:
@@ -161,11 +143,7 @@ def main():
             cos = eval_token_cosine(model, bundle.eval, stats, device)
             msg = f"Ep{epoch:4d} | token_cos={cos:.4f}"
             if args.decode_eval:
-                # Stratify the decode sample ACROSS subjects. The eval loader is
-                # subject-ordered, so the old "first decode_n" took only subject-1's
-                # first N images — a tiny, non-representative slice with ~0.1 SE on
-                # CLIP_2way (hence the epoch-to-epoch noise). Take an even quota per
-                # subject so the metric (and best-ckpt selection) is trustworthy.
+
                 n_subj = max(1, len(args.subjects))
                 per_subj = max(1, args.decode_n // n_subj)
                 preds, gts, got = [], [], {}
@@ -197,9 +175,7 @@ def main():
                     "stats": stats.to_dict(), "voxels": bundle.voxels,
                     "subjects": args.subjects, "epoch": epoch}
             torch.save(ckpt, out_dir / "last.pt")
-            # token_cos tracks the (auxiliary) regression head and plateaus early.
-            # The flow prior — which actually generates the images — is best tracked
-            # by CLIP_2way, so select the kept checkpoint on that when available.
+
             if args.decode_eval and im["CLIP_2way"] > best_clip:
                 best_clip = im["CLIP_2way"]
                 torch.save(ckpt, out_dir / "best_clip2way.pt")
@@ -210,7 +186,6 @@ def main():
     print(f"Done. best token_cos={best_cos:.4f}, best CLIP_2way={best_clip:.4f}. "
           f"Checkpoints in {out_dir}")
 
-
 def _save_grid(pred, gt, path, n=8):
     try:
         from torchvision.utils import save_image
@@ -218,7 +193,6 @@ def _save_grid(pred, gt, path, n=8):
         save_image(torch.cat([gt[:n], pred[:n]]), str(path), nrow=n)
     except Exception as e:
         print(f"[grid skipped] {e}")
-
 
 if __name__ == "__main__":
     main()

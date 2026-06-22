@@ -19,7 +19,6 @@ from brainflow.models import BrainEncoder
 
 load_dotenv()
 
-
 @torch.no_grad()
 def evaluate_sdprior(brain_enc, prior, decoder, loader, cfg, device):
     pred_images = []
@@ -71,7 +70,6 @@ def evaluate_sdprior(brain_enc, prior, decoder, loader, cfg, device):
     metrics["cosine"] = torch.cat(cos_vals, dim=0).mean().item()
     return metrics
 
-
 @torch.no_grad()
 def main():
     cfg = load_config()
@@ -116,7 +114,6 @@ def main():
     print("\n=== SDPRIOR FULL BENCHMARK (test split) ===")
     for k in sorted(metrics):
         print(f"{k:16s}: {metrics[k]:.4f}")
-
 
 if __name__ == "__main__":
     main()

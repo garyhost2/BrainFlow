@@ -1,15 +1,3 @@
-"""Phase 3 SDPrior training: BrainEncoder + ClipPrior → CLIP embedding.
-
-Usage (single GPU):
-    BRAINFLOW_CONFIG=configs/phase3_sdprior.yaml \\
-    INIT_FROM=outputs/mc_xl_v100_32/best_pc_v5.pt \\
-    python -m scripts.train_sdprior
-
-Usage (torchrun):
-    BRAINFLOW_CONFIG=configs/phase3_sdprior.yaml \\
-    INIT_FROM=outputs/mc_xl_v100_32/best_pc_v5.pt \\
-    torchrun --standalone --nproc_per_node=1 -m scripts.train_sdprior
-"""
 from __future__ import annotations
 import gc
 import math
@@ -45,9 +33,6 @@ from brainflow.models import BrainEncoder, migrate_input_proj
 
 load_dotenv()
 
-
-# ── DDP helpers ────────────────────────────────────────────────────────────────
-
 def setup_ddp(backend_cfg: str, init_method: str) -> torch.device:
     if "LOCAL_RANK" not in os.environ:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -64,11 +49,9 @@ def setup_ddp(backend_cfg: str, init_method: str) -> torch.device:
                             timeout=timedelta(seconds=timeout_sec))
     return device
 
-
 def cleanup_ddp():
     if is_dist():
         dist.destroy_process_group()
-
 
 def set_seed(seed: int = 42):
     random.seed(seed)
@@ -77,12 +60,8 @@ def set_seed(seed: int = 42):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-
-# ── CLIP stats fitting ─────────────────────────────────────────────────────────
-
 def fit_clip_stats(prior: ClipPrior, train_loader, device: torch.device,
                    max_samples: int = 20000):
-    """Compute CLIP CLS mean/std from training set, broadcast across ranks."""
     if getattr(prior, "prior_target", "cls") != "cls":
         return
     if is_main():
@@ -97,7 +76,7 @@ def fit_clip_stats(prior: ClipPrior, train_loader, device: torch.device,
             raise RuntimeError("'clip_emb' key missing from batch. Check data pipeline.")
         clips.append(c.float())
         n += c.shape[0]
-    all_clips = torch.cat(clips, dim=0)[:max_samples]  # (N, 768)
+    all_clips = torch.cat(clips, dim=0)[:max_samples]
 
     if is_main():
         prior.fit_stats(all_clips)
@@ -113,9 +92,6 @@ def fit_clip_stats(prior: ClipPrior, train_loader, device: torch.device,
             prior._stats_fitted = True
         dist.barrier()
 
-
-# ── Eval ──────────────────────────────────────────────────────────────────────
-
 @torch.no_grad()
 def evaluate(
     brain_enc: BrainEncoder,
@@ -125,7 +101,6 @@ def evaluate(
     cfg,
     n_batches: int | None = None,
 ) -> dict[str, float]:
-    """Sample CLIP targets and compute cosine + 2-way ID on aggregated eval set."""
     brain_enc.eval()
     prior.eval()
     pred_all: list[torch.Tensor] = []
@@ -138,7 +113,7 @@ def evaluate(
         subject = batch["subject"].to(device)
         clip_gt = batch["clip_emb"].to(device).float()
 
-        tokens, _ = brain_enc(fmri, subject)         # (B, N, D)
+        tokens, _ = brain_enc(fmri, subject)
         sampled = prior.sample(
             tokens,
             n_steps=cfg.eval_ode_steps,
@@ -179,7 +154,6 @@ def evaluate(
     clip_2way = two_way_identification(pred_feats, gt_feats)
     return {"CLIP_Cos": clip_cos, "CLIP_2way": clip_2way}
 
-
 def compute_sdprior_losses(
     prior: ClipPrior,
     tokens: torch.Tensor,
@@ -188,7 +162,6 @@ def compute_sdprior_losses(
     cfg,
     clip_patches: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Shared loss helper for tests and training loop."""
     if getattr(prior, "prior_target", "cls") == "patches":
         if clip_patches is None:
             raise ValueError("clip_patches is required when prior_target='patches'")
@@ -204,9 +177,6 @@ def compute_sdprior_losses(
     loss = float(getattr(cfg, "lambda_cfm", 1.0)) * loss_flow + float(getattr(cfg, "lambda_align", 0.1)) * loss_info
     return loss, loss_flow, loss_info
 
-
-# ── Main ───────────────────────────────────────────────────────────────────────
-
 def main():
     set_seed(42)
     cfg = load_config()
@@ -221,21 +191,19 @@ def main():
         print(f"[SDPrior] world_size={world_size()} device={device} "
               f"subjects={cfg.subjects}")
 
-    # Data: SDPrior needs fmri + clip; patch mode additionally loads clip_patches.
     train_loader, test_loader, eval_loader, train_sampler, voxels = build_dataloaders(cfg)
     if is_main():
         print(f"Train batches/rank: {len(train_loader)} | Eval: {len(eval_loader)}")
 
-    # ── BrainEncoder (trained) ────────────────────────────────────────────────
     brain_enc = BrainEncoder(cfg, voxels).to(device)
 
     init_from = os.environ.get("INIT_FROM", "").strip()
     if init_from and Path(init_from).is_file():
         ckpt = torch.load(init_from, map_location="cpu", mmap=True)
-        # Strip torch.compile prefix if present
+
         ckpt = {k.replace("._orig_mod.", "."): v for k, v in ckpt.items()}
         ckpt = migrate_input_proj(ckpt, brain_enc.max_vox)
-        # Accept both plain keys (brain_enc.*) and bare keys
+
         enc_ckpt = {}
         for k, v in ckpt.items():
             if k.startswith("brain_enc."):
@@ -251,10 +219,9 @@ def main():
     elif is_main():
         print(f"[SDPrior] WARNING: INIT_FROM={init_from!r} not found — random BrainEncoder init.")
 
-    # ── ClipPrior (trained) ────────────────────────────────────────────────────
     prior = ClipPrior(
-        clip_dim=cfg.clip_dim,          # 768
-        ctx_dim=cfg.brain_dim,          # 768
+        clip_dim=cfg.clip_dim,
+        ctx_dim=cfg.brain_dim,
         dim=getattr(cfg, "prior_dim", 512),
         depth=getattr(cfg, "prior_blocks", 6),
         heads=getattr(cfg, "attn_heads", 8),
@@ -264,10 +231,8 @@ def main():
         prior_target=getattr(cfg, "prior_target", "cls"),
     ).to(device)
 
-    # Fit CLIP statistics before DDP wrap
     fit_clip_stats(prior, train_loader, device)
 
-    # ── Resume support ─────────────────────────────────────────────────────────
     resume_path = cfg.output_dir / "resume.pt"
     start_epoch = 1
     best_cos = 0.0
@@ -279,7 +244,7 @@ def main():
 
     if resume_path.is_file():
         resume = torch.load(resume_path, map_location="cpu")
-        # Sanity check: reject corrupted (NaN) checkpoints
+
         prior_sd = resume["prior"]
         n_nan = sum(1 for v in prior_sd.values() if not torch.isfinite(v).all())
         if n_nan > 0:
@@ -307,7 +272,6 @@ def main():
     if is_main():
         print(f"[SDPrior] ClipPrior params: {n_prior / 1e6:.1f}M (trainable)")
 
-    # ── DDP wrap ───────────────────────────────────────────────────────────────
     if is_dist():
         brain_enc_ddp = DDP(
             brain_enc,
@@ -326,7 +290,6 @@ def main():
         prior_ddp = prior
         raw_prior = prior
 
-    # ── Optimizer + scheduler ─────────────────────────────────────────────────
     _ok = dict(lr=float(cfg.lr), weight_decay=float(cfg.weight_decay),
                betas=(0.9, 0.999), eps=1e-8)
     try:
@@ -358,7 +321,6 @@ def main():
         if "scheduler" in resume:
             scheduler.load_state_dict(resume["scheduler"])
 
-    # fp16 on V100 (compute cap < 8.0), bf16 on Ampere+
     use_bf16 = False
     if device.type == "cuda":
         cc = torch.cuda.get_device_capability(device)
@@ -377,7 +339,6 @@ def main():
         if "ema" in resume:
             ema.shadow = {k: v.clone() for k, v in resume["ema"].items()}
 
-    # ── WandB ─────────────────────────────────────────────────────────────────
     use_wandb = False
     if is_main() and cfg.wandb_mode != "disabled":
         try:
@@ -397,7 +358,6 @@ def main():
         except Exception as e:
             print(f"[wandb] disabled: {e}")
 
-    # ── Training loop ──────────────────────────────────────────────────────────
     epochs_no_improve = 0
 
     for epoch in range(start_epoch, cfg.num_epochs + 1):
@@ -414,7 +374,7 @@ def main():
         for bi, batch in enumerate(pbar):
             fmri = batch["fmri"].to(device)
             subject = batch["subject"].to(device)
-            clip_gt = batch["clip_emb"].to(device).float()  # (B, 768)
+            clip_gt = batch["clip_emb"].to(device).float()
             clip_patches = batch.get("clip_patches")
             if clip_patches is not None:
                 clip_patches = clip_patches.to(device).float()
@@ -431,7 +391,6 @@ def main():
                     raw_prior, tokens, cls_align, clip_gt, cfg, clip_patches=clip_patches
                 )
 
-            # Skip NaN/Inf steps (fp16 overflow recovery)
             if not torch.isfinite(loss):
                 optimizer.zero_grad()
                 continue
@@ -473,7 +432,6 @@ def main():
             gc.collect()
             torch.cuda.empty_cache()
 
-            # Eval with EMA weights if available
             _backup_sd = None
             if step >= cfg.ema_start:
                 _backup_sd = {k: v.clone() for k, v in raw_prior.state_dict().items()}
@@ -481,7 +439,7 @@ def main():
 
             eval_metrics = evaluate(
                 raw_brain_enc, raw_prior, eval_loader, device, cfg,
-                n_batches=None,  # full eval set for reliable all-pairs 2-way ID
+                n_batches=None,
             )
 
             if _backup_sd is not None:
@@ -520,7 +478,6 @@ def main():
             else:
                 epochs_no_improve += 1
 
-            # Save resume checkpoint every eval epoch
             resume_ckpt = {
                 "epoch": epoch,
                 "step": step,
@@ -541,7 +498,6 @@ def main():
                 import wandb
                 wandb.log(all_metrics, step=epoch)
 
-            # Early stopping
             if (epoch >= cfg.min_epochs and
                     epochs_no_improve >= cfg.patience and
                     not is_last):
@@ -551,7 +507,6 @@ def main():
                            cfg.output_dir / "early_stop.pt")
                 break
 
-    # ── Final save ────────────────────────────────────────────────────────────
     if is_main():
         torch.save(
             {"brain_encoder": raw_brain_enc.state_dict(), "prior": raw_prior.state_dict()},
@@ -573,7 +528,6 @@ def main():
         print("  Files: best_clip_cos.pt  final_ema.pt  final_raw.pt")
 
     cleanup_ddp()
-
 
 if __name__ == "__main__":
     main()

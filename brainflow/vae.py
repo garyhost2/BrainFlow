@@ -1,9 +1,7 @@
-"""Frozen Stable Diffusion VAE wrapper (sd-vae-ft-mse)."""
 from pathlib import Path
 import torch
 import torch.nn as nn
 from diffusers import AutoencoderKL
-
 
 class FrozenVAE(nn.Module):
     def __init__(self, cache_dir: Path | str | None = None,
@@ -23,21 +21,16 @@ class FrozenVAE(nn.Module):
 
     @torch.no_grad()
     def encode(self, x):
-        # Cast to target dtype for faster inference; output back to fp32
+
         return (self.vae.encode((x * 2 - 1).to(self.dtype))
                 .latent_dist.sample().float() * self.scale)
 
     @torch.no_grad()
     def decode(self, z):
-        # Cast to target dtype for faster inference; output back to fp32
+
         return ((self.vae.decode((z / self.scale).to(self.dtype))
                  .sample.float().clamp(-1, 1) + 1) / 2)
 
     def decode_grad(self, z):
-        """Gradient-enabled decode path for training losses.
-
-        VAE weights remain frozen via requires_grad_(False), but gradients from
-        downstream losses can flow back to z.
-        """
         return ((self.vae.decode((z / self.scale).to(self.dtype))
                  .sample.float().clamp(-1, 1) + 1) / 2)

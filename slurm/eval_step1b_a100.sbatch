@@ -1,11 +1,5 @@
 #!/bin/bash -l
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 1b — full eval: fMRI -> bigG tokens -> SDXL-unCLIP -> metrics over the
-# whole test set. Writes outputs/<OUT>/metrics.json + recon_grid.png.
-#   Baseline (subject-1 final model):
-#     CKPT=outputs/step1b/last.pt OUT=eval_last sbatch slurm/eval_step1b_a100.sbatch
-# The decoder is slow (38 diffusion steps/image, one at a time) — give it hours.
-# ─────────────────────────────────────────────────────────────────────────────
+
 #SBATCH -J step1b_eval
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
@@ -44,12 +38,10 @@ echo "Node: $(hostname)"; nvidia-smi || true
 MINDEYE_SRC="${MINDEYE_SRC:-third_party/MindEyeV2/src}"
 UNCLIP_CKPT="${UNCLIP_CKPT:-third_party/unclip6_epoch0_step110000.ckpt}"
 
-# last.pt = the ep150 final model (honest baseline). best_cos.pt is token_cos-
-# selected and generatively weaker — use last.pt for the baseline number.
 CKPT="${CKPT:-outputs/step1b/last.pt}"
 OUT="${OUT:-eval_last}"
-DATA_DIR="${DATA_DIR:-./mindeyev2_cache}"          # tensor cache + hf_cache
-TARGET_DIR="${TARGET_DIR:-${DATA_DIR}}"            # per-subject bigG files (match training)
+DATA_DIR="${DATA_DIR:-./mindeyev2_cache}"
+TARGET_DIR="${TARGET_DIR:-${DATA_DIR}}"
 
 python -m scripts.eval_step1b \
     --ckpt "${CKPT}" \

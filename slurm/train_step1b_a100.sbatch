@@ -1,11 +1,5 @@
 #!/bin/bash -l
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 1b — fMRI -> bigG token grid -> SDXL-unCLIP (MindEye2 decoder).
-# The MindEye2-competitive path.  Needs a big GPU (A100 80GB recommended) and the
-# one-time setup (bash scripts/setup_step1b.sh) already run on the LOGIN node.
-# Use a DEDICATED conda env `me2` (MindEye2's pinned deps) — see docs/STEP1B.md.
-#   Submit:  sbatch slurm/train_step1b_a100.sbatch
-# ─────────────────────────────────────────────────────────────────────────────
+
 #SBATCH -J step1b
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
@@ -16,8 +10,6 @@
 #SBATCH -c 8
 #SBATCH --mem=120G
 #SBATCH -t 2-00:00:00
-# For an H200 instead (bigger/faster): change the two lines above to
-#   -p gpu-H200   and   --gres=gpu:H200_141GB:1   (no other changes needed).
 
 set -euo pipefail
 
@@ -26,8 +18,6 @@ for m in cuda12.1/toolkit/12.1.1 cuda11.8/toolkit/11.8.0; do
     module load "$m" 2>/dev/null && { echo "Loaded module: $m"; break; }
 done
 
-# Activate the dedicated Step-1b env. venv by default (login-node conda solver
-# OOMs on Panther); falls back to a conda env named $ENV_NAME if no venv exists.
 VENV="${VENV:-$HOME/envs/me2}"
 if [ -f "${VENV}/bin/activate" ]; then
     source "${VENV}/bin/activate"
@@ -48,27 +38,16 @@ echo "Node: $(hostname)"; nvidia-smi || true
 MINDEYE_SRC="${MINDEYE_SRC:-third_party/MindEyeV2/src}"
 UNCLIP_CKPT="${UNCLIP_CKPT:-third_party/unclip6_epoch0_step110000.ckpt}"
 
-# Subjects to pool (shared backbone + per-subject input proj, MindEye2-style).
-#   4 full-data subjects (default, ~104 GB targets — fits home):
-#       sbatch slurm/train_step1b_a100.sbatch
-#   ALL 8 (MindEye2 pretraining set, ~208 GB targets — does NOT fit home; put the
-#   target cache on scratch):
-#       SUBJECTS="1 2 3 4 5 6 7 8" TARGET_DIR=/scratch/$USER/bigg sbatch slurm/train_step1b_a100.sbatch
 SUBJECTS="${SUBJECTS:-1 2 5 7}"
-DATA_DIR="${DATA_DIR:-./mindeyev2_cache}"        # tensor cache (all_subjects_tensors.pt) + hf_cache
-TARGET_DIR="${TARGET_DIR:-${DATA_DIR}}"          # big per-subject bigG files (~26 GB each) land here
-# Distinct output dir so the multi-subject run does NOT overwrite the single-subject
-# baseline in outputs/step1b. Override with OUT=... for other configs.
+DATA_DIR="${DATA_DIR:-./mindeyev2_cache}"
+TARGET_DIR="${TARGET_DIR:-${DATA_DIR}}"
+
 OUT="${OUT:-outputs/step1b_ms}"
 
-# ── Disk preflight ──────────────────────────────────────────────────────────
-# Each subject's bigG token cache is ~26 GB fp16 (train ~24 GB + test ~2.5 GB):
-#   ~27.7k train trials × 256 tok × 1664 dim × 2 B ≈ 23.6 GB. Refuse to start a
-# multi-subject build that would exceed free space rather than die mid-encode.
 mkdir -p "${TARGET_DIR}"
 N_SUBJ=$(echo ${SUBJECTS} | wc -w)
 NEED_GB=$(( N_SUBJ * 26 ))
-# subtract already-built per-subject caches from the requirement
+
 HAVE_GB=0
 for s in ${SUBJECTS}; do
     f="${TARGET_DIR}/step1b_bigg_s${s}.pt"
@@ -89,7 +68,6 @@ if [ "${FREE_GB}" -lt "$(( NEED_GB + 20 ))" ]; then
 fi
 echo "────────────────────────────────────────────────────────────────"
 
-# First launch also builds the bigG target cache (~26 GB/subject) via the embedder.
 python -m scripts.train_step1b \
     --data-dir "${DATA_DIR}" \
     --target-dir "${TARGET_DIR}" \

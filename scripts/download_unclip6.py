@@ -1,7 +1,3 @@
-"""Download MindEye2's SDXL-unCLIP decoder checkpoint from the NSD dataset repo.
-
-    python scripts/download_unclip6.py --out third_party
-"""
 import argparse
 import os
 from pathlib import Path
@@ -10,7 +6,6 @@ from huggingface_hub import hf_hub_download
 
 REPO = "pscotti/mindeyev2"
 FILENAME = "unclip6_epoch0_step110000.ckpt"
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -26,7 +21,6 @@ def main():
         token=os.environ.get("HF_TOKEN"),
     )
     print(f"✓ saved -> {path}")
-
 
 if __name__ == "__main__":
     main()

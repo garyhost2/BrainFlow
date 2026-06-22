@@ -1,19 +1,5 @@
 #!/bin/bash -l
-# ─────────────────────────────────────────────────────────────────────────────
-# BrainFlow V6 — 64-token encoder + LPIPS perceptual loss (USE_V6=1).
-# Single V100 32GB. Effective batch = 32 * 1 * 3 = 96.
-#
-# V6 preset (config_overrides.py):
-#   n_tokens    = 64    (vs 16 baseline — richer brain representation)
-#   lambda_percep = 0.15  LPIPS perceptual loss
-#   percep_loss = "lpips"
-#   mixup_alpha = 0.1
-#
-# Requires corrected CLIP+latent caches — run rebuild_cache_v2.sbatch first
-# if you haven't trained since PR #6 (CLIP normalisation fix).
-#
-#   Submit:  sbatch slurm/train_v6_v100_32gb.sbatch
-# ─────────────────────────────────────────────────────────────────────────────
+
 #SBATCH -J brainflow_v6_v100_32
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
@@ -54,15 +40,11 @@ export OMP_NUM_THREADS=4
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 export DDP_TIMEOUT=1800
-export DISABLE_COMPILE=1        # V100 compute cap 7.0 — no torch.compile
+export DISABLE_COMPILE=1
 
-# ── V6 experiment settings ────────────────────────────────────────────────────
-export USE_V6=1                 # activates the V6 preset in config_overrides.py
+export USE_V6=1
 export EXPERIMENT_NAME=v6_v100_32
 
-# Throughput settings for single V100 32GB with 64-token encoder
-# 64 tokens × 4 enc blocks × 1024 dim → larger encoder footprint
-# batch=32, accum=3 → effective batch=96 (same as baseline)
 export BATCH_SIZE_PER_GPU=32
 export GRAD_ACCUM=3
 

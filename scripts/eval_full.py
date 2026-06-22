@@ -1,18 +1,3 @@
-"""eval_full.py — Full 8-metric evaluation harness for BrainFlow Phase 2.
-
-Usage (real GPU run)::
-
-    python -m scripts.eval_full --ckpt outputs/best.pt --subject 1
-
-Usage (CI / offline self-test — no GPU, dataset, or checkpoint needed)::
-
-    python -m scripts.eval_full --self-test
-
-The ``--self-test`` flag calls :func:`brainflow.metrics_full.evaluate_full` on
-tiny random tensors on CPU, skipping all metrics that require model downloads
-(AlexNet, Inception, CLIP, EffNet-B, SwAV).  Only PixCorr and SSIM run.  This
-validates the plumbing without any data or network access and is exercised in CI.
-"""
 from __future__ import annotations
 
 import argparse
@@ -25,9 +10,6 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from brainflow.metrics_full import evaluate_full
-
-
-# ── Argument parser ────────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -53,16 +35,11 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Run evaluate_full on random tensors for CI (no GPU/data needed).")
     return p
 
-
-# ── Self-test (CI mode) ────────────────────────────────────────────────────────
-
 _SKIP_FOR_SELF_TEST = [
     "AlexNet(2)", "AlexNet(5)", "Inception", "CLIP", "EffNet-B", "SwAV"
 ]
 
-
 def run_self_test() -> int:
-    """Evaluate PixCorr + SSIM on tiny random CPU tensors.  Returns 0 on success."""
     print("=== BrainFlow eval_full self-test (CPU, no data/checkpoint) ===")
     B, C, H, W = 4, 3, 64, 64
     pred = torch.rand(B, C, H, W)
@@ -86,11 +63,7 @@ def run_self_test() -> int:
     print("\nSelf-test PASSED ✓")
     return 0
 
-
-# ── Full eval (GPU run) ────────────────────────────────────────────────────────
-
 def run_full_eval(args: argparse.Namespace) -> int:
-    """Load model + data and compute all 8 metrics."""
     from brainflow.config import load_config
     from brainflow.data import build_dataloaders
     from brainflow.vae import FrozenVAE
@@ -103,11 +76,9 @@ def run_full_eval(args: argparse.Namespace) -> int:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # Build dataloaders and select subject
     cfg.subject_filter = [args.subject]
     _, test_loader, eval_loader, _, voxels = build_dataloaders(cfg)
 
-    # Load model (attempt to auto-detect Phase 1 vs Phase 2)
     ckpt_path = Path(args.ckpt)
     if not ckpt_path.exists():
         print(f"ERROR: checkpoint not found: {ckpt_path}", file=sys.stderr)
@@ -115,7 +86,7 @@ def run_full_eval(args: argparse.Namespace) -> int:
 
     state = torch.load(ckpt_path, map_location="cpu")
     state = {k.replace("._orig_mod.", "."): v for k, v in state.items()}
-    # Detect Phase 2 vs Phase 1 by key prefix
+
     is_phase2 = any(k.startswith("flow_clip.") for k in state.keys())
 
     if is_phase2:
@@ -132,7 +103,6 @@ def run_full_eval(args: argparse.Namespace) -> int:
 
     vae = FrozenVAE(cache_dir=cfg.data_dir / "hf_cache").to(device)
 
-    # Build time grid with the selected schedule
     t_grid = make_t_grid(args.ode_steps, device=device, schedule=args.schedule)
 
     all_pred, all_target = [], []
@@ -173,7 +143,6 @@ def run_full_eval(args: argparse.Namespace) -> int:
         print(f"  {name:15s}: {val:.6f}")
     print("=" * 50)
 
-    # Write JSON output
     out_dir = Path(args.out_dir) if args.out_dir else (cfg.output_dir / cfg.experiment_name)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "full_metrics.json"
@@ -182,9 +151,6 @@ def run_full_eval(args: argparse.Namespace) -> int:
     print(f"\nResults written to: {out_file}")
 
     return 0
-
-
-# ── Entry point ────────────────────────────────────────────────────────────────
 
 def main() -> None:
     args = _build_parser().parse_args()
@@ -197,7 +163,6 @@ def main() -> None:
         sys.exit(1)
 
     sys.exit(run_full_eval(args))
-
 
 if __name__ == "__main__":
     main()

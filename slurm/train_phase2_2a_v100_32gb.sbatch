@@ -1,9 +1,5 @@
 #!/bin/bash -l
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 2 Stage 2A — FlowCLIPDiT training (BrainEncoder frozen).
-# Single V100 32GB; effective batch = 32 * 1 * 2 = 64.
-#   Submit:  sbatch slurm/train_phase2_2a_v100_32gb.sbatch
-# ─────────────────────────────────────────────────────────────────────────────
+
 #SBATCH -J phase2_2a_v100_32
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
@@ -44,13 +40,10 @@ export OMP_NUM_THREADS=4
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 export DDP_TIMEOUT=1800
-export DISABLE_COMPILE=1        # V100 compute cap 7.0 — no torch.compile
+export DISABLE_COMPILE=1
 
-# ── Phase 2 Stage 2A config ──────────────────────────────────────────────────
-# BRAINFLOW_CONFIG selects the phase2_stage2a.yaml config (overrides root config.yaml)
 export BRAINFLOW_CONFIG="${REPO_DIR}/configs/phase2_stage2a.yaml"
 
-# Warm-start BrainEncoder from the best v5 multi-subject checkpoint
 export INIT_FROM="${REPO_DIR}/outputs/mc_xl_v100_32/best_pc_v5.pt"
 
 torchrun \

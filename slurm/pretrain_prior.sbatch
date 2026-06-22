@@ -1,9 +1,5 @@
 #!/bin/bash -l
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage-1 pretrain: BrainEncoder + CLIPPrior only.
-# Runs on a single V100 32GB (much faster than full training; no VAE/UNet/DiT).
-#   Submit:    sbatch slurm/pretrain_prior.sbatch
-# ─────────────────────────────────────────────────────────────────────────────
+
 #SBATCH -J brainflow_stage1_prior
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
@@ -45,7 +41,6 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 export DDP_TIMEOUT=1800
 
-# Same encoder/prior dims as XL DiT so weights load cleanly into the full model
 export METHOD=dit
 export SUBJECTS=1,2,3,4,5,6,7,8
 export EXPERIMENT_NAME=stage1_prior
@@ -55,17 +50,14 @@ export ENC_BLOCKS=6
 export PRIOR_DIM=1024
 export PRIOR_BLOCKS=8
 
-# Loss weights
 export LAMBDA_ALIGN=1.0
 export LAMBDA_PRIOR=1.0
 
-# No VAE/UNet → large batch is fine, but use fp32 for stability (V100 has no bf16,
-# fp16 + GradScaler diverged on the CLIP-space CFM).
 export BATCH_SIZE_PER_GPU=64
 export GRAD_ACCUM=1
-export NUM_EPOCHS=80         # prior typically converges fast
-export USE_AMP=0             # disable AMP → fp32 forward/backward
-export LR=1e-4               # conservative LR matched to fp32
+export NUM_EPOCHS=80
+export USE_AMP=0
+export LR=1e-4
 
 torchrun \
     --standalone \
