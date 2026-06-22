@@ -1,16 +1,3 @@
-"""Step-1b model: fMRI -> CLIP **token grid** (bigG 256x1664) via a DiT flow prior.
-
-Same recipe as the vector path (`model.py`) but the target is the OpenCLIP
-ViT-bigG/14 token sequence (256, 1664) that MindEye2's SDXL-unCLIP decoder
-ingests as `crossattn`.  The flow prior is therefore a DiT over the 256 tokens
-with self-attention + cross-attention to brain conditioning tokens.
-
-Flow math is identical and parameterization is v-prediction:
-    x0 ~ N(0,I)  (shape (B,256,D)),  x1 = standardized target tokens
-    xt = (1-t) x0 + t x1,  target u = x1 - x0
-Standardization is per-channel (D,), broadcast over the 256 tokens; the sampled
-grid is un-standardized to RAW tokens before being handed to the decoder.
-"""
 from __future__ import annotations
 
 import math
@@ -22,12 +9,7 @@ import torch.nn.functional as F
 
 from .model import ResMLP, SinusoidalTime
 
-
 def soft_clip_loss(preds: torch.Tensor, targs: torch.Tensor, temp: float) -> torch.Tensor:
-    """MindEye2 SoftCLIP: soft labels from the CLIP-CLIP similarity matrix.
-
-    preds, targs are L2-normalized (B, C). Symmetric brain<->CLIP contrastive.
-    """
     clip_clip = (targs @ targs.T) / temp
     brain_clip = (preds @ targs.T) / temp
     soft = clip_clip.softmax(dim=-1)
@@ -35,49 +17,42 @@ def soft_clip_loss(preds: torch.Tensor, targs: torch.Tensor, temp: float) -> tor
     loss2 = -(brain_clip.T.log_softmax(dim=-1) * soft).sum(dim=-1).mean()
     return (loss1 + loss2) / 2
 
-
 @dataclass
 class TokenStep1Config:
     token_len: int = 256
-    token_dim: int = 1664          # bigG token dim (decoder context_dim)
+    token_dim: int = 1664
     brain_dim: int = 1024
     n_brain_tokens: int = 64
-    # backbone trunk
+
     enc_hidden: int = 2048
     enc_blocks: int = 4
     enc_drop: float = 0.15
-    # reg head (perceiver-style)
+
     reg_depth: int = 2
     reg_heads: int = 8
-    # flow prior DiT
+
     prior_width: int = 1024
     prior_depth: int = 8
     prior_heads: int = 8
     time_dim: int = 256
-    # training
+
     cfg_drop_prob: float = 0.1
     logit_normal_m: float = 0.0
     logit_normal_s: float = 1.0
     lambda_flow: float = 1.0
     lambda_reg: float = 1.0
     lambda_cos: float = 0.5
-    # MindEye2-style contrastive alignment (the ingredient step1b was missing).
-    # Forces brain tokens to land DISCRIMINATIVELY in CLIP space instead of
-    # regressing to the mean token. clip_temp matches MindEye2's softclip_temp.
-    lambda_clip: float = 1.0       # SoftCLIP weight; 0 disables
+
+    lambda_clip: float = 1.0
     clip_temp: float = 0.006
-    # inference
+
     n_steps: int = 50
     cfg_scale: float = 3.0
     solver: str = "heun"
-    cond_source: str = "prior"     # "regression" | "prior" | "blend"
+    cond_source: str = "prior"
     blend_w: float = 0.5
     subjects: list[int] = field(default_factory=lambda: [1])
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Attention primitives (SDPA -> flash/mem-efficient kernels automatically)
-# ──────────────────────────────────────────────────────────────────────────────
 class SelfAttn(nn.Module):
     def __init__(self, dim, heads):
         super().__init__()
@@ -92,9 +67,7 @@ class SelfAttn(nn.Module):
         o = F.scaled_dot_product_attention(rsh(q), rsh(k), rsh(v))
         return self.proj(o.transpose(1, 2).reshape(B, L, C))
 
-
 class CrossAttn(nn.Module):
-    """Pre-norm residual cross-attention from x to context tokens."""
     def __init__(self, dim, ctx_dim, heads):
         super().__init__()
         self.h = heads; self.dh = dim // heads
@@ -112,10 +85,6 @@ class CrossAttn(nn.Module):
         o = F.scaled_dot_product_attention(rsh(q, L), rsh(k, ctx.shape[1]), rsh(v, ctx.shape[1]))
         return x + self.proj(o.transpose(1, 2).reshape(B, L, C))
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Backbone (shared trunk -> brain tokens) + perceiver regression head
-# ──────────────────────────────────────────────────────────────────────────────
 class TokenBackbone(nn.Module):
     def __init__(self, cfg: TokenStep1Config, voxels_per_subject: dict[int, int]):
         super().__init__()
@@ -136,11 +105,9 @@ class TokenBackbone(nn.Module):
         x = self.stem(x)
         for b in self.blocks:
             x = b(x)
-        return self.to_brain(x)                  # (B, K, brain_dim)
-
+        return self.to_brain(x)
 
 class TokenRegHead(nn.Module):
-    """Learned queries cross-attend brain tokens -> token-grid point estimate."""
     def __init__(self, cfg: TokenStep1Config):
         super().__init__()
         d = cfg.brain_dim
@@ -157,18 +124,14 @@ class TokenRegHead(nn.Module):
         for cr, mlp in zip(self.cross, self.mlps):
             x = cr(x, brain)
             x = x + mlp(x)
-        return self.out(x)                        # (B, token_len, token_dim) standardized
+        return self.out(x)
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Flow prior DiT over the token grid
-# ──────────────────────────────────────────────────────────────────────────────
 class DiTBlock(nn.Module):
     def __init__(self, w, heads, brain_dim, time_dim):
         super().__init__()
         self.n1 = nn.LayerNorm(w, elementwise_affine=False)
         self.attn = SelfAttn(w, heads)
-        self.cross = CrossAttn(w, brain_dim, heads)       # own LN inside
+        self.cross = CrossAttn(w, brain_dim, heads)
         self.n2 = nn.LayerNorm(w, elementwise_affine=False)
         self.mlp = nn.Sequential(nn.Linear(w, w * 4), nn.GELU(), nn.Linear(w * 4, w))
         self.ada = nn.Sequential(nn.SiLU(), nn.Linear(time_dim, 6 * w))
@@ -182,7 +145,6 @@ class DiTBlock(nn.Module):
         h = self.n2(x) * (1 + g2[:, None]) + s2[:, None]
         x = x + gate2[:, None] * self.mlp(h)
         return x
-
 
 class TokenFlowPrior(nn.Module):
     def __init__(self, cfg: TokenStep1Config):
@@ -201,16 +163,12 @@ class TokenFlowPrior(nn.Module):
         self.null_brain = nn.Parameter(torch.zeros(1, cfg.n_brain_tokens, cfg.brain_dim))
 
     def forward(self, xt, t, brain):
-        te = self.time(t)                          # (B, w)
+        te = self.time(t)
         h = self.in_proj(xt) + self.pos
         for blk in self.blocks:
             h = blk(h, te, brain)
-        return self.out(self.out_norm(h))          # velocity (B, L, token_dim)
+        return self.out(self.out_norm(h))
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Top-level model
-# ──────────────────────────────────────────────────────────────────────────────
 class TokenStep1Model(nn.Module):
     def __init__(self, cfg: TokenStep1Config, voxels_per_subject: dict[int, int]):
         super().__init__()
@@ -218,8 +176,7 @@ class TokenStep1Model(nn.Module):
         self.backbone = TokenBackbone(cfg, voxels_per_subject)
         self.reg_head = TokenRegHead(cfg)
         self.prior = TokenFlowPrior(cfg)
-        # Contrastive projector: pooled brain tokens -> CLIP space for SoftCLIP.
-        # Decoupled from reg_head (MindEye2 keeps retrieval/recon heads separate).
+
         self.clip_proj = nn.Sequential(
             nn.LayerNorm(cfg.brain_dim),
             nn.Linear(cfg.brain_dim, cfg.brain_dim), nn.GELU(),
@@ -231,19 +188,15 @@ class TokenStep1Model(nn.Module):
         return torch.sigmoid(z)
 
     def training_step(self, fmri, subject, target_std):
-        """target_std: standardized target tokens (B, L, token_dim)."""
         cfg = self.cfg
         B = fmri.shape[0]; device = fmri.device
         brain = self.backbone(fmri, subject)
 
         reg = self.reg_head(brain)
         loss_reg = F.mse_loss(reg, target_std)
-        # fp32 cosine: its gradient scales as 1/‖reg‖ and is the most likely bf16
-        # overflow source; compute it in fp32 to keep the spike from ever starting.
+
         loss_cos = 1.0 - F.cosine_similarity(reg.float(), target_std.float(), dim=-1).mean()
 
-        # Contrastive alignment (SoftCLIP) on pooled brain proj vs pooled target.
-        # fp32 + L2-norm; this is the MindEye2 retrieval signal step1b lacked.
         if cfg.lambda_clip > 0:
             b = F.normalize(self.clip_proj(brain.mean(dim=1)).float(), dim=-1)
             z = F.normalize(target_std.mean(dim=1).float(), dim=-1)
@@ -295,7 +248,6 @@ class TokenStep1Model(nn.Module):
     @torch.no_grad()
     def predict_tokens(self, fmri, subject, stats, *, n_steps=None, cfg_scale=None,
                        solver=None, cond_source=None):
-        """fMRI -> RAW token grid (B, L, token_dim) for the decoder's crossattn."""
         cfg = self.cfg
         n_steps = n_steps or cfg.n_steps
         cfg_scale = cfg.cfg_scale if cfg_scale is None else cfg_scale

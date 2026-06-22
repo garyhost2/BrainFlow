@@ -5,18 +5,10 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-
 class DecoderUnavailableError(RuntimeError):
-    """Raised when the frozen decoder weights cannot be loaded."""
-
+    pass
 
 class FrozenImageEmbeddingDecoder(nn.Module):
-    """
-    Frozen CLIP-image-embedding -> image decoder wrapper.
-
-    Uses diffusers StableUnCLIP image-variation pipeline and keeps all weights frozen.
-    Loading is lazy so importing this module never triggers network access.
-    """
 
     def __init__(
         self,
@@ -36,7 +28,7 @@ class FrozenImageEmbeddingDecoder(nn.Module):
             return self._pipe
         try:
             from diffusers import StableUnCLIPImg2ImgPipeline
-        except Exception as e:  # pragma: no cover - dependency/runtime-specific
+        except Exception as e:
             raise DecoderUnavailableError(
                 "FrozenImageEmbeddingDecoder requires diffusers with "
                 "StableUnCLIPImg2ImgPipeline available."
@@ -80,8 +72,7 @@ class FrozenImageEmbeddingDecoder(nn.Module):
         if clip_image_embedding is None:
             if clip_patch_tokens is None:
                 raise ValueError("Either clip_image_embedding or clip_patch_tokens must be provided.")
-            # Stable-diffusion-2-1-unclip accepts global image embeddings only.
-            # Fallback for patch mode: mean-pool real ViT-L/14 patch positions (196).
+
             clip_image_embedding = clip_patch_tokens[:, :196].mean(dim=1)
 
         pipe = self._load_pipe()

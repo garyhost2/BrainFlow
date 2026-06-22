@@ -1,4 +1,3 @@
-"""Inference: load checkpoint, render qualitative grid, sweep CFG and NFE."""
 from __future__ import annotations
 import os, sys, gc, time, argparse
 from pathlib import Path
@@ -17,7 +16,6 @@ from brainflow.metrics import pixel_correlation, ssim_pytorch
 
 load_dotenv()
 
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", type=str, default=None,
@@ -34,7 +32,6 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Use the unsharded eval_loader so we always evaluate the full test set
     train_loader, test_loader, eval_loader, _, voxels = build_dataloaders(cfg)
     test_ds = test_loader.dataset
 
@@ -77,14 +74,13 @@ def main():
                                  color="green" if pc > 0.15 else "red")
             axes[2, i].imshow(np.abs(gt - pr), cmap="hot", vmin=0, vmax=0.5)
             axes[2, i].axis("off")
-            # Do NOT call torch.cuda.empty_cache() here — forces device sync each iteration
+
     plt.tight_layout()
     out_png = cfg.output_dir / f"{args.out_prefix}.png"
     plt.savefig(out_png, bbox_inches="tight", dpi=200)
     print(f"mean PC={np.mean(pcs):.4f} ± {np.std(pcs):.4f} | best={np.max(pcs):.4f}")
     print(f"Saved: {out_png}")
 
-    # CFG sweep — use cfg.ode_steps (not hardcoded 20), iterate full eval_loader
     print("\nCFG sweep:")
     for s in [0.0, 1.0, 1.5, 2.0, 3.0, 5.0]:
         pcs2, sss2 = [], []
@@ -108,7 +104,6 @@ def main():
         print(f"  CFG={s:.1f} | PC={np.mean(pcs2):.3f} SSIM={np.mean(sss2):.3f} "
               f"| {ms_per_sample:.1f}ms/sample")
 
-    # NFE sweep — use args.cfg_scale (or cfg.cfg_scale), iterate full eval_loader
     nfe_cfg_scale = args.cfg_scale if args.cfg_scale is not None else cfg.cfg_scale
     print(f"\nNFE sweep (cfg_scale={nfe_cfg_scale:.1f}):")
     for nfe in [1, 2, 3, 5, 10, 20, 50]:
@@ -125,9 +120,8 @@ def main():
                 pi = vae.decode(pl)
                 pcs3.append(pixel_correlation(pi, images.to(device)))
                 sss3.append(ssim_pytorch(pi.cpu(), images))
-        # Report actual NFE (midpoint = 1 NFE/step, heun = 2 NFE/step)
-        print(f"  NFE={nfe:3d} | PC={np.mean(pcs3):.3f} SSIM={np.mean(sss3):.3f}")
 
+        print(f"  NFE={nfe:3d} | PC={np.mean(pcs3):.3f} SSIM={np.mean(sss3):.3f}")
 
 if __name__ == "__main__":
     main()

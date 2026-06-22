@@ -1,9 +1,5 @@
 #!/bin/bash -l
-# ─────────────────────────────────────────────────────────────────────────────
-# BrainFlow MC-XL on V100 32GB (2 GPUs, falls back from 4 if unavailable).
-# Bigger encoder + bigger CLIP prior; effective batch ≈ 96.
-#   Submit:    sbatch slurm/train_mc_xl_v100_32gb.sbatch
-# ─────────────────────────────────────────────────────────────────────────────
+
 #SBATCH -J brainflow_mc_xl_v100_32
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
@@ -51,8 +47,6 @@ export EXPERIMENT_NAME=mc_xl_v100_32
 export PERCEP_LOSS=lpips
 export LAMBDA_PERCEP=0.10
 
-# Balanced XL: modest encoder, larger CLIP prior (DiT itself is fixed at 75M)
-# Previous config (4096x8 enc) = 1.2B encoder params -> OOM at batch=24 on 32GB
 export ENC_HIDDEN=2048
 export ENC_BLOCKS=6
 
@@ -61,7 +55,6 @@ export PRIOR_BLOCKS=8
 export LAMBDA_PRIOR=0.4
 export PRIOR_ODE_STEPS=20
 
-# Effective batch = 16 * 2 GPUs * 3 = 96
 export BATCH_SIZE_PER_GPU=16
 export GRAD_ACCUM=3
 export DISABLE_COMPILE=1

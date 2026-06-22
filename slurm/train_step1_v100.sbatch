@@ -1,10 +1,5 @@
 #!/bin/bash -l
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 1 — fMRI -> ViT-H/14 embedding -> SD-2.1-unCLIP (diffusers).
-# Single GPU. Validates the "predict embedding, let a pretrained decoder render"
-# approach cheaply.  Runs in the existing `brainflow` conda env.
-#   Submit:  sbatch slurm/train_step1_v100.sbatch
-# ─────────────────────────────────────────────────────────────────────────────
+
 #SBATCH -J step1
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
@@ -30,14 +25,12 @@ cd "${REPO_DIR}"
 mkdir -p logs outputs
 [ -f "${REPO_DIR}/.env" ] && { set -a; source "${REPO_DIR}/.env"; set +a; }
 
-# transformers is needed for the unCLIP image_encoder (usually pulled in by diffusers)
 python -c "import transformers" 2>/dev/null || pip install --quiet transformers
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 echo "Node: $(hostname)"; nvidia-smi || true
 
-# V100 lacks bf16 perf of A100 but supports it; batch sized for 32GB.
 python -m scripts.train_step1 \
     --data-dir ./mindeyev2_cache \
     --subjects 1 \

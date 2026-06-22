@@ -1,5 +1,5 @@
 #!/bin/bash -l
-# Inference on a trained checkpoint — single GPU.
+
 #SBATCH -J brainflow_v5_infer
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err

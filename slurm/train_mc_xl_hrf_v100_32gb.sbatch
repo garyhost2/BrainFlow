@@ -1,10 +1,5 @@
 #!/bin/bash -l
-# ─────────────────────────────────────────────────────────────────────────────
-# BrainFlow MC-XL with HRF method on V100 32GB (2 GPUs).
-# HRF gave the best *visual* results (mb_hrf_viz.png) despite lower PC.
-# Scale up: bigger fMRI encoder + bigger UNet + more tokens.
-#   Submit:    sbatch slurm/train_mc_xl_hrf_v100_32gb.sbatch
-# ─────────────────────────────────────────────────────────────────────────────
+
 #SBATCH -J brainflow_mc_xl_hrf_32
 #SBATCH -o %x_%j.out
 #SBATCH -e %x_%j.err
@@ -52,15 +47,12 @@ export EXPERIMENT_NAME=mc_xl_hrf_v100_32
 export PERCEP_LOSS=lpips
 export LAMBDA_PERCEP=0.10
 
-# Modest encoder (4096x8 = 1.2B params -> OOM). Scale UNet decoder + tokens instead.
 export ENC_HIDDEN=2048
 export ENC_BLOCKS=6
 
-# XL UNet (decoder) + more CLIP tokens for richer conditioning
 export N_TOKENS=64
 export UNET_BASE_CH=320
 
-# Effective batch ≈ 96 (16 * 2 GPUs * 3 accum)
 export BATCH_SIZE_PER_GPU=16
 export GRAD_ACCUM=3
 export DISABLE_COMPILE=1
