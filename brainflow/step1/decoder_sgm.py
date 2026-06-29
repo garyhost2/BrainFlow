@@ -81,18 +81,24 @@ class SDXLUnCLIPDecoder:
         }
         out = engine.conditioner(batch)
         self.vector_suffix = out["vector"].to(device)
+        V = self.vector_suffix.shape[-1]
         lo, hi = self.cls_slot
-        print(f"✓ SDXL-unCLIP ready. vector_suffix {tuple(self.vector_suffix.shape)} "
-              f"| c_cls -> vector[{lo}:{hi}]")
-        if hi > self.vector_suffix.shape[-1]:
-            raise ValueError(
-                f"cls_vector_slot {self.cls_slot} exceeds vector width "
-                f"{self.vector_suffix.shape[-1]}; check the unclip6 conditioner layout.")
+        # MindEye2's unclip6 carries ALL image semantics in the 256x1664 crossattn
+        # tokens; its `vector` is size/crop micro-conditioning ONLY (no pooled-image
+        # slot). Only inject c_cls if the requested slot actually fits the vector.
+        self.cls_in_vector = self.cls_slot is not None and hi <= V
+        if self.cls_in_vector:
+            print(f"✓ SDXL-unCLIP ready. vector {tuple(self.vector_suffix.shape)} "
+                  f"| c_cls -> vector[{lo}:{hi}]")
+        else:
+            print(f"✓ SDXL-unCLIP ready. vector width {V}: NO pooled-CLS slot "
+                  f"(micro-conditioning only). Image semantics flow through the "
+                  f"256x1664 crossattn tokens; c_cls is NOT routed to the decoder.")
 
     def _vector(self, cls_emb_row):
-        """Build the ``vector`` slot, injecting c_cls into the pooled positions."""
+        """Build the ``vector`` slot; inject c_cls only if this decoder has a slot."""
         vec = self.vector_suffix.clone()
-        if cls_emb_row is not None:
+        if cls_emb_row is not None and self.cls_in_vector:
             lo, hi = self.cls_slot
             vec[:, lo:hi] = cls_emb_row.to(vec.device, vec.dtype).reshape(1, hi - lo)
         return vec

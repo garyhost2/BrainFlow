@@ -39,8 +39,8 @@ def main():
     decoder = SDXLUnCLIPDecoder(device, args.mindeye_src, args.ckpt_path,
                                 cls_vector_slot=tuple(args.cls_vector_slot))
 
-    print("▶ Decoding with TRUE pooled CLS in the vector slot…")
-    recon = decoder.decode(tokens, cls)
+    print("▶ Decoding from GT tokens (unclip6 conditions on the 256x1664 crossattn)…")
+    recon = decoder.decode(tokens, cls)   # cls injected only if the decoder has a slot
 
     gt = (imgs.float() / 255.0).clamp(0, 1)
     if gt.shape[-1] != recon.shape[-1]:
