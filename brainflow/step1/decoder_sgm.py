@@ -1,3 +1,24 @@
+"""Frozen MindEye2 ``unclip6`` SDXL-unCLIP decoder with structured conditioning.
+
+The decoder exposes two conditioning slots (paper Stage 5):
+
+  * ``crossattn`` -- the reassembled raw patch tokens X in R^{256 x 1664};
+  * ``vector``    -- the pooled image-embedding slot, into which we route the
+    predicted global direction ``c_cls`` (concatenated with the size/crop
+    micro-conditioning).
+
+Routing ``c_cls`` into the pooled slot -- instead of the content-free
+``vector_suffix`` obtained from a dummy image -- is the paper's "Change 5": it
+supplies the global semantic conditioning the unCLIP model was trained on, which
+the patch tokens alone do not provide.
+
+The exact byte layout of ``vector`` is defined by the vendored sgm conditioner
+(available only on the cluster). We therefore expose ``cls_vector_slot`` so the
+1280-d pooled embedding can be placed correctly; the default ``(0, 1280)`` writes
+it to the leading positions, which is the SDXL-unCLIP convention (pooled image
+embedding first, then the size/crop Fourier features).
+"""
+
 from __future__ import annotations
 
 import sys
@@ -6,11 +27,14 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
+
 class SDXLUnCLIPDecoder:
-    def __init__(self, device, mindeye_src, ckpt_path, num_steps=38, out_size=256):
+    def __init__(self, device, mindeye_src, ckpt_path, num_steps=38, out_size=256,
+                 cls_vector_slot=(0, 1280)):
         self.device = device
         self.num_steps = num_steps
         self.out_size = out_size
+        self.cls_slot = tuple(cls_vector_slot)
         mindeye_src = Path(mindeye_src)
         gm = mindeye_src / "generative_models"
         for p in (str(mindeye_src), str(gm)):
@@ -57,10 +81,24 @@ class SDXLUnCLIPDecoder:
         }
         out = engine.conditioner(batch)
         self.vector_suffix = out["vector"].to(device)
-        print(f"✓ SDXL-unCLIP ready. vector_suffix {tuple(self.vector_suffix.shape)}")
+        lo, hi = self.cls_slot
+        print(f"✓ SDXL-unCLIP ready. vector_suffix {tuple(self.vector_suffix.shape)} "
+              f"| c_cls -> vector[{lo}:{hi}]")
+        if hi > self.vector_suffix.shape[-1]:
+            raise ValueError(
+                f"cls_vector_slot {self.cls_slot} exceeds vector width "
+                f"{self.vector_suffix.shape[-1]}; check the unclip6 conditioner layout.")
+
+    def _vector(self, cls_emb_row):
+        """Build the ``vector`` slot, injecting c_cls into the pooled positions."""
+        vec = self.vector_suffix.clone()
+        if cls_emb_row is not None:
+            lo, hi = self.cls_slot
+            vec[:, lo:hi] = cls_emb_row.to(vec.device, vec.dtype).reshape(1, hi - lo)
+        return vec
 
     @torch.no_grad()
-    def _recon_one(self, x, num_samples=1):
+    def _recon_one(self, x, vector, num_samples=1):
         eng = self.engine
         device = self.device
         append_dims = self._append_dims
@@ -72,10 +110,10 @@ class SDXLUnCLIPDecoder:
             z = torch.randn(num_samples, 4, 96, 96, device=device)
             tokens = x
             c = {"crossattn": tokens.repeat(num_samples, 1, 1),
-                 "vector": self.vector_suffix.repeat(num_samples, 1)}
+                 "vector": vector.repeat(num_samples, 1)}
             rand_tokens = torch.randn_like(x)
             uc = {"crossattn": rand_tokens.repeat(num_samples, 1, 1),
-                  "vector": self.vector_suffix.repeat(num_samples, 1)}
+                  "vector": vector.repeat(num_samples, 1)}
             for k in c:
                 c[k] = c[k][:num_samples].to(device)
                 uc[k] = uc[k][:num_samples].to(device)
@@ -98,10 +136,17 @@ class SDXLUnCLIPDecoder:
         return samples
 
     @torch.no_grad()
-    def decode(self, tokens_raw: torch.Tensor) -> torch.Tensor:
+    def decode(self, tokens_raw: torch.Tensor, cls_emb: torch.Tensor | None = None) -> torch.Tensor:
+        """Decode raw patch tokens, optionally with predicted CLS in the pooled slot.
+
+        ``tokens_raw``: (B, 256, 1664) reassembled raw tokens.
+        ``cls_emb``:    (B, 1280) predicted global directions, or None to fall
+                        back to the (content-free) dummy suffix.
+        """
         imgs = []
         for i in range(tokens_raw.shape[0]):
-            s = self._recon_one(tokens_raw[i:i + 1].to(self.device), num_samples=1)
+            vec = self._vector(None if cls_emb is None else cls_emb[i:i + 1])
+            s = self._recon_one(tokens_raw[i:i + 1].to(self.device), vec, num_samples=1)
             if self.out_size and self.out_size != s.shape[-1]:
                 s = F.interpolate(s, self.out_size, mode="bilinear", align_corners=False)
             imgs.append(s.float().cpu())

@@ -34,9 +34,23 @@ def parse_args():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--enc-hidden", type=int, default=2048,
                     help="backbone width; 4096 matches MindEye2 capacity")
-    ap.add_argument("--lambda-clip", type=float, default=1.0,
+    ap.add_argument("--lambda-clip", type=float, default=0.033,
                     help="SoftCLIP contrastive weight (0 disables)")
     ap.add_argument("--clip-temp", type=float, default=0.006)
+    ap.add_argument("--geometry", type=str, default="sphere",
+                    choices=["euclidean", "sphere"])
+    ap.add_argument("--two-head", dest="two_head", action="store_true", default=True,
+                    help="structured CLS + patch factorisation (paper default)")
+    ap.add_argument("--no-two-head", dest="two_head", action="store_false",
+                    help="patch-only ablation (no global CLS head)")
+    ap.add_argument("--lambda-rcfm", type=float, default=1.0,
+                    help="global CLS flow-matching weight")
+    ap.add_argument("--cls-cfg-scale", type=float, default=3.0)
+    ap.add_argument("--solver", type=str, default="heun", choices=["euler", "heun"])
+    ap.add_argument("--uniform-t-prob", type=float, default=0.1)
+    ap.add_argument("--lambda-radius", type=float, default=1.0)
+    ap.add_argument("--val-frac", type=float, default=0.1,
+                    help="train fraction held out for leakage-free selection (0 disables)")
     ap.add_argument("--weight-decay", type=float, default=0.02)
     ap.add_argument("--warmup-epochs", type=int, default=5)
     ap.add_argument("--min-lr", type=float, default=1e-6)
@@ -47,6 +61,8 @@ def parse_args():
     ap.add_argument("--eval-freq", type=int, default=5)
     ap.add_argument("--decode-eval", action="store_true")
     ap.add_argument("--decode-n", type=int, default=16)
+    ap.add_argument("--cls-vector-slot", type=int, nargs=2, default=[0, 1280],
+                    help="[lo hi] positions in the unCLIP 'vector' slot to fill with c_cls")
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--out", type=str, default="outputs/step1b")
     ap.add_argument("--seed", type=int, default=0)
@@ -65,7 +81,7 @@ def eval_token_cosine(model, loader, stats, device):
     for batch in loader:
         fmri = batch["fmri"].to(device, non_blocking=True)
         tgt = batch["emb"].to(device, non_blocking=True)
-        pred = model.predict_tokens(fmri, batch["subject"], stats, cond_source="regression")
+        pred, _ = model.predict_tokens(fmri, batch["subject"], stats, cond_source="regression")
 
         c = F.cosine_similarity(pred, tgt, dim=-1).mean(dim=-1)
         cos_sum += c.sum().item(); n += fmri.shape[0]
@@ -85,11 +101,18 @@ def main():
         hf_cache=hf_cache)
     stats: TargetStats = targets["_stats"]
     bundle = build_step1_loaders(tensors, targets, args.subjects, args.batch_size,
-                                 num_workers=args.num_workers, fmri_noise_std=args.fmri_noise_std)
+                                 num_workers=args.num_workers, fmri_noise_std=args.fmri_noise_std,
+                                 val_frac=args.val_frac, seed=args.seed)
 
     cfg = TokenStep1Config(subjects=args.subjects, enc_hidden=args.enc_hidden,
-                           lambda_clip=args.lambda_clip, clip_temp=args.clip_temp)
+                           lambda_clip=args.lambda_clip, clip_temp=args.clip_temp,
+                           geometry=args.geometry, uniform_t_prob=args.uniform_t_prob,
+                           lambda_radius=args.lambda_radius, two_head=args.two_head,
+                           lambda_rcfm=args.lambda_rcfm, cls_cfg_scale=args.cls_cfg_scale,
+                           solver=args.solver)
     model = TokenStep1Model(cfg, bundle.voxels).to(device)
+    if cfg.geometry == "sphere" and cfg.center_tokens:
+        model.set_target_mean(stats.mean)
     if args.compile:
         model = torch.compile(model)
     ema = EMA(model, decay=args.ema_decay)
@@ -103,7 +126,8 @@ def main():
     decoder = clip_metric = None
     if args.decode_eval:
         from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder
-        decoder = SDXLUnCLIPDecoder(device, args.mindeye_src, args.ckpt_path)
+        decoder = SDXLUnCLIPDecoder(device, args.mindeye_src, args.ckpt_path,
+                                    cls_vector_slot=tuple(args.cls_vector_slot))
         clip_metric = CLIPMetric(device, hf_cache=hf_cache)
 
     best_cos = -1.0
@@ -121,9 +145,13 @@ def main():
             fmri = batch["fmri"].to(device, non_blocking=True)
             tgt_raw = batch["emb"].to(device, non_blocking=True)
             tgt_std = stats.standardize(tgt_raw)
+            tgt_cls = batch.get("cls")
+            if tgt_cls is not None:
+                tgt_cls = tgt_cls.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                ld = model.training_step(fmri, batch["subject"], tgt_std)
+                ld = model.training_step(fmri, batch["subject"], tgt_std,
+                                         target_raw=tgt_raw, target_cls=tgt_cls)
                 loss = ld["loss"]
             loss.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
@@ -134,16 +162,22 @@ def main():
                 nan_skips += 1
             step += 1
             if step % 50 == 0:
-                pbar.set_postfix(flow=f"{ld['flow']:.3f}", reg=f"{ld['reg']:.3f}",
-                                 cos=f"{ld['cos']:.3f}", clip=f"{ld['clip']:.3f}",
-                                 lr=f"{lr:.1e}", skip=nan_skips)
+                pbar.set_postfix(flow=f"{ld['flow']:.3f}", rcfm=f"{ld['rcfm']:.3f}",
+                                 reg=f"{ld['reg']:.3f}", cos=f"{ld['cos']:.3f}",
+                                 clip=f"{ld['clip']:.3f}", lr=f"{lr:.1e}", skip=nan_skips)
 
         if epoch % args.eval_freq == 0 or epoch == args.epochs:
             ema.store(model); ema.copy_to(model)
-            cos = eval_token_cosine(model, bundle.eval, stats, device)
-            msg = f"Ep{epoch:4d} | token_cos={cos:.4f}"
+            # Honest selection: choose on a leakage-free split; TEST is report-only.
+            sel_loader = bundle.val if bundle.val is not None else bundle.eval
+            sel_name = "val" if bundle.val is not None else "test"
+            if bundle.val is None and epoch == args.eval_freq:
+                print("[warn] no validation split (--val-frac 0); selecting on TEST is leaky.")
+            sel_cos = eval_token_cosine(model, sel_loader, stats, device)
+            msg = f"Ep{epoch:4d} | {sel_name}_cos={sel_cos:.4f}"
+            if bundle.val is not None:
+                msg += f" test_cos={eval_token_cosine(model, bundle.eval, stats, device):.4f}"
             if args.decode_eval:
-
                 n_subj = max(1, len(args.subjects))
                 per_subj = max(1, args.decode_n // n_subj)
                 preds, gts, got = [], [], {}
@@ -154,16 +188,16 @@ def main():
                             continue
                         take = min(batch["fmri"].shape[0], per_subj - got.get(s, 0))
                         fmri = batch["fmri"][:take].to(device, non_blocking=True)
-                        tok = model.predict_tokens(fmri, batch["subject"], stats,
-                                                   cond_source=cfg.cond_source)
-                        preds.append(decoder.decode(tok)); gts.append(batch["image"][:take])
+                        tok, cls_hat = model.predict_tokens(fmri, batch["subject"], stats,
+                                                            cond_source=cfg.cond_source)
+                        preds.append(decoder.decode(tok, cls_hat)); gts.append(batch["image"][:take])
                         got[s] = got.get(s, 0) + take
                         if len(got) == n_subj and all(v >= per_subj for v in got.values()):
                             break
                 pred = torch.cat(preds); gt = torch.cat(gts)
                 im = {"PixCorr": pixcorr(pred, gt), "SSIM": ssim(pred, gt)}
                 im.update(clip_metric.score(pred, gt))
-                msg += (f" | PixCorr={im['PixCorr']:.3f} SSIM={im['SSIM']:.3f} "
+                msg += (f" | [test] PixCorr={im['PixCorr']:.3f} SSIM={im['SSIM']:.3f} "
                         f"CLIP_cos={im['CLIP_cos']:.3f} CLIP_2way={im['CLIP_2way']:.3f}")
                 _save_grid(pred, gt, out_dir / f"recon_ep{epoch}.png")
             ema.restore(model)
@@ -176,14 +210,15 @@ def main():
                     "subjects": args.subjects, "epoch": epoch}
             torch.save(ckpt, out_dir / "last.pt")
 
-            if args.decode_eval and im["CLIP_2way"] > best_clip:
+            if sel_cos > best_cos:
+                best_cos = sel_cos
+                torch.save(ckpt, out_dir / "best.pt")
+            # Legacy CLIP-2way checkpoint only when there is no honest val split.
+            if bundle.val is None and args.decode_eval and im["CLIP_2way"] > best_clip:
                 best_clip = im["CLIP_2way"]
                 torch.save(ckpt, out_dir / "best_clip2way.pt")
-            if cos > best_cos:
-                best_cos = cos
-                torch.save(ckpt, out_dir / "best_cos.pt")
 
-    print(f"Done. best token_cos={best_cos:.4f}, best CLIP_2way={best_clip:.4f}. "
+    print(f"Done. best {('val' if bundle.val is not None else 'test')}_cos={best_cos:.4f}. "
           f"Checkpoints in {out_dir}")
 
 def _save_grid(pred, gt, path, n=8):

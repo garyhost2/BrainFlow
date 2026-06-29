@@ -1,6 +1,28 @@
+"""BrainFlow step-1 token model: the two-head, oblique-manifold pipeline.
+
+This is the concrete realisation of ``docs/paper`` (sections 7-9). From an fMRI
+vector we encode 64 brain tokens ``c`` and model the structured bigG target with
+*two* Riemannian flow-matching heads:
+
+  * a **global CLS prior** -- RCFM on the single sphere S^{dcls-1} (dcls=1280),
+    a Perceiver-style cross-attention head that transports a uniform base to the
+    conditional law p(c_cls | c) (paper Stage 2b);
+  * a **patch prior** -- a DiT that transports a uniform base on the oblique
+    manifold (S^{d-1})^N (d=1664, N=256) to p(X | c, c_cls), conditioned on the
+    sampled global direction so global semantics steer local detail (Stage 3).
+
+The token magnitudes are peeled into a light radius side-model and recombined by
+the polar map X_i = mu + r_i z_i (Stage 4). The predicted (c_cls, X) feed the
+frozen unCLIP decoder (Stage 5). A SoftCLIP contrastive branch (Stage 6) aligns
+the pooled brain vector with the true CLS direction.
+
+The default configuration is the paper's spherical two-head design. The
+``geometry="euclidean"`` and ``two_head=False`` switches recover the flat
+rectified-flow / patch-only baselines used in the paper's ablations A and D.
+"""
+
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 import torch
@@ -8,8 +30,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .model import ResMLP, SinusoidalTime
+from .sphere import (random_sphere, project_tangent, exp_map,
+                     slerp, slerp_velocity, polar_encode, polar_decode)
+
 
 def soft_clip_loss(preds: torch.Tensor, targs: torch.Tensor, temp: float) -> torch.Tensor:
+    """Symmetrised SoftCLIP / InfoNCE on the sphere (paper eq. softclip-loss)."""
     clip_clip = (targs @ targs.T) / temp
     brain_clip = (preds @ targs.T) / temp
     soft = clip_clip.softmax(dim=-1)
@@ -17,42 +43,71 @@ def soft_clip_loss(preds: torch.Tensor, targs: torch.Tensor, temp: float) -> tor
     loss2 = -(brain_clip.T.log_softmax(dim=-1) * soft).sum(dim=-1).mean()
     return (loss1 + loss2) / 2
 
+
 @dataclass
 class TokenStep1Config:
-    token_len: int = 256
-    token_dim: int = 1664
-    brain_dim: int = 1024
-    n_brain_tokens: int = 64
+    # --- target / conditioning dims -------------------------------------
+    token_len: int = 256          # N patch tokens
+    token_dim: int = 1664         # d  (penultimate bigG token width)
+    cls_dim: int = 1280           # dcls (pooled bigG image-embedding width)
+    brain_dim: int = 1024         # brain-token width
+    n_brain_tokens: int = 64      # number of brain tokens
 
+    # --- encoder --------------------------------------------------------
     enc_hidden: int = 2048
     enc_blocks: int = 4
     enc_drop: float = 0.15
 
+    # --- regression anchor head -----------------------------------------
     reg_depth: int = 2
     reg_heads: int = 8
 
+    # --- patch DiT prior ------------------------------------------------
     prior_width: int = 1024
     prior_depth: int = 8
     prior_heads: int = 8
     time_dim: int = 256
 
+    # --- global CLS (RCFM) prior ----------------------------------------
+    two_head: bool = True
+    cls_width: int = 512
+    cls_depth: int = 4
+    cls_heads: int = 8
+    cls_cfg_scale: float = 3.0
+
+    # --- flow-matching schedule / CFG -----------------------------------
     cfg_drop_prob: float = 0.1
     logit_normal_m: float = 0.0
     logit_normal_s: float = 1.0
-    lambda_flow: float = 1.0
-    lambda_reg: float = 1.0
-    lambda_cos: float = 0.5
+    uniform_t_prob: float = 0.1   # mass at the endpoints for sampler robustness
+    t_min: float = 0.02
+    t_max: float = 0.98
 
-    lambda_clip: float = 1.0
+    # --- loss weights ---------------------------------------------------
+    lambda_flow: float = 1.0      # patch flow
+    lambda_rcfm: float = 1.0      # global CLS flow
+    lambda_reg: float = 1.0       # regression anchor
+    lambda_cos: float = 0.5       # per-token angular fidelity
+    lambda_radius: float = 1.0    # radius side-model
+    lambda_clip: float = 0.033    # SoftCLIP contrastive (blueprint-tuned)
     clip_temp: float = 0.006
 
+    # --- sampling -------------------------------------------------------
     n_steps: int = 50
     cfg_scale: float = 3.0
-    solver: str = "heun"
-    cond_source: str = "prior"
+    solver: str = "heun"          # geodesic Heun (sphere) / Heun (euclidean)
+    cond_source: str = "prior"    # prior | regression | blend
     blend_w: float = 0.5
+
+    # --- geometry / centering -------------------------------------------
+    geometry: str = "sphere"      # sphere (paper) | euclidean (ablation A)
+    center_tokens: bool = True
     subjects: list[int] = field(default_factory=lambda: [1])
 
+
+# --------------------------------------------------------------------------
+#  Attention primitives
+# --------------------------------------------------------------------------
 class SelfAttn(nn.Module):
     def __init__(self, dim, heads):
         super().__init__()
@@ -67,7 +122,10 @@ class SelfAttn(nn.Module):
         o = F.scaled_dot_product_attention(rsh(q), rsh(k), rsh(v))
         return self.proj(o.transpose(1, 2).reshape(B, L, C))
 
+
 class CrossAttn(nn.Module):
+    """Pre-norm cross-attention with a residual add (query attends to ``ctx``)."""
+
     def __init__(self, dim, ctx_dim, heads):
         super().__init__()
         self.h = heads; self.dh = dim // heads
@@ -79,12 +137,17 @@ class CrossAttn(nn.Module):
 
     def forward(self, x, ctx):
         B, L, C = x.shape
+        M = ctx.shape[1]
         xn = self.norm(x)
         q = self.to_q(xn); k = self.to_k(ctx); v = self.to_v(ctx)
         def rsh(t, n): return t.view(B, n, self.h, self.dh).transpose(1, 2)
-        o = F.scaled_dot_product_attention(rsh(q, L), rsh(k, ctx.shape[1]), rsh(v, ctx.shape[1]))
+        o = F.scaled_dot_product_attention(rsh(q, L), rsh(k, M), rsh(v, M))
         return x + self.proj(o.transpose(1, 2).reshape(B, L, C))
 
+
+# --------------------------------------------------------------------------
+#  Brain encoder  E_phi : R^{V_s} -> R^{64 x 1024}
+# --------------------------------------------------------------------------
 class TokenBackbone(nn.Module):
     def __init__(self, cfg: TokenStep1Config, voxels_per_subject: dict[int, int]):
         super().__init__()
@@ -107,7 +170,10 @@ class TokenBackbone(nn.Module):
             x = b(x)
         return self.to_brain(x)
 
+
 class TokenRegHead(nn.Module):
+    """Low-variance point-estimate anchor: cross-attention queries -> tokens."""
+
     def __init__(self, cfg: TokenStep1Config):
         super().__init__()
         d = cfg.brain_dim
@@ -126,6 +192,10 @@ class TokenRegHead(nn.Module):
             x = x + mlp(x)
         return self.out(x)
 
+
+# --------------------------------------------------------------------------
+#  Patch prior (DiT) -- velocity field on the oblique manifold
+# --------------------------------------------------------------------------
 class DiTBlock(nn.Module):
     def __init__(self, w, heads, brain_dim, time_dim):
         super().__init__()
@@ -146,7 +216,10 @@ class DiTBlock(nn.Module):
         x = x + gate2[:, None] * self.mlp(h)
         return x
 
+
 class TokenFlowPrior(nn.Module):
+    """Velocity field v_theta(t, Z | c, c_cls) over the 256 token directions."""
+
     def __init__(self, cfg: TokenStep1Config):
         super().__init__()
         self.cfg = cfg
@@ -162,13 +235,84 @@ class TokenFlowPrior(nn.Module):
         nn.init.zeros_(self.out.weight); nn.init.zeros_(self.out.bias)
         self.null_brain = nn.Parameter(torch.zeros(1, cfg.n_brain_tokens, cfg.brain_dim))
 
-    def forward(self, xt, t, brain):
+        # --- structured conditioning on the global direction c_cls --------
+        if cfg.two_head:
+            self.cls_kv = nn.Linear(cfg.cls_dim, cfg.brain_dim)    # extra K/V token
+            self.cls_ada = nn.Linear(cfg.cls_dim, w)              # AdaLN modulation
+            nn.init.zeros_(self.cls_ada.weight); nn.init.zeros_(self.cls_ada.bias)
+            self.null_cls = nn.Parameter(torch.zeros(1, cfg.cls_dim))
+
+    def forward(self, xt, t, brain, cls_emb=None):
         te = self.time(t)
+        ctx = brain
+        if self.cfg.two_head and cls_emb is not None:
+            te = te + self.cls_ada(cls_emb)
+            ctx = torch.cat([brain, self.cls_kv(cls_emb).unsqueeze(1)], dim=1)
         h = self.in_proj(xt) + self.pos
         for blk in self.blocks:
-            h = blk(h, te, brain)
+            h = blk(h, te, ctx)
         return self.out(self.out_norm(h))
 
+
+# --------------------------------------------------------------------------
+#  Global CLS prior (Perceiver-style RCFM on S^{dcls-1})
+# --------------------------------------------------------------------------
+class ClsBlock(nn.Module):
+    """AdaLN cross-attention + MLP for a single state query (no self-attention)."""
+
+    def __init__(self, w, heads, ctx_dim, time_dim):
+        super().__init__()
+        self.h = heads; self.dh = w // heads
+        self.n1 = nn.LayerNorm(w, elementwise_affine=False)
+        self.to_q = nn.Linear(w, w, bias=False)
+        self.to_k = nn.Linear(ctx_dim, w, bias=False)
+        self.to_v = nn.Linear(ctx_dim, w, bias=False)
+        self.cproj = nn.Linear(w, w)
+        self.n2 = nn.LayerNorm(w, elementwise_affine=False)
+        self.mlp = nn.Sequential(nn.Linear(w, w * 4), nn.GELU(), nn.Linear(w * 4, w))
+        self.ada = nn.Sequential(nn.SiLU(), nn.Linear(time_dim, 6 * w))
+        nn.init.zeros_(self.ada[-1].weight); nn.init.zeros_(self.ada[-1].bias)
+
+    def forward(self, x, t_emb, ctx):
+        s1, g1, gate1, s2, g2, gate2 = self.ada(t_emb).chunk(6, dim=-1)
+        B, L, C = x.shape; M = ctx.shape[1]
+        h = self.n1(x) * (1 + g1[:, None]) + s1[:, None]
+        q = self.to_q(h); k = self.to_k(ctx); v = self.to_v(ctx)
+        def rsh(t, n): return t.view(B, n, self.h, self.dh).transpose(1, 2)
+        o = F.scaled_dot_product_attention(rsh(q, L), rsh(k, M), rsh(v, M))
+        x = x + gate1[:, None] * self.cproj(o.transpose(1, 2).reshape(B, L, C))
+        h = self.n2(x) * (1 + g2[:, None]) + s2[:, None]
+        x = x + gate2[:, None] * self.mlp(h)
+        return x
+
+
+class ClsFlowPrior(nn.Module):
+    """v_cls(t, c_t | c) on S^{dcls-1}; a single query attends to brain tokens."""
+
+    def __init__(self, cfg: TokenStep1Config):
+        super().__init__()
+        self.cfg = cfg
+        w = cfg.cls_width
+        self.time = SinusoidalTime(cfg.time_dim, w)
+        self.in_proj = nn.Linear(cfg.cls_dim, w)
+        self.blocks = nn.ModuleList([
+            ClsBlock(w, cfg.cls_heads, cfg.brain_dim, w) for _ in range(cfg.cls_depth)])
+        self.out_norm = nn.LayerNorm(w, elementwise_affine=False)
+        self.out = nn.Linear(w, cfg.cls_dim)
+        nn.init.zeros_(self.out.weight); nn.init.zeros_(self.out.bias)
+        self.null_brain = nn.Parameter(torch.zeros(1, cfg.n_brain_tokens, cfg.brain_dim))
+
+    def forward(self, x, t, brain):
+        te = self.time(t)
+        h = self.in_proj(x).unsqueeze(1)
+        for blk in self.blocks:
+            h = blk(h, te, brain)
+        return self.out(self.out_norm(h.squeeze(1)))
+
+
+# --------------------------------------------------------------------------
+#  Assembled model
+# --------------------------------------------------------------------------
 class TokenStep1Model(nn.Module):
     def __init__(self, cfg: TokenStep1Config, voxels_per_subject: dict[int, int]):
         super().__init__()
@@ -176,33 +320,111 @@ class TokenStep1Model(nn.Module):
         self.backbone = TokenBackbone(cfg, voxels_per_subject)
         self.reg_head = TokenRegHead(cfg)
         self.prior = TokenFlowPrior(cfg)
+        self.cls_prior = ClsFlowPrior(cfg) if cfg.two_head else None
 
+        clip_out = cfg.cls_dim if cfg.two_head else cfg.token_dim
         self.clip_proj = nn.Sequential(
             nn.LayerNorm(cfg.brain_dim),
             nn.Linear(cfg.brain_dim, cfg.brain_dim), nn.GELU(),
-            nn.Linear(cfg.brain_dim, cfg.token_dim),
+            nn.Linear(cfg.brain_dim, clip_out),
         )
+        self.radius_head = nn.Sequential(
+            nn.LayerNorm(cfg.brain_dim),
+            nn.Linear(cfg.brain_dim, cfg.brain_dim), nn.GELU(),
+            nn.Linear(cfg.brain_dim, cfg.token_len),
+        )
+        self.register_buffer("tgt_mean", torch.zeros(cfg.token_dim))
 
+    def set_target_mean(self, mean):
+        self.tgt_mean.copy_(mean.to(self.tgt_mean.device, self.tgt_mean.dtype))
+
+    # ---- time sampling (logit-normal + endpoint mass) -------------------
     def _sample_t(self, B, device):
         z = torch.randn(B, device=device) * self.cfg.logit_normal_s + self.cfg.logit_normal_m
-        return torch.sigmoid(z)
+        t = torch.sigmoid(z)
+        if self.cfg.uniform_t_prob > 0:
+            mix = torch.rand(B, device=device) < self.cfg.uniform_t_prob
+            t = torch.where(mix, torch.rand(B, device=device), t)
+        return t
 
-    def training_step(self, fmri, subject, target_std):
+    # ====================================================================
+    #  Training
+    # ====================================================================
+    def training_step(self, fmri, subject, target_std, target_raw=None, target_cls=None):
         cfg = self.cfg
         B = fmri.shape[0]; device = fmri.device
         brain = self.backbone(fmri, subject)
+        cls_dir = None
+        if cfg.two_head and target_cls is not None:
+            cls_dir = F.normalize(target_cls.float(), dim=-1)        # (B, cls_dim)
 
+        out = self._cls_flow_loss(brain, cls_dir, B, device)         # RCFM term
+        if cfg.geometry == "sphere":
+            out |= self._patch_step_sphere(brain, target_raw, cls_dir, B, device)
+        else:
+            out |= self._patch_step_euclidean(brain, target_std, cls_dir, B, device)
+        out |= self._contrastive_loss(brain, target_std, cls_dir, device)
+
+        total = (cfg.lambda_flow * out["flow"] + cfg.lambda_reg * out["reg"]
+                 + cfg.lambda_cos * out["cos"] + cfg.lambda_clip * out["clip"]
+                 + cfg.lambda_rcfm * out["rcfm"])
+        if "radius" in out:
+            total = total + cfg.lambda_radius * out["radius"]
+        out = {k: v.detach() for k, v in out.items()}
+        out["loss"] = total
+        return out
+
+    def _cls_flow_loss(self, brain, cls_dir, B, device):
+        if self.cls_prior is None or cls_dir is None:
+            return {"rcfm": torch.zeros((), device=device)}
+        cfg = self.cfg
+        z0 = random_sphere(cls_dir.shape, device, cls_dir.dtype)
+        t = self._sample_t(B, device)
+        tb = t[:, None]
+        zt = slerp(z0, cls_dir, tb)
+        ut = slerp_velocity(z0, cls_dir, tb)
+        drop = (torch.rand(B, device=device) < cfg.cfg_drop_prob)[:, None, None]
+        brain_in = torch.where(drop, self.cls_prior.null_brain.to(brain.dtype), brain)
+        v = project_tangent(self.cls_prior(zt, t, brain_in).float(), zt)
+        return {"rcfm": F.mse_loss(v, ut)}
+
+    def _patch_cond(self, brain, cls_dir, B, device):
+        """Teacher-forced patch conditioning with per-example CFG dropout."""
+        cfg = self.cfg
+        drop = (torch.rand(B, device=device) < cfg.cfg_drop_prob)
+        brain_in = torch.where(drop[:, None, None], self.prior.null_brain.to(brain.dtype), brain)
+        cls_in = None
+        if cfg.two_head and cls_dir is not None:
+            null_cls = self.prior.null_cls.to(cls_dir.dtype)
+            cls_in = torch.where(drop[:, None], null_cls, cls_dir)
+        return brain_in, cls_in
+
+    def _patch_step_sphere(self, brain, target_raw, cls_dir, B, device):
+        cfg = self.cfg
+        z1, r1 = polar_encode(target_raw.float(), self.tgt_mean.float())
+
+        reg_dir = F.normalize(self.reg_head(brain).float(), dim=-1)
+        loss_reg = F.mse_loss(reg_dir, z1)
+        loss_cos = 1.0 - F.cosine_similarity(reg_dir, z1, dim=-1).mean()
+
+        logr = self.radius_head(brain.mean(dim=1)).float()
+        loss_radius = F.mse_loss(logr, r1.log())
+
+        t = self._sample_t(B, device)
+        tb = t[:, None, None]
+        z0 = random_sphere(z1.shape, device, z1.dtype)
+        zt = slerp(z0, z1, tb)
+        ut = slerp_velocity(z0, z1, tb)
+        brain_in, cls_in = self._patch_cond(brain, cls_dir, B, device)
+        v = project_tangent(self.prior(zt, t, brain_in, cls_in).float(), zt)
+        loss_flow = F.mse_loss(v, ut)
+        return {"flow": loss_flow, "reg": loss_reg, "cos": loss_cos, "radius": loss_radius}
+
+    def _patch_step_euclidean(self, brain, target_std, cls_dir, B, device):
+        cfg = self.cfg
         reg = self.reg_head(brain)
         loss_reg = F.mse_loss(reg, target_std)
-
         loss_cos = 1.0 - F.cosine_similarity(reg.float(), target_std.float(), dim=-1).mean()
-
-        if cfg.lambda_clip > 0:
-            b = F.normalize(self.clip_proj(brain.mean(dim=1)).float(), dim=-1)
-            z = F.normalize(target_std.mean(dim=1).float(), dim=-1)
-            loss_clip = soft_clip_loss(b, z, cfg.clip_temp)
-        else:
-            loss_clip = torch.zeros((), device=device)
 
         x1 = target_std
         x0 = torch.randn_like(x1)
@@ -210,37 +432,105 @@ class TokenStep1Model(nn.Module):
         tb = t[:, None, None]
         xt = (1 - tb) * x0 + tb * x1
         ut = x1 - x0
-        drop = (torch.rand(B, device=device) < cfg.cfg_drop_prob)[:, None, None]
-        brain_in = torch.where(drop, self.prior.null_brain.to(brain.dtype), brain)
-        v = self.prior(xt, t, brain_in)
+        brain_in, cls_in = self._patch_cond(brain, cls_dir, B, device)
+        v = self.prior(xt, t, brain_in, cls_in)
         loss_flow = F.mse_loss(v, ut)
+        return {"flow": loss_flow, "reg": loss_reg, "cos": loss_cos}
 
-        total = (cfg.lambda_flow * loss_flow + cfg.lambda_reg * loss_reg
-                 + cfg.lambda_cos * loss_cos + cfg.lambda_clip * loss_clip)
-        return {"loss": total, "flow": loss_flow.detach(),
-                "reg": loss_reg.detach(), "cos": loss_cos.detach(),
-                "clip": loss_clip.detach()}
+    def _contrastive_loss(self, brain, target_std, cls_dir, device):
+        cfg = self.cfg
+        if cfg.lambda_clip <= 0:
+            return {"clip": torch.zeros((), device=device)}
+        b = F.normalize(self.clip_proj(brain.mean(dim=1)).float(), dim=-1)
+        if cfg.two_head:
+            if cls_dir is None:
+                return {"clip": torch.zeros((), device=device)}
+            z = cls_dir
+        else:
+            z = F.normalize(target_std.mean(dim=1).float(), dim=-1)
+        return {"clip": soft_clip_loss(b, z, cfg.clip_temp)}
+
+    # ====================================================================
+    #  Sampling
+    # ====================================================================
+    def _tq(self, t):
+        return min(max(t, self.cfg.t_min), self.cfg.t_max)
 
     @torch.no_grad()
-    def _sample_prior(self, brain, n_steps, cfg_scale, solver):
+    def _integrate_sphere(self, z, vel_fn, n_steps, solver):
+        """Endpoint-safe geodesic integrator (Exp-map Euler / Heun) on a sphere."""
+        device = z.device
+        grid = torch.linspace(0.0, 1.0, n_steps + 1, device=device)
+        for i in range(n_steps):
+            t0 = float(grid[i]); t1 = float(grid[i + 1]); dt = t1 - t0
+            w1 = project_tangent(vel_fn(z, self._tq(t0)).float(), z)
+            if solver == "heun":
+                z_pred = exp_map(z, w1 * dt)
+                w2 = project_tangent(vel_fn(z_pred, self._tq(t1)).float(), z_pred)
+                w = project_tangent(0.5 * (w1 + w2), z)
+                z = exp_map(z, w * dt)
+            else:
+                z = exp_map(z, w1 * dt)
+        return F.normalize(z, dim=-1)
+
+    @torch.no_grad()
+    def _sample_cls(self, brain, n_steps, cfg_scale, solver):
+        cfg = self.cfg
+        B = brain.shape[0]; device = brain.device
+        null = self.cls_prior.null_brain.to(brain.dtype).expand(B, -1, -1)
+
+        def vel(z, tq):
+            t = torch.full((B,), tq, device=device)
+            vc = self.cls_prior(z, t, brain)
+            if cfg_scale != 1.0:
+                vu = self.cls_prior(z, t, null)
+                return vu + cfg_scale * (vc - vu)
+            return vc
+
+        z0 = random_sphere((B, cfg.cls_dim), device)
+        return self._integrate_sphere(z0, vel, n_steps, solver)
+
+    @torch.no_grad()
+    def _sample_prior_sphere(self, brain, cls_hat, n_steps, cfg_scale, solver):
+        cfg = self.cfg
+        B = brain.shape[0]; device = brain.device
+        null_b = self.prior.null_brain.to(brain.dtype).expand(B, -1, -1)
+        null_c = (self.prior.null_cls.expand(B, -1) if cfg.two_head else None)
+
+        def vel(z, tq):
+            t = torch.full((B,), tq, device=device)
+            vc = self.prior(z, t, brain, cls_hat)
+            if cfg_scale != 1.0:
+                vu = self.prior(z, t, null_b, null_c)
+                return vu + cfg_scale * (vc - vu)
+            return vc
+
+        z0 = random_sphere((B, cfg.token_len, cfg.token_dim), device)
+        return self._integrate_sphere(z0, vel, n_steps, solver)
+
+    @torch.no_grad()
+    def _sample_prior_euclidean(self, brain, cls_hat, n_steps, cfg_scale, solver):
         cfg = self.cfg
         B = brain.shape[0]; device = brain.device
         x = torch.randn(B, cfg.token_len, cfg.token_dim, device=device)
-        null = self.prior.null_brain.to(brain.dtype).expand(B, -1, -1)
-        t_grid = torch.linspace(0.0, 1.0, n_steps + 1, device=device)
+        null_b = self.prior.null_brain.to(brain.dtype).expand(B, -1, -1)
+        null_c = (self.prior.null_cls.expand(B, -1) if cfg.two_head else None)
+        grid = torch.linspace(0.0, 1.0, n_steps + 1, device=device)
 
-        def vel(xt, tval):
-            t = torch.full((B,), float(tval), device=device)
+        def vel(xt, tq):
+            t = torch.full((B,), tq, device=device)
+            vc = self.prior(xt, t, brain, cls_hat)
             if cfg_scale != 1.0:
-                vc = self.prior(xt, t, brain); vu = self.prior(xt, t, null)
+                vu = self.prior(xt, t, null_b, null_c)
                 return vu + cfg_scale * (vc - vu)
-            return self.prior(xt, t, brain)
+            return vc
 
         for i in range(n_steps):
-            t0 = float(t_grid[i]); t1 = float(t_grid[i + 1]); dt = t1 - t0
-            v1 = vel(x, t0)
+            t0 = float(grid[i]); t1 = float(grid[i + 1]); dt = t1 - t0
+            v1 = vel(x, self._tq(t0))
             if solver == "heun":
-                x = x + 0.5 * (v1 + vel(x + v1 * dt, t1)) * dt
+                v2 = vel(x + v1 * dt, self._tq(t1))
+                x = x + 0.5 * (v1 + v2) * dt
             else:
                 x = x + v1 * dt
         return x
@@ -248,19 +538,39 @@ class TokenStep1Model(nn.Module):
     @torch.no_grad()
     def predict_tokens(self, fmri, subject, stats, *, n_steps=None, cfg_scale=None,
                        solver=None, cond_source=None):
+        """Return (raw_tokens[B,N,d], cls_hat[B,dcls] or None)."""
         cfg = self.cfg
         n_steps = n_steps or cfg.n_steps
         cfg_scale = cfg.cfg_scale if cfg_scale is None else cfg_scale
         solver = solver or cfg.solver
         cond_source = cond_source or cfg.cond_source
         brain = self.backbone(fmri, subject)
+
+        cls_hat = None
+        if cfg.two_head:
+            cls_hat = self._sample_cls(brain, n_steps, cfg.cls_cfg_scale, solver)
+
+        if cfg.geometry == "sphere":
+            if cond_source == "regression":
+                zdir = F.normalize(self.reg_head(brain).float(), dim=-1)
+            elif cond_source == "prior":
+                zdir = self._sample_prior_sphere(brain, cls_hat, n_steps, cfg_scale, solver)
+            elif cond_source == "blend":
+                s = self._sample_prior_sphere(brain, cls_hat, n_steps, cfg_scale, solver)
+                r = F.normalize(self.reg_head(brain).float(), dim=-1)
+                zdir = F.normalize(cfg.blend_w * s + (1 - cfg.blend_w) * r, dim=-1)
+            else:
+                raise ValueError(f"Unknown cond_source: {cond_source!r}")
+            radius = self.radius_head(brain.mean(dim=1)).float().exp()
+            return polar_decode(zdir, radius, self.tgt_mean.float()), cls_hat
+
         if cond_source == "regression":
             z = self.reg_head(brain)
         elif cond_source == "prior":
-            z = self._sample_prior(brain, n_steps, cfg_scale, solver)
+            z = self._sample_prior_euclidean(brain, cls_hat, n_steps, cfg_scale, solver)
         elif cond_source == "blend":
-            z = cfg.blend_w * self._sample_prior(brain, n_steps, cfg_scale, solver) \
+            z = cfg.blend_w * self._sample_prior_euclidean(brain, cls_hat, n_steps, cfg_scale, solver) \
                 + (1 - cfg.blend_w) * self.reg_head(brain)
         else:
             raise ValueError(f"Unknown cond_source: {cond_source!r}")
-        return stats.unstandardize(z)
+        return stats.unstandardize(z), cls_hat
