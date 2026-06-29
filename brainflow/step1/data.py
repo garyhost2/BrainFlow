@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
-from torch.utils.data import Dataset, DataLoader, ConcatDataset, Sampler
+from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset, Sampler
 
 class Step1Dataset(Dataset):
     def __init__(self, fmri, target_emb, images, subject_id, fmri_mu, fmri_std,
-                 augment=False, noise_std=0.0):
+                 cls_emb=None, augment=False, noise_std=0.0):
         assert len(fmri) == len(target_emb) == len(images)
         self.fmri = ((fmri.float() - fmri_mu) / fmri_std)
 
         self.emb = target_emb
+        self.cls = cls_emb            # optional pooled bigG CLS direction
         self.images = images
         self.subject_id = int(subject_id)
         self.augment = augment
@@ -28,15 +30,22 @@ class Step1Dataset(Dataset):
         img = self.images[i]
         if img.dtype == torch.uint8:
             img = img.float() / 255.0
-        return {"fmri": f, "emb": self.emb[i].float(), "image": img, "subject": self.subject_id}
+        item = {"fmri": f, "emb": self.emb[i].float(), "image": img,
+                "subject": self.subject_id}
+        if self.cls is not None:
+            item["cls"] = self.cls[i].float()
+        return item
 
 def _collate(batch):
-    return {
+    out = {
         "fmri": torch.stack([b["fmri"] for b in batch]),
         "emb": torch.stack([b["emb"] for b in batch]),
         "image": torch.stack([b["image"] for b in batch]),
         "subject": int(batch[0]["subject"]),
     }
+    if "cls" in batch[0]:
+        out["cls"] = torch.stack([b["cls"] for b in batch])
+    return out
 
 class SubjectSampler(Sampler):
     def __init__(self, lengths, batch_size, shuffle=True, drop_last=True, seed=0):
@@ -81,36 +90,61 @@ class SubjectSampler(Sampler):
 @dataclass
 class LoaderBundle:
     train: DataLoader
-    eval: DataLoader
+    eval: DataLoader          # held-out TEST split (report only)
     voxels: dict
     train_sampler: SubjectSampler
+    val: Optional[DataLoader] = None   # carved from train, for honest selection
+
+def _loader(dataset, sampler, num_workers):
+    return DataLoader(dataset, batch_sampler=sampler, num_workers=num_workers,
+                      pin_memory=True, persistent_workers=num_workers > 0,
+                      prefetch_factor=4 if num_workers > 0 else None, collate_fn=_collate)
 
 def build_step1_loaders(tensors: dict, targets: dict, subjects: list[int],
                         batch_size: int, num_workers: int = 8,
-                        fmri_noise_std: float = 0.0) -> LoaderBundle:
+                        fmri_noise_std: float = 0.0, val_frac: float = 0.0,
+                        seed: int = 0) -> LoaderBundle:
+    """Build train / val / test loaders.
+
+    ``val_frac`` carves a per-subject validation split out of TRAIN (deterministic,
+    augmentation off) for leakage-free checkpoint selection; the TEST split is then
+    used for reporting only. ``val_frac=0`` disables it (no validation loader).
+    """
     fmri_stats = tensors.get("fmri_stats", {})
     voxels = tensors.get("voxels", {})
-    train_sets, eval_sets = [], []
+    train_sets, val_sets, eval_sets = [], [], []
     for s in subjects:
         if s not in voxels:
             voxels[s] = tensors[f"fmri_train_{s}"].shape[1]
         mu = fmri_stats[s]["mu"]; std = fmri_stats[s]["std"].clamp_min(1e-6)
-        train_sets.append(Step1Dataset(
+        cls_tr = targets.get(f"cls_train_{s}")
+        cls_te = targets.get(f"cls_test_{s}")
+        tr_aug = Step1Dataset(
             tensors[f"fmri_train_{s}"], targets[f"emb_train_{s}"], tensors[f"imgs_train_{s}"],
-            s, mu, std, augment=True, noise_std=fmri_noise_std))
+            s, mu, std, cls_emb=cls_tr, augment=True, noise_std=fmri_noise_std)
+        if val_frac > 0:
+            tr_plain = Step1Dataset(
+                tensors[f"fmri_train_{s}"], targets[f"emb_train_{s}"], tensors[f"imgs_train_{s}"],
+                s, mu, std, cls_emb=cls_tr, augment=False)
+            n = len(tr_aug)
+            g = torch.Generator().manual_seed(seed + int(s))
+            perm = torch.randperm(n, generator=g).tolist()
+            n_val = max(1, int(n * val_frac))
+            train_sets.append(Subset(tr_aug, perm[n_val:]))
+            val_sets.append(Subset(tr_plain, perm[:n_val]))
+        else:
+            train_sets.append(tr_aug)
         eval_sets.append(Step1Dataset(
             tensors[f"fmri_test_{s}"], targets[f"emb_test_{s}"], tensors[f"imgs_test_{s}"],
-            s, mu, std, augment=False))
+            s, mu, std, cls_emb=cls_te, augment=False))
 
-    train_set = ConcatDataset(train_sets)
-    eval_set = ConcatDataset(eval_sets)
     train_sampler = SubjectSampler([len(d) for d in train_sets], batch_size, shuffle=True, drop_last=True)
     eval_sampler = SubjectSampler([len(d) for d in eval_sets], batch_size, shuffle=False, drop_last=False)
+    train = _loader(ConcatDataset(train_sets), train_sampler, num_workers)
+    ev = _loader(ConcatDataset(eval_sets), eval_sampler, num_workers)
 
-    train = DataLoader(train_set, batch_sampler=train_sampler, num_workers=num_workers,
-                       pin_memory=True, persistent_workers=num_workers > 0,
-                       prefetch_factor=4 if num_workers > 0 else None, collate_fn=_collate)
-    ev = DataLoader(eval_set, batch_sampler=eval_sampler, num_workers=num_workers,
-                    pin_memory=True, persistent_workers=num_workers > 0,
-                    prefetch_factor=4 if num_workers > 0 else None, collate_fn=_collate)
-    return LoaderBundle(train=train, eval=ev, voxels=voxels, train_sampler=train_sampler)
+    val = None
+    if val_sets:
+        val_sampler = SubjectSampler([len(d) for d in val_sets], batch_size, shuffle=False, drop_last=False)
+        val = _loader(ConcatDataset(val_sets), val_sampler, num_workers)
+    return LoaderBundle(train=train, eval=ev, voxels=voxels, train_sampler=train_sampler, val=val)

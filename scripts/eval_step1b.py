@@ -25,10 +25,15 @@ def parse_args():
     ap.add_argument("--ckpt-path", type=str, default="third_party/unclip6_epoch0_step110000.ckpt")
     ap.add_argument("--cond-source", type=str, default="prior",
                     choices=["regression", "prior", "blend"])
-    ap.add_argument("--cfg-scale", type=float, default=3.0)
+    ap.add_argument("--cfg-scale", type=float, default=3.0,
+                    help="guidance scale for the patch prior")
+    ap.add_argument("--cls-cfg-scale", type=float, default=3.0,
+                    help="guidance scale for the global CLS prior")
     ap.add_argument("--steps", type=int, default=50)
     ap.add_argument("--solver", type=str, default="heun", choices=["euler", "heun"])
     ap.add_argument("--decode-steps", type=int, default=38)
+    ap.add_argument("--cls-vector-slot", type=int, nargs=2, default=[0, 1280],
+                    help="[lo hi] positions in the unCLIP 'vector' slot to fill with c_cls")
     ap.add_argument("--max-images", type=int, default=10_000)
     ap.add_argument("--out", type=str, default="outputs/step1b/eval")
     return ap.parse_args()
@@ -43,6 +48,7 @@ def main():
     ckpt = torch.load(args.ckpt, map_location="cpu")
     cfg: TokenStep1Config = ckpt["cfg"]
     cfg.cond_source = args.cond_source; cfg.cfg_scale = args.cfg_scale
+    cfg.cls_cfg_scale = args.cls_cfg_scale
     cfg.n_steps = args.steps; cfg.solver = args.solver
     stats = TargetStats.from_dict(ckpt["stats"])
     subjects = ckpt["subjects"]; voxels = ckpt["voxels"]
@@ -71,15 +77,16 @@ def main():
     bundle = build_step1_loaders(tensors, targets, subjects, batch_size=32, num_workers=8)
 
     decoder = SDXLUnCLIPDecoder(device, args.mindeye_src, args.ckpt_path,
-                                num_steps=args.decode_steps)
+                                num_steps=args.decode_steps,
+                                cls_vector_slot=tuple(args.cls_vector_slot))
     clip_metric = CLIPMetric(device, hf_cache=hf_cache)
 
     preds, gts = [], []
     with torch.no_grad():
         for batch in tqdm(bundle.eval, desc="eval"):
             fmri = batch["fmri"].to(device, non_blocking=True)
-            tok = model.predict_tokens(fmri, batch["subject"], stats)
-            preds.append(decoder.decode(tok)); gts.append(batch["image"])
+            tok, cls_hat = model.predict_tokens(fmri, batch["subject"], stats)
+            preds.append(decoder.decode(tok, cls_hat)); gts.append(batch["image"])
             if sum(p.shape[0] for p in preds) >= args.max_images:
                 break
     pred = torch.cat(preds); gt = torch.cat(gts)
