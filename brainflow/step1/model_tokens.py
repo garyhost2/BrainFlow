@@ -58,9 +58,10 @@ class TokenStep1Config:
     enc_blocks: int = 4
     enc_drop: float = 0.15
 
-    # --- regression anchor head -----------------------------------------
+    # --- regression anchor / radius heads -------------------------------
     reg_depth: int = 2
     reg_heads: int = 8
+    radius_depth: int = 2          # per-token cross-attention radius head
 
     # --- patch DiT prior ------------------------------------------------
     prior_width: int = 1024
@@ -191,6 +192,35 @@ class TokenRegHead(nn.Module):
             x = cr(x, brain)
             x = x + mlp(x)
         return self.out(x)
+
+
+class RadiusHead(nn.Module):
+    """Per-token log-radius head: 256 queries cross-attend to the brain tokens.
+
+    The diagnostic on real bigG tokens shows the per-token radius carries an ~8%
+    *content-dependent* spread (only ~7% positional), and the unCLIP decoder
+    consumes raw tokens mu + r_i z_i -- so radius accuracy feeds PixCorr directly.
+    A per-token cross-attention head (vs. a pooled MLP) lets each radius depend on
+    the brain signal relevant to that token.
+    """
+
+    def __init__(self, cfg: TokenStep1Config):
+        super().__init__()
+        d = cfg.brain_dim
+        self.queries = nn.Parameter(torch.randn(1, cfg.token_len, d) * 0.02)
+        self.cross = nn.ModuleList([CrossAttn(d, d, cfg.reg_heads) for _ in range(cfg.radius_depth)])
+        self.mlps = nn.ModuleList([
+            nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d * 4), nn.GELU(), nn.Linear(d * 4, d))
+            for _ in range(cfg.radius_depth)])
+        self.out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, 1))
+
+    def forward(self, brain):
+        B = brain.shape[0]
+        x = self.queries.expand(B, -1, -1)
+        for cr, mlp in zip(self.cross, self.mlps):
+            x = cr(x, brain)
+            x = x + mlp(x)
+        return self.out(x).squeeze(-1)          # (B, token_len) log-radius
 
 
 # --------------------------------------------------------------------------
@@ -328,11 +358,7 @@ class TokenStep1Model(nn.Module):
             nn.Linear(cfg.brain_dim, cfg.brain_dim), nn.GELU(),
             nn.Linear(cfg.brain_dim, clip_out),
         )
-        self.radius_head = nn.Sequential(
-            nn.LayerNorm(cfg.brain_dim),
-            nn.Linear(cfg.brain_dim, cfg.brain_dim), nn.GELU(),
-            nn.Linear(cfg.brain_dim, cfg.token_len),
-        )
+        self.radius_head = RadiusHead(cfg)
         self.register_buffer("tgt_mean", torch.zeros(cfg.token_dim))
 
     def set_target_mean(self, mean):
@@ -407,7 +433,7 @@ class TokenStep1Model(nn.Module):
         loss_reg = F.mse_loss(reg_dir, z1)
         loss_cos = 1.0 - F.cosine_similarity(reg_dir, z1, dim=-1).mean()
 
-        logr = self.radius_head(brain.mean(dim=1)).float()
+        logr = self.radius_head(brain).float()
         loss_radius = F.mse_loss(logr, r1.log())
 
         t = self._sample_t(B, device)
@@ -561,7 +587,7 @@ class TokenStep1Model(nn.Module):
                 zdir = F.normalize(cfg.blend_w * s + (1 - cfg.blend_w) * r, dim=-1)
             else:
                 raise ValueError(f"Unknown cond_source: {cond_source!r}")
-            radius = self.radius_head(brain.mean(dim=1)).float().exp()
+            radius = self.radius_head(brain).float().exp()
             return polar_decode(zdir, radius, self.tgt_mean.float()), cls_hat
 
         if cond_source == "regression":
