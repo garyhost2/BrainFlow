@@ -63,6 +63,8 @@ if [ "${FREE_GB}" -lt "$(( NEED_GB + 20 ))" ]; then
 fi
 
 echo "════════════════ STAGE 1/2: TRAIN ════════════════"
+# TRAIN_EXTRA lets you launch the ablation arm, e.g.
+#   TRAIN_EXTRA="--geometry euclidean --no-two-head" OUT=outputs/step1c_ecfm sbatch ...
 python -m scripts.train_step1b \
     --data-dir "${DATA_DIR}" \
     --target-dir "${TARGET_DIR}" \
@@ -71,10 +73,12 @@ python -m scripts.train_step1b \
     --ckpt-path "${UNCLIP_CKPT}" \
     --epochs 150 --batch-size 48 --lr 3e-4 \
     --eval-freq 10 --decode-eval --decode-n "${EVAL_N}" \
-    --out "${OUT}"
+    --out "${OUT}" ${TRAIN_EXTRA:-}
 
 echo "════════════════ STAGE 2/2: FULL EVAL ════════════════"
-EVAL_CKPT="${OUT}/best_clip2way.pt"
+# Prefer the leakage-free val-selected checkpoint.
+EVAL_CKPT="${OUT}/best.pt"
+[ -f "${EVAL_CKPT}" ] || EVAL_CKPT="${OUT}/best_clip2way.pt"
 [ -f "${EVAL_CKPT}" ] || EVAL_CKPT="${OUT}/last.pt"
 echo "Evaluating ${EVAL_CKPT} over ${FULL_EVAL_N} test images"
 python -m scripts.eval_step1b \
