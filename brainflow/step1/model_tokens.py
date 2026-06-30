@@ -23,6 +23,7 @@ rectified-flow / patch-only baselines used in the paper's ablations A and D.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import torch
@@ -92,6 +93,13 @@ class TokenStep1Config:
     lambda_radius: float = 1.0    # radius side-model
     lambda_clip: float = 0.033    # SoftCLIP contrastive (blueprint-tuned)
     clip_temp: float = 0.006
+
+    # --- low-level pathway (spatial layout -> decoder img2img init) ------
+    low_level: bool = True
+    ll_size: int = 128            # blurry-image resolution
+    ll_base: int = 256            # channels at the 8x8 stem
+    lambda_low: float = 1.0
+    ll_strength: float = 0.7      # img2img strength at decode (calibrate via smoke)
 
     # --- sampling -------------------------------------------------------
     n_steps: int = 50
@@ -221,6 +229,39 @@ class RadiusHead(nn.Module):
             x = cr(x, brain)
             x = x + mlp(x)
         return self.out(x).squeeze(-1)          # (B, token_len) log-radius
+
+
+class LowLevelHead(nn.Module):
+    """Brain tokens -> blurry RGB image (the spatial layout for img2img init).
+
+    The Baggag tokens say *what* is in the image (semantics); this head predicts
+    the coarse *where / what-colour* as a low-res blurry image. The decoder then
+    uses that blurry image as an img2img starting point instead of pure noise,
+    which is the mechanism behind high PixCorr/SSIM (MindEye2-style). It is fully
+    additive: it does not touch the token model.
+    """
+
+    def __init__(self, cfg: "TokenStep1Config"):
+        super().__init__()
+        self.base = cfg.ll_base
+        self.stem = nn.Sequential(
+            nn.LayerNorm(cfg.brain_dim), nn.Linear(cfg.brain_dim, self.base * 8 * 8), nn.GELU())
+        n_up = max(1, int(math.log2(max(cfg.ll_size, 8) // 8)))
+        blocks, c = [], self.base
+        for _ in range(n_up):
+            nc = max(c // 2, 32)
+            blocks.append(nn.Sequential(
+                nn.Upsample(scale_factor=2, mode="nearest"),
+                nn.Conv2d(c, nc, 3, padding=1), nn.GroupNorm(8, nc), nn.SiLU(),
+                nn.Conv2d(nc, nc, 3, padding=1), nn.SiLU()))
+            c = nc
+        self.ups = nn.Sequential(*blocks)
+        self.out = nn.Conv2d(c, 3, 3, padding=1)
+
+    def forward(self, brain):
+        B = brain.shape[0]
+        h = self.stem(brain.mean(dim=1)).view(B, self.base, 8, 8)
+        return torch.sigmoid(self.out(self.ups(h)))     # (B, 3, ll_size, ll_size) in [0,1]
 
 
 # --------------------------------------------------------------------------
@@ -359,6 +400,7 @@ class TokenStep1Model(nn.Module):
             nn.Linear(cfg.brain_dim, clip_out),
         )
         self.radius_head = RadiusHead(cfg)
+        self.low_head = LowLevelHead(cfg) if cfg.low_level else None
         self.register_buffer("tgt_mean", torch.zeros(cfg.token_dim))
 
     def set_target_mean(self, mean):
@@ -376,7 +418,8 @@ class TokenStep1Model(nn.Module):
     # ====================================================================
     #  Training
     # ====================================================================
-    def training_step(self, fmri, subject, target_std, target_raw=None, target_cls=None):
+    def training_step(self, fmri, subject, target_std, target_raw=None, target_cls=None,
+                      target_img=None):
         cfg = self.cfg
         B = fmri.shape[0]; device = fmri.device
         brain = self.backbone(fmri, subject)
@@ -390,15 +433,32 @@ class TokenStep1Model(nn.Module):
         else:
             out |= self._patch_step_euclidean(brain, target_std, cls_dir, B, device)
         out |= self._contrastive_loss(brain, target_std, cls_dir, device)
+        out |= self._low_level_loss(brain, target_img)
 
         total = (cfg.lambda_flow * out["flow"] + cfg.lambda_reg * out["reg"]
                  + cfg.lambda_cos * out["cos"] + cfg.lambda_clip * out["clip"]
                  + cfg.lambda_rcfm * out["rcfm"])
         if "radius" in out:
             total = total + cfg.lambda_radius * out["radius"]
+        if "low" in out:
+            total = total + cfg.lambda_low * out["low"]
         out = {k: v.detach() for k, v in out.items()}
         out["loss"] = total
         return out
+
+    def _low_level_loss(self, brain, target_img):
+        if self.low_head is None or target_img is None:
+            return {}
+        blur = F.interpolate(target_img.float(), self.cfg.ll_size, mode="bilinear",
+                             align_corners=False).clamp(0, 1)
+        return {"low": F.mse_loss(self.low_head(brain), blur)}
+
+    @torch.no_grad()
+    def predict_lowlevel(self, fmri, subject):
+        """Blurry RGB layout for the decoder's img2img init, or None if disabled."""
+        if self.low_head is None:
+            return None
+        return self.low_head(self.backbone(fmri, subject))
 
     def _cls_flow_loss(self, brain, cls_dir, B, device):
         if self.cls_prior is None or cls_dir is None:

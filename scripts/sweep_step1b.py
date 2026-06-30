@@ -39,8 +39,10 @@ def parse_args():
     ap.add_argument("--steps", type=int, default=50)
     ap.add_argument("--solver", type=str, default="heun", choices=["euler", "heun"])
     ap.add_argument("--cond-sources", type=str, nargs="+",
-                    default=["regression", "blend", "prior"])
-    ap.add_argument("--cfg-scales", type=float, nargs="+", default=[1.0, 1.5, 2.0, 3.0])
+                    default=["regression", "prior"])
+    ap.add_argument("--cfg-scales", type=float, nargs="+", default=[1.0, 3.0])
+    ap.add_argument("--ll-strengths", type=float, nargs="+", default=[1.0, 0.7, 0.6, 0.5],
+                    help="img2img strengths (1.0 = token-only, no low-level init)")
     ap.add_argument("--out", type=str, default="outputs/step1c_sphere/sweep")
     return ap.parse_args()
 
@@ -73,13 +75,15 @@ def _collect(loader, n):
 
 @torch.no_grad()
 def _eval_config(model, subset, stats, decoder, clip_metric, device, *,
-                 cond_source, cfg_scale, steps, solver, n):
+                 cond_source, cfg_scale, strength, steps, solver, n):
     preds, gts = [], []
     for fmri, subj, imgs in subset:
+        f = fmri.to(device)
         tok, cls_hat = model.predict_tokens(
-            fmri.to(device), subj, stats,
-            cond_source=cond_source, cfg_scale=cfg_scale, n_steps=steps, solver=solver)
-        preds.append(decoder.decode(tok, cls_hat))
+            f, subj, stats, cond_source=cond_source, cfg_scale=cfg_scale,
+            n_steps=steps, solver=solver)
+        blur = model.predict_lowlevel(f, subj)
+        preds.append(decoder.decode(tok, cls_hat, init_image=blur, strength=strength))
         gts.append(imgs)
     pred = torch.cat(preds)[:n]
     gt = torch.cat(gts)[:n]
@@ -105,22 +109,24 @@ def main():
     decoder = SDXLUnCLIPDecoder(device, args.mindeye_src, args.ckpt_path)
     clip_metric = CLIPMetric(device, hf_cache=hf_cache)
 
-    # Build the config grid: regression ignores cfg (one row); blend/prior sweep it.
+    # Grid: cond_source x cfg_scale x img2img strength (regression ignores cfg).
     configs = []
     for cond in args.cond_sources:
         scales = [1.0] if cond == "regression" else args.cfg_scales
-        for s in scales:
-            configs.append((cond, s))
+        for cfgs in scales:
+            for st in args.ll_strengths:
+                configs.append((cond, cfgs, st))
+    print(f"  sweeping {len(configs)} configs x {args.n_images} images", flush=True)
 
     rows = []
-    for cond, s in configs:
+    for cond, cfgs, st in configs:
         m = _eval_config(model, subset, stats, decoder, clip_metric, device,
-                         cond_source=cond, cfg_scale=s, steps=args.steps,
-                         solver=args.solver, n=args.n_images)
-        row = {"cond_source": cond, "cfg_scale": s, **m}
+                         cond_source=cond, cfg_scale=cfgs, strength=st,
+                         steps=args.steps, solver=args.solver, n=args.n_images)
+        row = {"cond_source": cond, "cfg_scale": cfgs, "strength": st, **m}
         rows.append(row)
-        print(f"  {cond:11s} cfg={s:<4} | PixCorr={m['PixCorr']:.3f} SSIM={m['SSIM']:.3f} "
-              f"CLIP_cos={m['CLIP_cos']:.3f} CLIP_2way={m['CLIP_2way']:.3f}", flush=True)
+        print(f"  {cond:11s} cfg={cfgs:<4} str={st:<4} | PixCorr={m['PixCorr']:.3f} "
+              f"SSIM={m['SSIM']:.3f} CLIP_2way={m['CLIP_2way']:.3f}", flush=True)
 
     best_pix = max(rows, key=lambda r: r["PixCorr"])
     best_clip = max(rows, key=lambda r: r["CLIP_2way"])
@@ -130,9 +136,11 @@ def main():
 
     print("\n=== BEST CONFIGS ===")
     print(f"  PixCorr : {best_pix['cond_source']} cfg={best_pix['cfg_scale']} "
-          f"-> PixCorr={best_pix['PixCorr']:.3f}  CLIP_2way={best_pix['CLIP_2way']:.3f}")
+          f"str={best_pix['strength']} -> PixCorr={best_pix['PixCorr']:.3f} "
+          f"SSIM={best_pix['SSIM']:.3f} CLIP_2way={best_pix['CLIP_2way']:.3f}")
     print(f"  CLIP_2way: {best_clip['cond_source']} cfg={best_clip['cfg_scale']} "
-          f"-> CLIP_2way={best_clip['CLIP_2way']:.3f}  PixCorr={best_clip['PixCorr']:.3f}")
+          f"str={best_clip['strength']} -> CLIP_2way={best_clip['CLIP_2way']:.3f} "
+          f"PixCorr={best_clip['PixCorr']:.3f}")
     print(f"\n  full table -> {out_dir/'sweep.json'}")
 
 

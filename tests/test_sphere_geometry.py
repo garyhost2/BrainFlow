@@ -80,18 +80,19 @@ def test_tangent_noise_stays_on_sphere():
 # --------------------------------------------------------------------------
 #  Two-head model (sections 7-9)
 # --------------------------------------------------------------------------
-def _tiny_cfg(geometry, two_head=True):
+def _tiny_cfg(geometry, two_head=True, low_level=True):
     return TokenStep1Config(
         token_len=4, token_dim=8, cls_dim=10, brain_dim=6, n_brain_tokens=3,
         enc_hidden=16, enc_blocks=1, reg_depth=1, reg_heads=2,
         prior_width=16, prior_depth=1, prior_heads=2, time_dim=8,
         cls_width=16, cls_depth=1, cls_heads=2,
+        low_level=low_level, ll_size=16, ll_base=32,
         geometry=geometry, two_head=two_head, lambda_radius=1.0, n_steps=4, subjects=[1],
     )
 
 
-def _model(geometry, two_head=True, train=False):
-    cfg = _tiny_cfg(geometry, two_head)
+def _model(geometry, two_head=True, train=False, low_level=True):
+    cfg = _tiny_cfg(geometry, two_head, low_level)
     model = TokenStep1Model(cfg, {1: 10})
     model.set_target_mean(torch.zeros(8))
     return model if train else model.eval()
@@ -168,3 +169,35 @@ def test_euclidean_single_head_baseline_still_works():
     assert torch.isfinite(out["loss"]) and out["loss"].requires_grad
     assert out["rcfm"] == 0          # no CLS head -> no RCFM term
     out["loss"].backward()
+
+
+# --------------------------------------------------------------------------
+#  Low-level (blurry-image / img2img) pathway
+# --------------------------------------------------------------------------
+def test_low_level_head_predicts_blurry_image():
+    model = _model("sphere", two_head=True)
+    blur = model.predict_lowlevel(torch.randn(2, 10), 1)
+    assert blur.shape == (2, 3, 16, 16)
+    assert blur.min() >= 0.0 and blur.max() <= 1.0          # sigmoid output
+
+
+def test_low_level_loss_trains():
+    model = _model("sphere", two_head=True, train=True)
+    out = model.training_step(torch.randn(2, 10), 1, None,
+                              target_raw=torch.randn(2, 4, 8),
+                              target_cls=torch.randn(2, 10),
+                              target_img=torch.rand(2, 3, 32, 32))
+    assert "low" in out and torch.isfinite(out["low"]) and out["low"] > 0
+    out["loss"].backward()
+    assert model.low_head.out.weight.grad is not None
+
+
+def test_low_level_disabled():
+    model = _model("sphere", two_head=True, low_level=False)
+    assert model.low_head is None
+    assert model.predict_lowlevel(torch.randn(2, 10), 1) is None
+    out = model.training_step(torch.randn(2, 10), 1, None,
+                              target_raw=torch.randn(2, 4, 8),
+                              target_cls=torch.randn(2, 10),
+                              target_img=torch.rand(2, 3, 32, 32))
+    assert "low" not in out          # no head -> no term
