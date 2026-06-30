@@ -30,11 +30,12 @@ import torch.nn.functional as F
 
 class SDXLUnCLIPDecoder:
     def __init__(self, device, mindeye_src, ckpt_path, num_steps=38, out_size=256,
-                 cls_vector_slot=(0, 1280)):
+                 cls_vector_slot=(0, 1280), img2img_cfg=5.0):
         self.device = device
         self.num_steps = num_steps
         self.out_size = out_size
         self.cls_slot = tuple(cls_vector_slot)
+        self.img2img_cfg = img2img_cfg          # CFG scale for the manual img2img loop
         mindeye_src = Path(mindeye_src)
         gm = mindeye_src / "generative_models"
         for p in (str(mindeye_src), str(gm)):
@@ -104,55 +105,84 @@ class SDXLUnCLIPDecoder:
         return vec
 
     @torch.no_grad()
-    def _recon_one(self, x, vector, num_samples=1):
+    def _encode_init(self, img):
+        """Blurry RGB [0,1] (B,3,h,w) -> scaled VAE latent (B,4,96,96) for img2img."""
+        x = F.interpolate(img.to(self.device).float(), 768, mode="bilinear",
+                          align_corners=False).clamp(0, 1)
+        with torch.cuda.amp.autocast(dtype=torch.float16), self.engine.ema_scope():
+            return self.engine.encode_first_stage(x * 2.0 - 1.0)
+
+    @torch.no_grad()
+    def _recon_one(self, x, vector, init_latent=None, strength=1.0, num_samples=1):
         eng = self.engine
         device = self.device
         append_dims = self._append_dims
         if x.ndim == 2:
             x = x[None]
-        if x.shape[0] == 1:
-            x = x[[0]]
+        x = x[[0]]
         with torch.cuda.amp.autocast(dtype=torch.float16), eng.ema_scope():
-            z = torch.randn(num_samples, 4, 96, 96, device=device)
-            tokens = x
-            c = {"crossattn": tokens.repeat(num_samples, 1, 1),
-                 "vector": vector.repeat(num_samples, 1)}
-            rand_tokens = torch.randn_like(x)
-            uc = {"crossattn": rand_tokens.repeat(num_samples, 1, 1),
+            c = {"crossattn": x.repeat(num_samples, 1, 1), "vector": vector.repeat(num_samples, 1)}
+            uc = {"crossattn": torch.randn_like(x).repeat(num_samples, 1, 1),
                   "vector": vector.repeat(num_samples, 1)}
             for k in c:
                 c[k] = c[k][:num_samples].to(device)
                 uc[k] = uc[k][:num_samples].to(device)
 
-            noise = torch.randn_like(z)
-            sigmas = eng.sampler.discretization(eng.sampler.num_steps)
-            sigma = sigmas[0].to(z.device)
-            if self.offset_noise_level > 0.0:
-                noise = noise + self.offset_noise_level * append_dims(
-                    torch.randn(z.shape[0], device=z.device), z.ndim)
-            noised_z = z + noise * append_dims(sigma, z.ndim)
-            noised_z = noised_z / torch.sqrt(1.0 + sigmas[0] ** 2.0)
+            sigmas = eng.sampler.discretization(eng.sampler.num_steps).to(device)
 
             def denoiser(xx, ss, cc):
                 return eng.denoiser(eng.model, xx, ss, cc)
 
-            samples_z = eng.sampler(denoiser, noised_z, cond=c, uc=uc)
+            if init_latent is None or strength >= 1.0:
+                # ---- token-only path (pure noise), unchanged ----
+                z = torch.randn(num_samples, 4, 96, 96, device=device)
+                noise = torch.randn_like(z)
+                if self.offset_noise_level > 0.0:
+                    noise = noise + self.offset_noise_level * append_dims(
+                        torch.randn(z.shape[0], device=device), z.ndim)
+                noised_z = (z + noise * append_dims(sigmas[0], z.ndim)) / torch.sqrt(1.0 + sigmas[0] ** 2)
+                samples_z = eng.sampler(denoiser, noised_z, cond=c, uc=uc)
+            else:
+                # ---- img2img: start from the blurry latent at a reduced sigma ----
+                z0 = init_latent.repeat(num_samples, 1, 1, 1).to(device).float()
+                N = len(sigmas) - 1
+                n_steps = max(1, int(round(strength * N)))
+                i0 = N - n_steps
+                x_cur = z0 + torch.randn_like(z0) * append_dims(sigmas[i0], z0.ndim)
+                for i in range(i0, N):
+                    s, s_next = sigmas[i], sigmas[i + 1]
+                    ss = s.repeat(num_samples)
+                    dc = denoiser(x_cur, ss, c)
+                    du = denoiser(x_cur, ss, uc)
+                    denoised = du + self.img2img_cfg * (dc - du)        # manual CFG
+                    d = (x_cur - denoised) / append_dims(s, x_cur.ndim)  # EDM Euler
+                    x_cur = x_cur + d * append_dims(s_next - s, x_cur.ndim)
+                samples_z = x_cur
+
             samples_x = eng.decode_first_stage(samples_z)
             samples = torch.clamp(samples_x * 0.8 + 0.2, 0.0, 1.0)
         return samples
 
     @torch.no_grad()
-    def decode(self, tokens_raw: torch.Tensor, cls_emb: torch.Tensor | None = None) -> torch.Tensor:
-        """Decode raw patch tokens, optionally with predicted CLS in the pooled slot.
+    def decode(self, tokens_raw: torch.Tensor, cls_emb: torch.Tensor | None = None,
+               init_image: torch.Tensor | None = None, strength: float = 1.0) -> torch.Tensor:
+        """Decode raw patch tokens, optionally with CLS in the pooled slot and a
+        blurry ``init_image`` for img2img (low-level pathway).
 
         ``tokens_raw``: (B, 256, 1664) reassembled raw tokens.
-        ``cls_emb``:    (B, 1280) predicted global directions, or None to fall
-                        back to the (content-free) dummy suffix.
+        ``cls_emb``:    (B, 1280) predicted global directions, or None.
+        ``init_image``: (B, 3, h, w) blurry layout in [0,1]; None => pure-noise decode.
+        ``strength``:   img2img strength in (0,1]; lower = preserve more layout.
         """
+        init_lat = None
+        if init_image is not None and strength < 1.0:
+            init_lat = self._encode_init(init_image)
         imgs = []
         for i in range(tokens_raw.shape[0]):
             vec = self._vector(None if cls_emb is None else cls_emb[i:i + 1])
-            s = self._recon_one(tokens_raw[i:i + 1].to(self.device), vec, num_samples=1)
+            il = None if init_lat is None else init_lat[i:i + 1]
+            s = self._recon_one(tokens_raw[i:i + 1].to(self.device), vec,
+                                init_latent=il, strength=strength, num_samples=1)
             if self.out_size and self.out_size != s.shape[-1]:
                 s = F.interpolate(s, self.out_size, mode="bilinear", align_corners=False)
             imgs.append(s.float().cpu())

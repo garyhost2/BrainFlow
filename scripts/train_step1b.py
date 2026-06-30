@@ -49,6 +49,11 @@ def parse_args():
     ap.add_argument("--solver", type=str, default="heun", choices=["euler", "heun"])
     ap.add_argument("--uniform-t-prob", type=float, default=0.1)
     ap.add_argument("--lambda-radius", type=float, default=1.0)
+    ap.add_argument("--lambda-low", type=float, default=1.0,
+                    help="low-level (blurry-image) loss weight; 0 disables the pathway")
+    ap.add_argument("--ll-strength", type=float, default=0.7,
+                    help="img2img strength at decode (lower preserves more layout)")
+    ap.add_argument("--no-low-level", dest="low_level", action="store_false", default=True)
     ap.add_argument("--val-frac", type=float, default=0.1,
                     help="train fraction held out for leakage-free selection (0 disables)")
     ap.add_argument("--weight-decay", type=float, default=0.02)
@@ -109,7 +114,8 @@ def main():
                            geometry=args.geometry, uniform_t_prob=args.uniform_t_prob,
                            lambda_radius=args.lambda_radius, two_head=args.two_head,
                            lambda_rcfm=args.lambda_rcfm, cls_cfg_scale=args.cls_cfg_scale,
-                           solver=args.solver)
+                           solver=args.solver, low_level=args.low_level,
+                           lambda_low=args.lambda_low, ll_strength=args.ll_strength)
     model = TokenStep1Model(cfg, bundle.voxels).to(device)
     if cfg.geometry == "sphere" and cfg.center_tokens:
         model.set_target_mean(stats.mean)
@@ -148,10 +154,12 @@ def main():
             tgt_cls = batch.get("cls")
             if tgt_cls is not None:
                 tgt_cls = tgt_cls.to(device, non_blocking=True)
+            tgt_img = batch["image"].to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 ld = model.training_step(fmri, batch["subject"], tgt_std,
-                                         target_raw=tgt_raw, target_cls=tgt_cls)
+                                         target_raw=tgt_raw, target_cls=tgt_cls,
+                                         target_img=tgt_img)
                 loss = ld["loss"]
             loss.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
@@ -164,6 +172,7 @@ def main():
             if step % 50 == 0:
                 pbar.set_postfix(flow=f"{ld['flow']:.3f}", rcfm=f"{ld['rcfm']:.3f}",
                                  reg=f"{ld['reg']:.3f}", cos=f"{ld['cos']:.3f}",
+                                 low=f"{float(ld.get('low', 0)):.3f}",
                                  clip=f"{ld['clip']:.3f}", lr=f"{lr:.1e}", skip=nan_skips)
 
         if epoch % args.eval_freq == 0 or epoch == args.epochs:
@@ -190,7 +199,10 @@ def main():
                         fmri = batch["fmri"][:take].to(device, non_blocking=True)
                         tok, cls_hat = model.predict_tokens(fmri, batch["subject"], stats,
                                                             cond_source=cfg.cond_source)
-                        preds.append(decoder.decode(tok, cls_hat)); gts.append(batch["image"][:take])
+                        blur = model.predict_lowlevel(fmri, batch["subject"])
+                        preds.append(decoder.decode(tok, cls_hat, init_image=blur,
+                                                    strength=cfg.ll_strength))
+                        gts.append(batch["image"][:take])
                         got[s] = got.get(s, 0) + take
                         if len(got) == n_subj and all(v >= per_subj for v in got.values()):
                             break

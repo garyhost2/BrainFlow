@@ -34,6 +34,8 @@ def parse_args():
     ap.add_argument("--decode-steps", type=int, default=38)
     ap.add_argument("--cls-vector-slot", type=int, nargs=2, default=[0, 1280],
                     help="[lo hi] positions in the unCLIP 'vector' slot to fill with c_cls")
+    ap.add_argument("--ll-strength", type=float, default=None,
+                    help="override the checkpoint's img2img strength (low-level pathway)")
     ap.add_argument("--max-images", type=int, default=10_000)
     ap.add_argument("--out", type=str, default="outputs/step1b/eval")
     return ap.parse_args()
@@ -50,6 +52,8 @@ def main():
     cfg.cond_source = args.cond_source; cfg.cfg_scale = args.cfg_scale
     cfg.cls_cfg_scale = args.cls_cfg_scale
     cfg.n_steps = args.steps; cfg.solver = args.solver
+    if args.ll_strength is not None:
+        cfg.ll_strength = args.ll_strength
     stats = TargetStats.from_dict(ckpt["stats"])
     subjects = ckpt["subjects"]; voxels = ckpt["voxels"]
 
@@ -86,7 +90,9 @@ def main():
         for batch in tqdm(bundle.eval, desc="eval"):
             fmri = batch["fmri"].to(device, non_blocking=True)
             tok, cls_hat = model.predict_tokens(fmri, batch["subject"], stats)
-            preds.append(decoder.decode(tok, cls_hat)); gts.append(batch["image"])
+            blur = model.predict_lowlevel(fmri, batch["subject"])
+            preds.append(decoder.decode(tok, cls_hat, init_image=blur, strength=cfg.ll_strength))
+            gts.append(batch["image"])
             if sum(p.shape[0] for p in preds) >= args.max_images:
                 break
     pred = torch.cat(preds); gt = torch.cat(gts)
