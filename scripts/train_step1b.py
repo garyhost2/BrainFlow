@@ -63,6 +63,9 @@ def parse_args():
     ap.add_argument("--num-workers", type=int, default=8)
     ap.add_argument("--fmri-noise-std", type=float, default=0.05)
     ap.add_argument("--ema-decay", type=float, default=0.999)
+    ap.add_argument("--init-from", type=str, default=None,
+                    help="warm-start model weights from a checkpoint (strict=False; "
+                         "e.g. add the low-level head to an already-trained token model)")
     ap.add_argument("--eval-freq", type=int, default=5)
     ap.add_argument("--decode-eval", action="store_true")
     ap.add_argument("--decode-n", type=int, default=16)
@@ -119,6 +122,11 @@ def main():
     model = TokenStep1Model(cfg, bundle.voxels).to(device)
     if cfg.geometry == "sphere" and cfg.center_tokens:
         model.set_target_mean(stats.mean)
+    if args.init_from:
+        ck = torch.load(args.init_from, map_location="cpu")
+        res = model.load_state_dict(ck["model"], strict=False)
+        print(f"✓ warm-start from {args.init_from}: {len(res.missing_keys)} fresh params "
+              f"(e.g. low_head), {len(res.unexpected_keys)} unexpected")
     if args.compile:
         model = torch.compile(model)
     ema = EMA(model, decay=args.ema_decay)
