@@ -194,49 +194,69 @@ def main():
             msg = f"Ep{epoch:4d} | {sel_name}_cos={sel_cos:.4f}"
             if bundle.val is not None:
                 msg += f" test_cos={eval_token_cosine(model, bundle.eval, stats, device):.4f}"
-            if args.decode_eval:
-                n_subj = max(1, len(args.subjects))
-                per_subj = max(1, args.decode_n // n_subj)
-                preds, gts, got = [], [], {}
-                with torch.no_grad():
-                    for batch in bundle.eval:
-                        s = int(batch["subject"])
-                        if got.get(s, 0) >= per_subj:
-                            continue
-                        take = min(batch["fmri"].shape[0], per_subj - got.get(s, 0))
-                        fmri = batch["fmri"][:take].to(device, non_blocking=True)
-                        tok, cls_hat = model.predict_tokens(fmri, batch["subject"], stats,
-                                                            cond_source=cfg.cond_source)
-                        blur = model.predict_lowlevel(fmri, batch["subject"])
-                        preds.append(decoder.decode(tok, cls_hat, init_image=blur,
-                                                    strength=cfg.ll_strength))
-                        gts.append(batch["image"][:take])
-                        got[s] = got.get(s, 0) + take
-                        if len(got) == n_subj and all(v >= per_subj for v in got.values()):
-                            break
-                pred = torch.cat(preds); gt = torch.cat(gts)
-                im = {"PixCorr": pixcorr(pred, gt), "SSIM": ssim(pred, gt)}
-                im.update(clip_metric.score(pred, gt))
-                msg += (f" | [test] PixCorr={im['PixCorr']:.3f} SSIM={im['SSIM']:.3f} "
-                        f"CLIP_cos={im['CLIP_cos']:.3f} CLIP_2way={im['CLIP_2way']:.3f}")
-                _save_grid(pred, gt, out_dir / f"recon_ep{epoch}.png")
             ema.restore(model)
-            if nan_skips:
-                msg += f" | nan_skips={nan_skips}"
-            print(msg)
 
+            # Persist the checkpoint on the val-cos signal BEFORE any decoder
+            # work. Decode-eval is heavy (SDXL UNet+VAE co-resident with the
+            # training model + AdamW state) and only a progress signal; a crash
+            # there must never throw away the trained weights -- it silently did
+            # once (an OOM in the img2img VAE-encode killed a 10-epoch run before
+            # a single checkpoint was written).
             ckpt = {"model": model.state_dict(), "ema": ema.shadow, "cfg": cfg,
                     "stats": stats.to_dict(), "voxels": bundle.voxels,
                     "subjects": args.subjects, "epoch": epoch}
             torch.save(ckpt, out_dir / "last.pt")
-
             if sel_cos > best_cos:
                 best_cos = sel_cos
                 torch.save(ckpt, out_dir / "best.pt")
-            # Legacy CLIP-2way checkpoint only when there is no honest val split.
-            if bundle.val is None and args.decode_eval and im["CLIP_2way"] > best_clip:
-                best_clip = im["CLIP_2way"]
-                torch.save(ckpt, out_dir / "best_clip2way.pt")
+
+            # Best-effort image metrics: guard so an OOM/failure just skips this
+            # epoch's decode instead of killing the run, and always restore the
+            # training weights + free the cache afterwards.
+            if args.decode_eval:
+                im = None
+                try:
+                    ema.store(model); ema.copy_to(model)
+                    n_subj = max(1, len(args.subjects))
+                    per_subj = max(1, args.decode_n // n_subj)
+                    preds, gts, got = [], [], {}
+                    with torch.no_grad():
+                        for batch in bundle.eval:
+                            s = int(batch["subject"])
+                            if got.get(s, 0) >= per_subj:
+                                continue
+                            take = min(batch["fmri"].shape[0], per_subj - got.get(s, 0))
+                            fmri = batch["fmri"][:take].to(device, non_blocking=True)
+                            tok, cls_hat = model.predict_tokens(fmri, batch["subject"], stats,
+                                                                cond_source=cfg.cond_source)
+                            blur = model.predict_lowlevel(fmri, batch["subject"])
+                            preds.append(decoder.decode(tok, cls_hat, init_image=blur,
+                                                        strength=cfg.ll_strength))
+                            gts.append(batch["image"][:take])
+                            got[s] = got.get(s, 0) + take
+                            if len(got) == n_subj and all(v >= per_subj for v in got.values()):
+                                break
+                    pred = torch.cat(preds); gt = torch.cat(gts)
+                    im = {"PixCorr": pixcorr(pred, gt), "SSIM": ssim(pred, gt)}
+                    im.update(clip_metric.score(pred, gt))
+                    msg += (f" | [test] PixCorr={im['PixCorr']:.3f} SSIM={im['SSIM']:.3f} "
+                            f"CLIP_cos={im['CLIP_cos']:.3f} CLIP_2way={im['CLIP_2way']:.3f}")
+                    _save_grid(pred, gt, out_dir / f"recon_ep{epoch}.png")
+                except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                    msg += f" | [decode-eval skipped: {type(e).__name__}: {e}]"
+                finally:
+                    ema.restore(model)
+                    torch.cuda.empty_cache()
+                # Legacy CLIP-2way checkpoint (no honest val split only), saved
+                # AFTER the finally so ckpt's live tensors hold TRAINING weights
+                # again -- not the EMA weights copy_to() swapped in for the decode.
+                if bundle.val is None and im is not None and im["CLIP_2way"] > best_clip:
+                    best_clip = im["CLIP_2way"]
+                    torch.save(ckpt, out_dir / "best_clip2way.pt")
+
+            if nan_skips:
+                msg += f" | nan_skips={nan_skips}"
+            print(msg)
 
     print(f"Done. best {('val' if bundle.val is not None else 'test')}_cos={best_cos:.4f}. "
           f"Checkpoints in {out_dir}")
