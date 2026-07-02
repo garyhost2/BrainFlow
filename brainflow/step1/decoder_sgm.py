@@ -174,13 +174,17 @@ class SDXLUnCLIPDecoder:
         ``init_image``: (B, 3, h, w) blurry layout in [0,1]; None => pure-noise decode.
         ``strength``:   img2img strength in (0,1]; lower = preserve more layout.
         """
-        init_lat = None
-        if init_image is not None and strength < 1.0:
-            init_lat = self._encode_init(init_image)
+        # Encode the blurry init PER-IMAGE inside the loop rather than as one
+        # batched VAE.encode over the whole eval batch. At 768x768 the batched
+        # encode allocates ~9 GiB of activations and OOMs when this decoder is
+        # co-resident with the training model + AdamW state. GroupNorm (not
+        # BatchNorm) makes the per-image encode numerically identical to slicing
+        # a batched encode, and the UNet sampling below is already batch-1.
+        use_init = init_image is not None and strength < 1.0
         imgs = []
         for i in range(tokens_raw.shape[0]):
             vec = self._vector(None if cls_emb is None else cls_emb[i:i + 1])
-            il = None if init_lat is None else init_lat[i:i + 1]
+            il = self._encode_init(init_image[i:i + 1]) if use_init else None
             s = self._recon_one(tokens_raw[i:i + 1].to(self.device), vec,
                                 init_latent=il, strength=strength, num_samples=1)
             if self.out_size and self.out_size != s.shape[-1]:
