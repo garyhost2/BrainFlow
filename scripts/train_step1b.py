@@ -66,6 +66,10 @@ def parse_args():
     ap.add_argument("--init-from", type=str, default=None,
                     help="warm-start model weights from a checkpoint (strict=False; "
                          "e.g. add the low-level head to an already-trained token model)")
+    ap.add_argument("--freeze-token", action="store_true",
+                    help="freeze the whole token model and train ONLY the low-level "
+                         "head; select best.pt on PixCorr+SSIM (not val_cos). Use with "
+                         "--init-from to add a low-level head without drifting the prior.")
     ap.add_argument("--eval-freq", type=int, default=5)
     ap.add_argument("--decode-eval", action="store_true")
     ap.add_argument("--decode-n", type=int, default=16)
@@ -127,10 +131,24 @@ def main():
         res = model.load_state_dict(ck["model"], strict=False)
         print(f"✓ warm-start from {args.init_from}: {len(res.missing_keys)} fresh params "
               f"(e.g. low_head), {len(res.unexpected_keys)} unexpected")
+
+    low_only = bool(args.freeze_token)
+    if args.freeze_token:
+        if model.low_head is None:
+            raise SystemExit("--freeze-token needs the low-level head (drop --no-low-level)")
+        n_frozen = n_train = 0
+        for name, p in model.named_parameters():
+            train_it = name.startswith("low_head")
+            p.requires_grad_(train_it)
+            n_train += p.numel() if train_it else 0
+            n_frozen += 0 if train_it else p.numel()
+        print(f"✓ freeze-token: {n_frozen/1e6:.1f}M frozen, {n_train/1e6:.2f}M trainable "
+              f"(low_head only); best.pt selected on PixCorr+SSIM")
     if args.compile:
         model = torch.compile(model)
     ema = EMA(model, decay=args.ema_decay)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
+    opt_params = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(opt_params, lr=args.lr, weight_decay=args.weight_decay,
                             betas=(0.9, 0.95), fused=True)
 
     spe = len(bundle.train_sampler)
@@ -146,10 +164,13 @@ def main():
 
     best_cos = -1.0
     best_clip = -1.0
+    best_img = -1.0
     step = 0
     nan_skips = 0
     for epoch in range(1, args.epochs + 1):
-        model.train()
+        # low_only: run the frozen backbone in eval mode (stable features; low_head
+        # has no train/eval-sensitive layers) so the head learns a clean mapping.
+        model.eval() if low_only else model.train()
         bundle.train_sampler.set_epoch(epoch)
         pbar = tqdm(bundle.train, desc=f"Ep{epoch}", mininterval=1.0)
         for batch in pbar:
@@ -167,7 +188,7 @@ def main():
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 ld = model.training_step(fmri, batch["subject"], tgt_std,
                                          target_raw=tgt_raw, target_cls=tgt_cls,
-                                         target_img=tgt_img)
+                                         target_img=tgt_img, low_only=low_only)
                 loss = ld["loss"]
             loss.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
@@ -178,10 +199,13 @@ def main():
                 nan_skips += 1
             step += 1
             if step % 50 == 0:
-                pbar.set_postfix(flow=f"{ld['flow']:.3f}", rcfm=f"{ld['rcfm']:.3f}",
-                                 reg=f"{ld['reg']:.3f}", cos=f"{ld['cos']:.3f}",
+                pbar.set_postfix(flow=f"{float(ld.get('flow', 0)):.3f}",
+                                 rcfm=f"{float(ld.get('rcfm', 0)):.3f}",
+                                 reg=f"{float(ld.get('reg', 0)):.3f}",
+                                 cos=f"{float(ld.get('cos', 0)):.3f}",
                                  low=f"{float(ld.get('low', 0)):.3f}",
-                                 clip=f"{ld['clip']:.3f}", lr=f"{lr:.1e}", skip=nan_skips)
+                                 clip=f"{float(ld.get('clip', 0)):.3f}",
+                                 lr=f"{lr:.1e}", skip=nan_skips)
 
         if epoch % args.eval_freq == 0 or epoch == args.epochs:
             ema.store(model); ema.copy_to(model)
@@ -206,7 +230,10 @@ def main():
                     "stats": stats.to_dict(), "voxels": bundle.voxels,
                     "subjects": args.subjects, "epoch": epoch}
             torch.save(ckpt, out_dir / "last.pt")
-            if sel_cos > best_cos:
+            # Default: select best.pt on token cosine. In --freeze-token mode the
+            # token model is frozen (val_cos is constant), so best.pt is selected
+            # on the low-level image metric (PixCorr+SSIM) after the decode below.
+            if not low_only and sel_cos > best_cos:
                 best_cos = sel_cos
                 torch.save(ckpt, out_dir / "best.pt")
 
@@ -220,8 +247,16 @@ def main():
                     n_subj = max(1, len(args.subjects))
                     per_subj = max(1, args.decode_n // n_subj)
                     preds, gts, got = [], [], {}
+                    blur_sq, blur_n = 0.0, 0
+                    # Honest selection: in --freeze-token mode best.pt is chosen on this
+                    # metric, so decode the leakage-free VAL split (report-only TEST comes
+                    # from the stage-2 full eval). Default token path decodes TEST purely
+                    # as a progress readout (best.pt there is the val_cos checkpoint).
+                    decode_loader = (bundle.val if (low_only and bundle.val is not None)
+                                     else bundle.eval)
+                    split_tag = "val" if decode_loader is bundle.val else "test"
                     with torch.no_grad():
-                        for batch in bundle.eval:
+                        for batch in decode_loader:
                             s = int(batch["subject"])
                             if got.get(s, 0) >= per_subj:
                                 continue
@@ -230,6 +265,14 @@ def main():
                             tok, cls_hat = model.predict_tokens(fmri, batch["subject"], stats,
                                                                 cond_source=cfg.cond_source)
                             blur = model.predict_lowlevel(fmri, batch["subject"])
+                            if blur is not None:
+                                # How good is the predicted blurry layout vs the GT-blurry
+                                # target the head is trained on? (the img2img ceiling driver)
+                                gtb = F.interpolate(batch["image"][:take].float().to(device),
+                                                    cfg.ll_size, mode="bilinear",
+                                                    align_corners=False).clamp(0, 1)
+                                blur_sq += F.mse_loss(blur, gtb).item() * take
+                                blur_n += take
                             preds.append(decoder.decode(tok, cls_hat, init_image=blur,
                                                         strength=cfg.ll_strength))
                             gts.append(batch["image"][:take])
@@ -239,8 +282,10 @@ def main():
                     pred = torch.cat(preds); gt = torch.cat(gts)
                     im = {"PixCorr": pixcorr(pred, gt), "SSIM": ssim(pred, gt)}
                     im.update(clip_metric.score(pred, gt))
-                    msg += (f" | [test] PixCorr={im['PixCorr']:.3f} SSIM={im['SSIM']:.3f} "
+                    msg += (f" | [{split_tag}] PixCorr={im['PixCorr']:.3f} SSIM={im['SSIM']:.3f} "
                             f"CLIP_cos={im['CLIP_cos']:.3f} CLIP_2way={im['CLIP_2way']:.3f}")
+                    if blur_n:
+                        msg += f" blur_mse={blur_sq / blur_n:.4f}"
                     _save_grid(pred, gt, out_dir / f"recon_ep{epoch}.png")
                 except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
                     msg += f" | [decode-eval skipped: {type(e).__name__}: {e}]"
@@ -253,13 +298,29 @@ def main():
                 if bundle.val is None and im is not None and im["CLIP_2way"] > best_clip:
                     best_clip = im["CLIP_2way"]
                     torch.save(ckpt, out_dir / "best_clip2way.pt")
+                # --freeze-token: token model is fixed, so best.pt IS the low-level
+                # checkpoint -- select it on PixCorr+SSIM (the eval reloads EMA
+                # weights, which is what this decode measured).
+                if low_only and im is not None and (im["PixCorr"] + im["SSIM"]) > best_img:
+                    best_img = im["PixCorr"] + im["SSIM"]
+                    torch.save(ckpt, out_dir / "best.pt")
+                    msg += "  ✓best.pt"
 
             if nan_skips:
                 msg += f" | nan_skips={nan_skips}"
             print(msg)
 
-    print(f"Done. best {('val' if bundle.val is not None else 'test')}_cos={best_cos:.4f}. "
-          f"Checkpoints in {out_dir}")
+    # Guarantee best.pt exists: in --freeze-token mode it is only written when an
+    # image metric improves, so fall back to last.pt if no decode-eval ever ran.
+    if not (out_dir / "best.pt").exists() and (out_dir / "last.pt").exists():
+        import shutil
+        shutil.copyfile(out_dir / "last.pt", out_dir / "best.pt")
+        print("[best.pt] no selection metric fired; fell back to last.pt")
+    if low_only:
+        print(f"Done. best low-level PixCorr+SSIM={best_img:.4f}. Checkpoints in {out_dir}")
+    else:
+        print(f"Done. best {('val' if bundle.val is not None else 'test')}_cos={best_cos:.4f}. "
+              f"Checkpoints in {out_dir}")
 
 def _save_grid(pred, gt, path, n=8):
     try:

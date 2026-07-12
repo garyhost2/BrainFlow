@@ -419,10 +419,20 @@ class TokenStep1Model(nn.Module):
     #  Training
     # ====================================================================
     def training_step(self, fmri, subject, target_std, target_raw=None, target_cls=None,
-                      target_img=None):
+                      target_img=None, low_only=False):
         cfg = self.cfg
         B = fmri.shape[0]; device = fmri.device
         brain = self.backbone(fmri, subject)
+        if low_only:
+            # Frozen-token warm-start: train ONLY the low-level head. Skip the whole
+            # DiT prior / CLS / contrastive forward+backward (half the compute) and
+            # optimise the blurry-image MSE alone.
+            out = self._low_level_loss(brain, target_img)
+            if "low" not in out:
+                raise ValueError("low_only training needs low_head enabled + target_img")
+            out = {k: v.detach() for k, v in out.items()} | {
+                "loss": cfg.lambda_low * out["low"]}
+            return out
         cls_dir = None
         if cfg.two_head and target_cls is not None:
             cls_dir = F.normalize(target_cls.float(), dim=-1)        # (B, cls_dim)
