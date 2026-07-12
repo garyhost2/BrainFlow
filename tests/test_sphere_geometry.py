@@ -201,3 +201,25 @@ def test_low_level_disabled():
                               target_cls=torch.randn(2, 10),
                               target_img=torch.rand(2, 3, 32, 32))
     assert "low" not in out          # no head -> no term
+
+
+def test_low_only_fast_path_trains_only_the_head():
+    # --freeze-token: freeze everything except low_head, then low_only training
+    # must (a) skip the prior/CLS/contrastive terms, (b) produce a finite low-only
+    # loss, and (c) send gradients to low_head but NOT to the frozen token model.
+    model = _model("sphere", two_head=True, train=True)
+    for name, p in model.named_parameters():
+        p.requires_grad_(name.startswith("low_head"))
+
+    out = model.training_step(torch.randn(2, 10), 1, None,
+                              target_raw=torch.randn(2, 4, 8),
+                              target_cls=torch.randn(2, 10),
+                              target_img=torch.rand(2, 3, 32, 32),
+                              low_only=True)
+    assert set(out) == {"low", "loss"}                 # only the low-level term
+    assert torch.isfinite(out["loss"]) and out["loss"] > 0
+    out["loss"].backward()
+    assert model.low_head.out.weight.grad is not None  # head learns
+    # every frozen token-model param stayed grad-free (no prior drift)
+    assert all(p.grad is None for n, p in model.named_parameters()
+               if not n.startswith("low_head"))
