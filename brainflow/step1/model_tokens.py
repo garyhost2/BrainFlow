@@ -244,9 +244,21 @@ class LowLevelHead(nn.Module):
     def __init__(self, cfg: "TokenStep1Config"):
         super().__init__()
         self.base = cfg.ll_base
-        self.stem = nn.Sequential(
-            nn.LayerNorm(cfg.brain_dim), nn.Linear(cfg.brain_dim, self.base * 8 * 8), nn.GELU())
-        n_up = max(1, int(math.log2(max(cfg.ll_size, 8) // 8)))
+        # Lay the N brain tokens on a sqrt(N)xsqrt(N) grid (64 -> 8x8) instead of
+        # mean-pooling them to a single vector. Mean-pooling forced every image to
+        # be reconstructed from ONE summary code, so the MSE regressed to the blurry
+        # mean (blur_mse ~ image variance, ~0.07). Per-token projection + a learned
+        # position keeps spatial variation for the conv upsampler to route.
+        self.grid = int(round(cfg.n_brain_tokens ** 0.5))
+        if self.grid * self.grid != cfg.n_brain_tokens:      # non-square (tiny test)
+            self.grid = max(2, int(cfg.n_brain_tokens ** 0.5))
+        self.proj = nn.Sequential(
+            nn.LayerNorm(cfg.brain_dim), nn.Linear(cfg.brain_dim, self.base), nn.GELU())
+        self.pos = nn.Parameter(torch.zeros(1, cfg.n_brain_tokens, self.base))
+        self.mix = nn.Sequential(
+            nn.Conv2d(self.base, self.base, 3, padding=1),
+            nn.GroupNorm(8, self.base), nn.SiLU())
+        n_up = max(1, int(math.log2(max(cfg.ll_size, self.grid) // self.grid)))
         blocks, c = [], self.base
         for _ in range(n_up):
             nc = max(c // 2, 32)
@@ -259,8 +271,14 @@ class LowLevelHead(nn.Module):
         self.out = nn.Conv2d(c, 3, 3, padding=1)
 
     def forward(self, brain):
-        B = brain.shape[0]
-        h = self.stem(brain.mean(dim=1)).view(B, self.base, 8, 8)
+        B, N, _ = brain.shape
+        h = (self.proj(brain) + self.pos[:, :N]).transpose(1, 2)   # (B, base, N)
+        g = self.grid
+        if N == g * g:
+            h = h.reshape(B, self.base, g, g)
+        else:
+            h = F.adaptive_avg_pool1d(h, g * g).reshape(B, self.base, g, g)
+        h = self.mix(h)
         return torch.sigmoid(self.out(self.ups(h)))     # (B, 3, ll_size, ll_size) in [0,1]
 
 
