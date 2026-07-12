@@ -98,6 +98,7 @@ class TokenStep1Config:
     low_level: bool = True
     ll_size: int = 128            # blurry-image resolution
     ll_base: int = 256            # channels at the 8x8 stem
+    ll_hidden: int = 1024         # low head's OWN per-subject voxel-encoder width
     lambda_low: float = 1.0
     ll_strength: float = 0.7      # img2img strength at decode (calibrate via smoke)
 
@@ -241,20 +242,21 @@ class LowLevelHead(nn.Module):
     additive: it does not touch the token model.
     """
 
-    def __init__(self, cfg: "TokenStep1Config"):
+    def __init__(self, cfg: "TokenStep1Config", voxels_per_subject: dict[int, int]):
         super().__init__()
         self.base = cfg.ll_base
-        # Lay the N brain tokens on a sqrt(N)xsqrt(N) grid (64 -> 8x8) instead of
-        # mean-pooling them to a single vector. Mean-pooling forced every image to
-        # be reconstructed from ONE summary code, so the MSE regressed to the blurry
-        # mean (blur_mse ~ image variance, ~0.07). Per-token projection + a learned
-        # position keeps spatial variation for the conv upsampler to route.
-        self.grid = int(round(cfg.n_brain_tokens ** 0.5))
-        if self.grid * self.grid != cfg.n_brain_tokens:      # non-square (tiny test)
-            self.grid = max(2, int(cfg.n_brain_tokens ** 0.5))
-        self.proj = nn.Sequential(
-            nn.LayerNorm(cfg.brain_dim), nn.Linear(cfg.brain_dim, self.base), nn.GELU())
-        self.pos = nn.Parameter(torch.zeros(1, cfg.n_brain_tokens, self.base))
+        self.grid = 8
+        # Read RAW voxels through the head's OWN per-subject encoder -- NOT the
+        # frozen bigG-semantic tokens. The gate experiment (blur_mse ~0.070 for
+        # both a mean-pool and a spatial head) proved the semantic backbone
+        # discarded the low-level signal; the retinotopic layout lives in the
+        # voxels (V1), so the low pathway must tap them directly (MindEye2-style).
+        h = cfg.ll_hidden
+        self.input_proj = nn.ModuleDict({
+            str(s): nn.Linear(v, h) for s, v in voxels_per_subject.items()})
+        self.stem = nn.Sequential(nn.LayerNorm(h), nn.GELU(), nn.Dropout(cfg.enc_drop))
+        self.to_grid = nn.Sequential(
+            nn.Linear(h, self.base * self.grid * self.grid), nn.GELU())
         self.mix = nn.Sequential(
             nn.Conv2d(self.base, self.base, 3, padding=1),
             nn.GroupNorm(8, self.base), nn.SiLU())
@@ -270,14 +272,10 @@ class LowLevelHead(nn.Module):
         self.ups = nn.Sequential(*blocks)
         self.out = nn.Conv2d(c, 3, 3, padding=1)
 
-    def forward(self, brain):
-        B, N, _ = brain.shape
-        h = (self.proj(brain) + self.pos[:, :N]).transpose(1, 2)   # (B, base, N)
-        g = self.grid
-        if N == g * g:
-            h = h.reshape(B, self.base, g, g)
-        else:
-            h = F.adaptive_avg_pool1d(h, g * g).reshape(B, self.base, g, g)
+    def forward(self, fmri, subject):
+        B = fmri.shape[0]
+        x = self.stem(self.input_proj[str(int(subject))](fmri))
+        h = self.to_grid(x).view(B, self.base, self.grid, self.grid)
         h = self.mix(h)
         return torch.sigmoid(self.out(self.ups(h)))     # (B, 3, ll_size, ll_size) in [0,1]
 
@@ -418,7 +416,7 @@ class TokenStep1Model(nn.Module):
             nn.Linear(cfg.brain_dim, clip_out),
         )
         self.radius_head = RadiusHead(cfg)
-        self.low_head = LowLevelHead(cfg) if cfg.low_level else None
+        self.low_head = LowLevelHead(cfg, voxels_per_subject) if cfg.low_level else None
         self.register_buffer("tgt_mean", torch.zeros(cfg.token_dim))
 
     def set_target_mean(self, mean):
@@ -440,17 +438,17 @@ class TokenStep1Model(nn.Module):
                       target_img=None, low_only=False):
         cfg = self.cfg
         B = fmri.shape[0]; device = fmri.device
-        brain = self.backbone(fmri, subject)
         if low_only:
-            # Frozen-token warm-start: train ONLY the low-level head. Skip the whole
-            # DiT prior / CLS / contrastive forward+backward (half the compute) and
-            # optimise the blurry-image MSE alone.
-            out = self._low_level_loss(brain, target_img)
+            # Frozen-token warm-start: train ONLY the low-level head. It reads raw
+            # voxels through its own encoder, so skip the frozen backbone AND the
+            # whole DiT prior / CLS / contrastive forward+backward entirely.
+            out = self._low_level_loss(fmri, subject, target_img)
             if "low" not in out:
                 raise ValueError("low_only training needs low_head enabled + target_img")
             out = {k: v.detach() for k, v in out.items()} | {
                 "loss": cfg.lambda_low * out["low"]}
             return out
+        brain = self.backbone(fmri, subject)
         cls_dir = None
         if cfg.two_head and target_cls is not None:
             cls_dir = F.normalize(target_cls.float(), dim=-1)        # (B, cls_dim)
@@ -461,7 +459,7 @@ class TokenStep1Model(nn.Module):
         else:
             out |= self._patch_step_euclidean(brain, target_std, cls_dir, B, device)
         out |= self._contrastive_loss(brain, target_std, cls_dir, device)
-        out |= self._low_level_loss(brain, target_img)
+        out |= self._low_level_loss(fmri, subject, target_img)
 
         total = (cfg.lambda_flow * out["flow"] + cfg.lambda_reg * out["reg"]
                  + cfg.lambda_cos * out["cos"] + cfg.lambda_clip * out["clip"]
@@ -474,19 +472,19 @@ class TokenStep1Model(nn.Module):
         out["loss"] = total
         return out
 
-    def _low_level_loss(self, brain, target_img):
+    def _low_level_loss(self, fmri, subject, target_img):
         if self.low_head is None or target_img is None:
             return {}
         blur = F.interpolate(target_img.float(), self.cfg.ll_size, mode="bilinear",
                              align_corners=False).clamp(0, 1)
-        return {"low": F.mse_loss(self.low_head(brain), blur)}
+        return {"low": F.mse_loss(self.low_head(fmri, subject), blur)}
 
     @torch.no_grad()
     def predict_lowlevel(self, fmri, subject):
         """Blurry RGB layout for the decoder's img2img init, or None if disabled."""
         if self.low_head is None:
             return None
-        return self.low_head(self.backbone(fmri, subject))
+        return self.low_head(fmri, subject)
 
     def _cls_flow_loss(self, brain, cls_dir, B, device):
         if self.cls_prior is None or cls_dir is None:
