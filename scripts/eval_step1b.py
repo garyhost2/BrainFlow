@@ -58,12 +58,18 @@ def main():
     subjects = ckpt["subjects"]; voxels = ckpt["voxels"]
 
     model = TokenStep1Model(cfg, voxels)
-    model.load_state_dict(ckpt["model"])
+    # Non-strict: a prior-only checkpoint (trained before the low head) lacks
+    # low_head.* weights -> drop the untrained head so decode is token-only.
+    res = model.load_state_dict(ckpt["model"], strict=False)
+    if any("low_head" in k for k in res.missing_keys):
+        model.low_head = None
+        print("  checkpoint has no trained low_head -> token-only decode")
     if "ema" in ckpt:
         sd = model.state_dict()
         for k, v in ckpt["ema"].items():
-            sd[k].copy_(v)
-        model.load_state_dict(sd)
+            if k in sd:
+                sd[k].copy_(v)
+        model.load_state_dict(sd, strict=False)
     model = model.to(device).eval()
 
     tensors = torch.load(data_dir / args.tensor_cache, map_location="cpu")
