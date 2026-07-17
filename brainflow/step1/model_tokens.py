@@ -96,9 +96,11 @@ class TokenStep1Config:
 
     # --- low-level pathway (spatial layout -> decoder img2img init) ------
     low_level: bool = True
-    ll_size: int = 128            # blurry-image resolution
+    ll_size: int = 64             # blurry-image resolution (lower = lower-dim,
+                                  # more learnable target; MSE@128 regressed to mean)
     ll_base: int = 256            # channels at the 8x8 stem
     ll_hidden: int = 1024         # low head's OWN per-subject voxel-encoder width
+    ll_loss: str = "l1"           # l1 | huber | mse -- L1 is far less mean-seeking
     lambda_low: float = 1.0
     ll_strength: float = 0.7      # img2img strength at decode (calibrate via smoke)
 
@@ -477,7 +479,15 @@ class TokenStep1Model(nn.Module):
             return {}
         blur = F.interpolate(target_img.float(), self.cfg.ll_size, mode="bilinear",
                              align_corners=False).clamp(0, 1)
-        return {"low": F.mse_loss(self.low_head(fmri, subject), blur)}
+        pred = self.low_head(fmri, subject)
+        mode = getattr(self.cfg, "ll_loss", "l1")
+        if mode == "mse":
+            low = F.mse_loss(pred, blur)
+        elif mode == "huber":
+            low = F.huber_loss(pred, blur, delta=0.1)
+        else:                                    # "l1" (default): least mean-seeking
+            low = F.l1_loss(pred, blur)
+        return {"low": low}
 
     @torch.no_grad()
     def predict_lowlevel(self, fmri, subject):
