@@ -53,6 +53,10 @@ def parse_args():
                     help="low-level (blurry-image) loss weight; 0 disables the pathway")
     ap.add_argument("--ll-strength", type=float, default=0.7,
                     help="img2img strength at decode (lower preserves more layout)")
+    ap.add_argument("--ll-size", type=int, default=64,
+                    help="blurry-image resolution the low head predicts (lower = more learnable)")
+    ap.add_argument("--ll-loss", type=str, default="l1", choices=["l1", "huber", "mse"],
+                    help="low-level loss; l1/huber are far less mean-seeking than mse")
     ap.add_argument("--no-low-level", dest="low_level", action="store_false", default=True)
     ap.add_argument("--val-frac", type=float, default=0.1,
                     help="train fraction held out for leakage-free selection (0 disables)")
@@ -122,7 +126,8 @@ def main():
                            lambda_radius=args.lambda_radius, two_head=args.two_head,
                            lambda_rcfm=args.lambda_rcfm, cls_cfg_scale=args.cls_cfg_scale,
                            solver=args.solver, low_level=args.low_level,
-                           lambda_low=args.lambda_low, ll_strength=args.ll_strength)
+                           lambda_low=args.lambda_low, ll_strength=args.ll_strength,
+                           ll_size=args.ll_size, ll_loss=args.ll_loss)
     model = TokenStep1Model(cfg, bundle.voxels).to(device)
     if cfg.geometry == "sphere" and cfg.center_tokens:
         model.set_target_mean(stats.mean)

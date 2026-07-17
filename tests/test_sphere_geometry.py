@@ -203,6 +203,39 @@ def test_low_level_disabled():
     assert "low" not in out          # no head -> no term
 
 
+def test_ll_loss_modes_all_train():
+    import dataclasses
+    for mode in ("l1", "huber", "mse"):
+        cfg = dataclasses.replace(_tiny_cfg("sphere"), ll_loss=mode)
+        model = TokenStep1Model(cfg, {1: 10}); model.train()
+        out = model.training_step(torch.randn(2, 10), 1, None,
+                                  target_raw=torch.randn(2, 4, 8),
+                                  target_cls=torch.randn(2, 10),
+                                  target_img=torch.rand(2, 3, 32, 32), low_only=True)
+        assert torch.isfinite(out["low"]) and out["low"] > 0, mode
+        out["loss"].backward()
+        assert model.low_head.out.weight.grad is not None, mode
+
+
+def test_low_head_can_overfit_two_distinct_layouts():
+    # The MSE->mean failure would show as inability to separate two targets. With
+    # the voxel-fed head + L1, a few steps must drive the loss well below the
+    # constant-prediction floor (proves it learns structure, not the average).
+    torch.manual_seed(0)
+    model = _model("sphere", train=True)
+    fmri = torch.randn(2, 10)
+    tgt = torch.rand(2, 3, 32, 32)
+    tgt[0] *= 0.2; tgt[1] = 1.0 - tgt[1] * 0.2          # two very different images
+    opt = torch.optim.Adam(model.low_head.parameters(), lr=1e-2)
+    first = None
+    for _ in range(150):
+        opt.zero_grad()
+        out = model.training_step(fmri, 1, None, target_img=tgt, low_only=True)
+        out["loss"].backward(); opt.step()
+        first = first if first is not None else out["low"].item()
+    assert out["low"].item() < 0.5 * first    # loss must drop, i.e. it fits the layouts
+
+
 def test_low_only_fast_path_trains_only_the_head():
     # --freeze-token: freeze everything except low_head, then low_only training
     # must (a) skip the prior/CLS/contrastive terms, (b) produce a finite low-only
