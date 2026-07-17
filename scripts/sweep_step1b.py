@@ -52,12 +52,21 @@ def _load_model(ckpt_path, device):
     cfg: TokenStep1Config = ckpt["cfg"]
     stats = TargetStats.from_dict(ckpt["stats"])
     model = TokenStep1Model(cfg, ckpt["voxels"])
-    model.load_state_dict(ckpt["model"])
+    # Non-strict: a prior-only checkpoint (e.g. step1c_sphere, trained before the
+    # low head existed) has no low_head.* weights. Drop the untrained head so the
+    # sweep decodes token-only instead of crashing or using a random blur.
+    res = model.load_state_dict(ckpt["model"], strict=False)
+    if any("low_head" in k for k in res.missing_keys):
+        model.low_head = None
+        print("  checkpoint has no trained low_head -> token-only decodes")
+    elif res.missing_keys:
+        print(f"  [warn] {len(res.missing_keys)} missing keys (e.g. {res.missing_keys[:2]})")
     if "ema" in ckpt:                                   # prefer EMA weights
         sd = model.state_dict()
         for k, v in ckpt["ema"].items():
-            sd[k].copy_(v)
-        model.load_state_dict(sd)
+            if k in sd:
+                sd[k].copy_(v)
+        model.load_state_dict(sd, strict=False)
     return model.to(device).eval(), cfg, stats, ckpt["subjects"], ckpt["voxels"]
 
 
@@ -110,11 +119,14 @@ def main():
     clip_metric = CLIPMetric(device, hf_cache=hf_cache)
 
     # Grid: cond_source x cfg_scale x img2img strength (regression ignores cfg).
+    # No trained low head -> the blur is None, so every strength is token-only;
+    # collapse to strength=1.0 to avoid 4x redundant decodes.
+    strengths = args.ll_strengths if model.low_head is not None else [1.0]
     configs = []
     for cond in args.cond_sources:
         scales = [1.0] if cond == "regression" else args.cfg_scales
         for cfgs in scales:
-            for st in args.ll_strengths:
+            for st in strengths:
                 configs.append((cond, cfgs, st))
     print(f"  sweeping {len(configs)} configs x {args.n_images} images", flush=True)
 
