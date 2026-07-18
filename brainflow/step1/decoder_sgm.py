@@ -28,6 +28,23 @@ import torch
 import torch.nn.functional as F
 
 
+def quiet_benign_warnings():
+    """Silence the known-benign vendored-sgm log spam so a big run's .err stays
+    readable (these do NOT affect correctness or A100 speed):
+      * sgm's 'softmax-xformers not available -> native attention' (our SDPA is
+        already the flash kernel on A100; the message itself says it's fine on torch>=2.0);
+      * torch.utils.checkpoint use_reentrant / 'no inputs require grad' notes emitted
+        by the frozen decoder's gradient-checkpointing during no-grad inference.
+    Real errors (sgm ERROR level, other warnings) still surface.
+    """
+    import warnings
+    import logging
+    warnings.filterwarnings("ignore", message=".*use_reentrant.*")
+    warnings.filterwarnings("ignore", message=".*None of the inputs have requires_grad.*")
+    for name in ("sgm", "sgm.modules.attention", "sgm.modules.diffusionmodules.model"):
+        logging.getLogger(name).setLevel(logging.ERROR)
+
+
 class SDXLUnCLIPDecoder:
     def __init__(self, device, mindeye_src, ckpt_path, num_steps=38, out_size=256,
                  cls_vector_slot=(0, 1280), img2img_cfg=5.0):

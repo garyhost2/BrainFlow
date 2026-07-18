@@ -13,6 +13,7 @@ from brainflow.step1.targets_bigg import build_or_load_bigg_targets
 from brainflow.step1.targets import TargetStats
 from brainflow.step1.data import build_step1_loaders
 from brainflow.step1.metrics import EMA, pixcorr, ssim, CLIPMetric
+from brainflow.step1.decoder_sgm import quiet_benign_warnings
 
 def setup_a100():
     torch.set_float32_matmul_precision("high")
@@ -106,6 +107,7 @@ def eval_token_cosine(model, loader, stats, device):
 def main():
     args = parse_args()
     setup_a100()
+    quiet_benign_warnings()
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
