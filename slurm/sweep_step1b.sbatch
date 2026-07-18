@@ -41,6 +41,10 @@ CKPT="${CKPT:-outputs/step1c_sphere/last.pt}"
 DATA_DIR="${DATA_DIR:-./mindeyev2_cache}"
 TARGET_DIR="${TARGET_DIR:-${DATA_DIR}}"
 N_IMAGES="${N_IMAGES:-200}"
+# Widen the grid without editing code, e.g.:
+#   COND_SOURCES="regression blend prior" CFG_SCALES="1.0 1.5 2.0 3.0" N_IMAGES=982 ...
+COND_SOURCES="${COND_SOURCES:-regression prior}"
+CFG_SCALES="${CFG_SCALES:-1.0 3.0}"
 
 python -u -m scripts.sweep_step1b \
     --ckpt "${CKPT}" \
@@ -49,6 +53,8 @@ python -u -m scripts.sweep_step1b \
     --mindeye-src "${MINDEYE_SRC}" \
     --ckpt-path "${UNCLIP_CKPT}" \
     --n-images "${N_IMAGES}" \
+    --cond-sources ${COND_SOURCES} \
+    --cfg-scales ${CFG_SCALES} \
     --out "$(dirname "${CKPT}")/sweep"
 
 echo "Done at $(date)."
