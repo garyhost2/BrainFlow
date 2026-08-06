@@ -25,6 +25,7 @@ from brainflow.step1.targets_bigg import build_or_load_bigg_targets
 from brainflow.step1.data import build_step1_loaders
 from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder, quiet_benign_warnings
 from brainflow.step1.metrics import pixcorr, ssim, CLIPMetric
+from brainflow.metrics_full import evaluate_full, retrieval_metrics, format_comparison
 
 
 def parse_args():
@@ -43,6 +44,13 @@ def parse_args():
     ap.add_argument("--cfg-scales", type=float, nargs="+", default=[1.0, 3.0])
     ap.add_argument("--ll-strengths", type=float, nargs="+", default=[1.0, 0.7, 0.6, 0.5],
                     help="img2img strengths (1.0 = token-only, no low-level init)")
+    ap.add_argument("--blend-ws", type=float, nargs="+", default=[0.5],
+                    help="prior/regression mix for cond_source=blend (1.0 = pure prior). "
+                         "This knob was hardcoded at 0.5 and never swept.")
+    ap.add_argument("--no-full-metrics", dest="full_metrics", action="store_false",
+                    default=True, help="skip the 8-metric NSD table per config")
+    ap.add_argument("--no-retrieval", dest="retrieval", action="store_false", default=True)
+    ap.add_argument("--retrieval-pool", type=int, default=300)
     ap.add_argument("--out", type=str, default="outputs/step1c_sphere/sweep")
     return ap.parse_args()
 
@@ -75,7 +83,7 @@ def _collect(loader, n):
     """A fixed subset of test batches (same images for every config = fair)."""
     out, tot = [], 0
     for b in loader:
-        out.append((b["fmri"], int(b["subject"]), b["image"]))
+        out.append((b["fmri"], int(b["subject"]), b["image"], b["emb"]))
         tot += b["fmri"].shape[0]
         if tot >= n:
             break
@@ -84,9 +92,12 @@ def _collect(loader, n):
 
 @torch.no_grad()
 def _eval_config(model, subset, stats, decoder, clip_metric, device, *,
-                 cond_source, cfg_scale, strength, steps, solver, n):
-    preds, gts = [], []
-    for fmri, subj, imgs in subset:
+                 cond_source, cfg_scale, strength, steps, solver, n,
+                 blend_w=None, full_metrics=True, retrieval=True, pool=300):
+    if blend_w is not None:
+        model.cfg.blend_w = blend_w
+    preds, gts, tok_p, tok_g = [], [], [], []
+    for fmri, subj, imgs, emb in subset:
         f = fmri.to(device)
         tok, cls_hat = model.predict_tokens(
             f, subj, stats, cond_source=cond_source, cfg_scale=cfg_scale,
@@ -94,10 +105,21 @@ def _eval_config(model, subset, stats, decoder, clip_metric, device, *,
         blur = model.predict_lowlevel(f, subj)
         preds.append(decoder.decode(tok, cls_hat, init_image=blur, strength=strength))
         gts.append(imgs)
+        if retrieval:
+            tok_p.append(tok.detach().to("cpu", torch.float16))
+            tok_g.append(emb.to("cpu", torch.float16))
     pred = torch.cat(preds)[:n]
     gt = torch.cat(gts)[:n]
-    m = {"PixCorr": pixcorr(pred, gt), "SSIM": ssim(pred, gt)}
-    m.update(clip_metric.score(pred, gt))
+    m = {"legacy_PixCorr": pixcorr(pred, gt), "legacy_SSIM": ssim(pred, gt)}
+    m.update({f"legacy_{k}": v for k, v in clip_metric.score(pred, gt).items()})
+    if full_metrics:
+        m.update(evaluate_full(pred, gt, device))
+    else:
+        m["PixCorr"] = m["legacy_PixCorr"]; m["SSIM"] = m["legacy_SSIM"]
+        m["CLIP_2way"] = m["legacy_CLIP_2way"]
+    if retrieval and tok_p:
+        m.update(retrieval_metrics(torch.cat(tok_p)[:n], torch.cat(tok_g)[:n],
+                                   batch_size=pool, device=device))
     return m
 
 
@@ -126,20 +148,30 @@ def main():
     configs = []
     for cond in args.cond_sources:
         scales = [1.0] if cond == "regression" else args.cfg_scales
+        # blend_w only means anything for cond_source=blend
+        blends = args.blend_ws if cond == "blend" else [None]
         for cfgs in scales:
-            for st in strengths:
-                configs.append((cond, cfgs, st))
+            for bw in blends:
+                for st in strengths:
+                    configs.append((cond, cfgs, bw, st))
     print(f"  sweeping {len(configs)} configs x {args.n_images} images", flush=True)
 
     rows = []
-    for cond, cfgs, st in configs:
+    for cond, cfgs, bw, st in configs:
         m = _eval_config(model, subset, stats, decoder, clip_metric, device,
                          cond_source=cond, cfg_scale=cfgs, strength=st,
-                         steps=args.steps, solver=args.solver, n=args.n_images)
-        row = {"cond_source": cond, "cfg_scale": cfgs, "strength": st, **m}
+                         steps=args.steps, solver=args.solver, n=args.n_images,
+                         blend_w=bw, full_metrics=args.full_metrics,
+                         retrieval=args.retrieval, pool=args.retrieval_pool)
+        row = {"cond_source": cond, "cfg_scale": cfgs, "blend_w": bw,
+               "strength": st, **m}
         rows.append(row)
-        print(f"  {cond:11s} cfg={cfgs:<4} str={st:<4} | PixCorr={m['PixCorr']:.3f} "
-              f"SSIM={m['SSIM']:.3f} CLIP_2way={m['CLIP_2way']:.3f}", flush=True)
+        extra = ""
+        if "retrieval_fwd" in m:
+            extra = f" ret={m['retrieval_fwd']:.3f}/{m['retrieval_bwd']:.3f}"
+        print(f"  {cond:11s} cfg={cfgs:<4} bw={str(bw):<5} str={st:<4} | "
+              f"PixCorr={m['PixCorr']:.3f} SSIM={m['SSIM']:.3f} "
+              f"CLIP_2way={m['CLIP_2way']:.3f}{extra}", flush=True)
 
     best_pix = max(rows, key=lambda r: r["PixCorr"])
     best_clip = max(rows, key=lambda r: r["CLIP_2way"])
@@ -149,11 +181,16 @@ def main():
 
     print("\n=== BEST CONFIGS ===")
     print(f"  PixCorr : {best_pix['cond_source']} cfg={best_pix['cfg_scale']} "
-          f"str={best_pix['strength']} -> PixCorr={best_pix['PixCorr']:.3f} "
+          f"bw={best_pix['blend_w']} str={best_pix['strength']} -> "
+          f"PixCorr={best_pix['PixCorr']:.3f} "
           f"SSIM={best_pix['SSIM']:.3f} CLIP_2way={best_pix['CLIP_2way']:.3f}")
     print(f"  CLIP_2way: {best_clip['cond_source']} cfg={best_clip['cfg_scale']} "
-          f"str={best_clip['strength']} -> CLIP_2way={best_clip['CLIP_2way']:.3f} "
+          f"bw={best_clip['blend_w']} str={best_clip['strength']} -> "
+          f"CLIP_2way={best_clip['CLIP_2way']:.3f} "
           f"PixCorr={best_clip['PixCorr']:.3f}")
+    if args.full_metrics:
+        print("\n=== vs the published NSD table (CLIP-optimal config) ===")
+        print(format_comparison(best_clip))
     print(f"\n  full table -> {out_dir/'sweep.json'}")
 
 

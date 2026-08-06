@@ -13,6 +13,7 @@ from brainflow.step1.targets_bigg import build_or_load_bigg_targets
 from brainflow.step1.data import build_step1_loaders
 from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder, quiet_benign_warnings
 from brainflow.step1.metrics import pixcorr, ssim, CLIPMetric
+from brainflow.metrics_full import evaluate_full, retrieval_metrics, format_comparison
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -37,6 +38,13 @@ def parse_args():
     ap.add_argument("--ll-strength", type=float, default=None,
                     help="override the checkpoint's img2img strength (low-level pathway)")
     ap.add_argument("--max-images", type=int, default=10_000)
+    ap.add_argument("--no-full-metrics", dest="full_metrics", action="store_false",
+                    default=True,
+                    help="skip the 8-metric NSD table (AlexNet/Inception/EffNet/SwAV)")
+    ap.add_argument("--no-retrieval", dest="retrieval", action="store_false", default=True,
+                    help="skip image/brain retrieval (needs the predicted tokens in RAM)")
+    ap.add_argument("--retrieval-pool", type=int, default=300,
+                    help="candidates per retrieval pool (NSD convention: 300)")
     ap.add_argument("--out", type=str, default="outputs/step1b/eval")
     return ap.parse_args()
 
@@ -93,6 +101,8 @@ def main():
     clip_metric = CLIPMetric(device, hf_cache=hf_cache)
 
     preds, gts = [], []
+    tok_pred, tok_gt = [], []
+    subjects_seen = []
     with torch.no_grad():
         for batch in tqdm(bundle.eval, desc="eval"):
             fmri = batch["fmri"].to(device, non_blocking=True)
@@ -100,13 +110,44 @@ def main():
             blur = model.predict_lowlevel(fmri, batch["subject"])
             preds.append(decoder.decode(tok, cls_hat, init_image=blur, strength=cfg.ll_strength))
             gts.append(batch["image"])
+            subjects_seen.append(int(batch["subject"]))
+            if args.retrieval:
+                # Retrieval runs on the predicted embedding, not on pixels. Park it
+                # on CPU in fp16: 982 x 256 x 1664 is ~0.8 GB per side in fp16.
+                tok_pred.append(tok.detach().to("cpu", torch.float16))
+                tok_gt.append(batch["emb"].to("cpu", torch.float16))
             if sum(p.shape[0] for p in preds) >= args.max_images:
                 break
-    pred = torch.cat(preds); gt = torch.cat(gts)
+    n = min(args.max_images, sum(p.shape[0] for p in preds))
+    pred = torch.cat(preds)[:n]; gt = torch.cat(gts)[:n]
 
-    metrics = {"PixCorr": pixcorr(pred, gt), "SSIM": ssim(pred, gt), "n": pred.shape[0]}
-    metrics.update(clip_metric.score(pred, gt))
+    # Legacy keys: identical definitions to every run before 2026-08, kept so the
+    # new NSD-convention numbers below can be diffed against the old ones.
+    metrics = {"n": pred.shape[0],
+               "subjects_evaluated": sorted(set(subjects_seen)),
+               "legacy_PixCorr": pixcorr(pred, gt), "legacy_SSIM": ssim(pred, gt)}
+    metrics.update({f"legacy_{k}": v for k, v in clip_metric.score(pred, gt).items()})
+
+    if args.full_metrics:
+        metrics.update(evaluate_full(pred, gt, device))
+    else:
+        metrics["PixCorr"] = metrics["legacy_PixCorr"]
+        metrics["SSIM"] = metrics["legacy_SSIM"]
+
+    if args.retrieval and tok_pred:
+        tp = torch.cat(tok_pred)[:n]; tg = torch.cat(tok_gt)[:n]
+        metrics.update(retrieval_metrics(tp, tg, batch_size=args.retrieval_pool,
+                                         device=device))
+        del tp, tg
+    tok_pred.clear(); tok_gt.clear()
+
     print(json.dumps(metrics, indent=2))
+    if len(set(subjects_seen)) > 1:
+        print(f"\n[warn] {len(set(subjects_seen))} subjects pooled into one metric set. "
+              "2-way / retrieval foils then include the SAME image seen by another "
+              "subject, which deflates them. Use --max-images 982 for a single subject.")
+    if args.full_metrics:
+        print("\n" + format_comparison(metrics))
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
     try:
         from torchvision.utils import save_image
