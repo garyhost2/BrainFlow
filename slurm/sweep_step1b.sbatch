@@ -45,6 +45,13 @@ N_IMAGES="${N_IMAGES:-200}"
 #   COND_SOURCES="regression blend prior" CFG_SCALES="1.0 1.5 2.0 3.0" N_IMAGES=982 ...
 COND_SOURCES="${COND_SOURCES:-regression prior}"
 CFG_SCALES="${CFG_SCALES:-1.0 3.0}"
+# blend_w was hardcoded at 0.5 until 2026-08 and never swept; it is the direct
+# PixCorr <-> CLIP dial (1.0 = pure prior, 0.0 = pure regression).
+BLEND_WS="${BLEND_WS:-0.5}"
+# Budget: ~1.2 h per config at N_IMAGES=982 against the 6 h wall limit -> <=4 configs.
+# OUT_DIR defaults next to the checkpoint; set it to keep two sweeps of the same
+# run from overwriting each other.
+OUT_DIR="${OUT_DIR:-$(dirname "${CKPT}")/sweep}"
 
 python -u -m scripts.sweep_step1b \
     --ckpt "${CKPT}" \
@@ -55,6 +62,7 @@ python -u -m scripts.sweep_step1b \
     --n-images "${N_IMAGES}" \
     --cond-sources ${COND_SOURCES} \
     --cfg-scales ${CFG_SCALES} \
-    --out "$(dirname "${CKPT}")/sweep"
+    --blend-ws ${BLEND_WS} \
+    --out "${OUT_DIR}"
 
 echo "Done at $(date)."

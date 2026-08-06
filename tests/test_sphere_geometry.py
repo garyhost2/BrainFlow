@@ -256,3 +256,103 @@ def test_low_only_fast_path_trains_only_the_head():
     # every frozen token-model param stayed grad-free (no prior drift)
     assert all(p.grad is None for n, p in model.named_parameters()
                if not n.startswith("low_head"))
+
+
+# ---------------------------------------------------------------------------
+#  BiMixCo augmentation (anti-overfit)
+# ---------------------------------------------------------------------------
+def test_mixco_mixes_only_selected_rows_and_stays_convex():
+    from brainflow.step1.model_tokens import mixco
+    torch.manual_seed(0)
+    x = torch.randn(64, 12)
+    mixed, perm, betas, select = mixco(x, beta=0.15, s_thresh=0.5)
+    assert mixed.shape == x.shape
+    assert perm.shape == (64,) and betas.shape == (64,) and select.shape == (64,)
+    assert (betas[~select] == 1).all()                 # unselected rows untouched
+    assert torch.allclose(mixed[~select], x[~select])
+    assert ((betas >= 0) & (betas <= 1)).all()
+    # each mixed row is exactly the convex combination it claims to be
+    exp = x * betas[:, None] + x[perm] * (1 - betas[:, None])
+    assert torch.allclose(mixed, exp, atol=1e-6)
+    assert select.float().mean() > 0.2                 # roughly half, not none
+
+
+def test_mixco_nce_target_rows_sum_to_one():
+    """The two-hot target must be a distribution, incl. when a row draws itself."""
+    from brainflow.step1.model_tokens import mixco_nce
+    torch.manual_seed(0)
+    B, D = 8, 5
+    preds = F.normalize(torch.randn(B, D), dim=-1)
+    targs = F.normalize(torch.randn(B, D), dim=-1)
+    perm = torch.arange(B)                              # pathological: self-partner
+    betas = torch.full((B,), 0.3)
+    select = torch.ones(B, dtype=torch.bool)
+    loss = mixco_nce(preds, targs, 0.006, perm, betas, select)
+    assert torch.isfinite(loss) and loss > 0
+    # a perfect predictor of the unmixed target scores better than a random one
+    perm2 = torch.roll(torch.arange(B), 1)
+    good = mixco_nce(targs, targs, 0.006, perm2, torch.ones(B), select)
+    bad = mixco_nce(preds, targs, 0.006, perm2, torch.ones(B), select)
+    assert good < bad
+
+
+def test_training_step_with_mixco_trains_and_differs_from_clean():
+    from brainflow.step1.model_tokens import TokenStep1Config
+    cfg = _tiny_cfg("sphere")
+    cfg.mixup_pct = 0.33
+    model = TokenStep1Model(cfg, {1: 10})
+    model.set_target_mean(torch.zeros(8))
+    fmri = torch.randn(8, 10)
+    raw = torch.randn(8, 4, 8)
+    cls = torch.randn(8, 10)
+
+    torch.manual_seed(0)
+    mixed = model.training_step(fmri, 1, None, target_raw=raw, target_cls=cls,
+                                use_mixco=True)
+    torch.manual_seed(0)
+    clean = model.training_step(fmri, 1, None, target_raw=raw, target_cls=cls,
+                                use_mixco=False)
+    assert torch.isfinite(mixed["loss"]) and mixed["loss"].requires_grad
+    assert not torch.allclose(mixed["clip"], clean["clip"])   # contrastive changed
+    mixed["loss"].backward()
+    assert model.backbone.input_proj["1"].weight.grad is not None
+
+
+def test_mixco_off_by_default():
+    """Default config must reproduce the clean SoftCLIP path exactly."""
+    model = _model("sphere", train=True)
+    assert model.cfg.mixup_pct == 0.0
+    fmri = torch.randn(4, 10); raw = torch.randn(4, 4, 8); cls = torch.randn(4, 10)
+    torch.manual_seed(0)
+    a = model.training_step(fmri, 1, None, target_raw=raw, target_cls=cls,
+                            use_mixco=True)          # flag on, but mixup_pct=0
+    torch.manual_seed(0)
+    b = model.training_step(fmri, 1, None, target_raw=raw, target_cls=cls)
+    assert torch.allclose(a["clip"], b["clip"])
+
+
+def test_mixco_leaves_low_level_head_on_clean_voxels():
+    """The low head regresses spatial layout; a mixed input would be label noise.
+
+    Asserted by spying on the tensor ``_low_level_loss`` actually receives -- a
+    seed-matched loss comparison cannot show this, because mixco draws from the
+    RNG and so shifts the head's own dropout mask.
+    """
+    cfg = _tiny_cfg("sphere")
+    cfg.mixup_pct = 0.33
+    model = TokenStep1Model(cfg, {1: 10})
+    model.set_target_mean(torch.zeros(8))
+    fmri = torch.randn(8, 10); raw = torch.randn(8, 4, 8)
+    cls = torch.randn(8, 10); img = torch.rand(8, 3, 32, 32)
+
+    seen = {}
+    orig = model._low_level_loss
+    def spy(f, subject, target_img):
+        seen["fmri"] = f
+        return orig(f, subject, target_img)
+    model._low_level_loss = spy
+
+    out = model.training_step(fmri, 1, None, target_raw=raw, target_cls=cls,
+                              target_img=img, use_mixco=True)
+    assert torch.isfinite(out["low"])
+    assert seen["fmri"] is fmri, "low head was fed the MIXED voxels"

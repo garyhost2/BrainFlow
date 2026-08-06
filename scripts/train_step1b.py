@@ -38,6 +38,17 @@ def parse_args():
     ap.add_argument("--lambda-clip", type=float, default=0.033,
                     help="SoftCLIP contrastive weight (0 disables)")
     ap.add_argument("--clip-temp", type=float, default=0.006)
+    ap.add_argument("--lambda-cos", type=float, default=0.5,
+                    help="per-token angular fidelity on the regression anchor")
+    ap.add_argument("--lambda-reg", type=float, default=1.0,
+                    help="regression-anchor weight (drives cond_source=regression)")
+    ap.add_argument("--enc-drop", type=float, default=0.15,
+                    help="backbone dropout; raise to fight the observed overfitting")
+    ap.add_argument("--mixup-pct", type=float, default=0.0,
+                    help="fraction of epochs trained with BiMixCo voxel mixing "
+                         "(MindEye2 uses 0.33). 0 disables.")
+    ap.add_argument("--mixco-beta", type=float, default=0.15)
+    ap.add_argument("--mixco-s-thresh", type=float, default=0.5)
     ap.add_argument("--geometry", type=str, default="sphere",
                     choices=["euclidean", "sphere"])
     ap.add_argument("--two-head", dest="two_head", action="store_true", default=True,
@@ -129,7 +140,10 @@ def main():
                            lambda_rcfm=args.lambda_rcfm, cls_cfg_scale=args.cls_cfg_scale,
                            solver=args.solver, low_level=args.low_level,
                            lambda_low=args.lambda_low, ll_strength=args.ll_strength,
-                           ll_size=args.ll_size, ll_loss=args.ll_loss)
+                           ll_size=args.ll_size, ll_loss=args.ll_loss,
+                           lambda_cos=args.lambda_cos, lambda_reg=args.lambda_reg,
+                           enc_drop=args.enc_drop, mixup_pct=args.mixup_pct,
+                           mixco_beta=args.mixco_beta, mixco_s_thresh=args.mixco_s_thresh)
     model = TokenStep1Model(cfg, bundle.voxels).to(device)
     if cfg.geometry == "sphere" and cfg.center_tokens:
         model.set_target_mean(stats.mean)
@@ -179,6 +193,13 @@ def main():
         # has no train/eval-sensitive layers) so the head learns a clean mapping.
         model.eval() if low_only else model.train()
         bundle.train_sampler.set_epoch(epoch)
+        # BiMixCo runs only for the first mixup_pct of training, then the
+        # contrastive term reverts to clean SoftCLIP (MindEye2's schedule): the
+        # mix is a regulariser for the underfit phase, not the final objective.
+        use_mixco = (not low_only) and epoch <= int(args.mixup_pct * args.epochs)
+        if use_mixco and epoch == 1:
+            print(f"✓ BiMixCo on for epochs 1-{int(args.mixup_pct * args.epochs)} "
+                  f"(beta={args.mixco_beta}, {args.mixco_s_thresh:.0%} of each batch)")
         pbar = tqdm(bundle.train, desc=f"Ep{epoch}", mininterval=1.0)
         for batch in pbar:
             lr = lr_at(step, total_steps, warmup_steps, args.lr, args.min_lr)
@@ -195,7 +216,8 @@ def main():
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 ld = model.training_step(fmri, batch["subject"], tgt_std,
                                          target_raw=tgt_raw, target_cls=tgt_cls,
-                                         target_img=tgt_img, low_only=low_only)
+                                         target_img=tgt_img, low_only=low_only,
+                                         use_mixco=use_mixco)
                 loss = ld["loss"]
             loss.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
@@ -255,12 +277,11 @@ def main():
                     per_subj = max(1, args.decode_n // n_subj)
                     preds, gts, got = [], [], {}
                     blur_sq, blur_n = 0.0, 0
-                    # Honest selection: in --freeze-token mode best.pt is chosen on this
-                    # metric, so decode the leakage-free VAL split (report-only TEST comes
-                    # from the stage-2 full eval). Default token path decodes TEST purely
-                    # as a progress readout (best.pt there is the val_cos checkpoint).
-                    decode_loader = (bundle.val if (low_only and bundle.val is not None)
-                                     else bundle.eval)
+                    # Always decode the leakage-free VAL split when one exists: both
+                    # best.pt (--freeze-token) and best_clip2way.pt are selected on
+                    # this metric, so it must not be TEST. TEST is reported once, by
+                    # the stage-2 full eval.
+                    decode_loader = bundle.val if bundle.val is not None else bundle.eval
                     split_tag = "val" if decode_loader is bundle.val else "test"
                     with torch.no_grad():
                         for batch in decode_loader:
@@ -299,12 +320,20 @@ def main():
                 finally:
                     ema.restore(model)
                     torch.cuda.empty_cache()
-                # Legacy CLIP-2way checkpoint (no honest val split only), saved
-                # AFTER the finally so ckpt's live tensors hold TRAINING weights
-                # again -- not the EMA weights copy_to() swapped in for the decode.
-                if bundle.val is None and im is not None and im["CLIP_2way"] > best_clip:
+                # CLIP-2way checkpoint, saved AFTER the finally so ckpt's live
+                # tensors hold TRAINING weights again -- not the EMA weights
+                # copy_to() swapped in for the decode.
+                #
+                # This used to be gated on `bundle.val is None`, so a run with
+                # --val-frac (now the default) produced NO CLIP-selected
+                # checkpoint at all -- and best.pt selects on sel_cos, which in
+                # run 347831 fell monotonically from epoch 10 while the decoded
+                # CLIP_2way kept climbing to epoch 110. The two signals
+                # disagree, so keep a checkpoint for each.
+                if im is not None and im["CLIP_2way"] > best_clip:
                     best_clip = im["CLIP_2way"]
                     torch.save(ckpt, out_dir / "best_clip2way.pt")
+                    msg += "  ✓best_clip2way.pt"
                 # --freeze-token: token model is fixed, so best.pt IS the low-level
                 # checkpoint -- select it on PixCorr+SSIM (the eval reloads EMA
                 # weights, which is what this decode measured).

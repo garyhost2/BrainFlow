@@ -76,11 +76,24 @@ python -m scripts.train_step1b \
     --out "${OUT}" ${TRAIN_EXTRA:-}
 
 echo "════════════════ STAGE 2/2: FULL EVAL ════════════════"
-# Prefer the leakage-free val-selected checkpoint.
-EVAL_CKPT="${OUT}/best.pt"
-[ -f "${EVAL_CKPT}" ] || EVAL_CKPT="${OUT}/best_clip2way.pt"
-[ -f "${EVAL_CKPT}" ] || EVAL_CKPT="${OUT}/last.pt"
-echo "Evaluating ${EVAL_CKPT} over ${FULL_EVAL_N} test images"
+# Both candidates are now selected on the leakage-free VAL split, but on
+# DIFFERENT signals, and they disagree: best.pt maximises token cosine (peaks
+# early, favours PixCorr), best_clip2way.pt maximises decoded CLIP-2way (peaks
+# late). SELECT picks which one stage 2 reports; EVAL_CKPT overrides outright.
+SELECT="${SELECT:-clip}"
+case "${SELECT}" in
+    clip) CAND="${OUT}/best_clip2way.pt ${OUT}/best.pt ${OUT}/last.pt" ;;
+    cos)  CAND="${OUT}/best.pt ${OUT}/best_clip2way.pt ${OUT}/last.pt" ;;
+    last) CAND="${OUT}/last.pt" ;;
+    *)    echo "ERROR: SELECT must be clip|cos|last (got '${SELECT}')" >&2; exit 1 ;;
+esac
+if [ -z "${EVAL_CKPT:-}" ]; then
+    for c in ${CAND}; do
+        [ -f "$c" ] && { EVAL_CKPT="$c"; break; }
+    done
+fi
+[ -n "${EVAL_CKPT:-}" ] || { echo "ERROR: no checkpoint found in ${OUT}" >&2; exit 1; }
+echo "Evaluating ${EVAL_CKPT} (SELECT=${SELECT}) over ${FULL_EVAL_N} test images"
 python -m scripts.eval_step1b \
     --ckpt "${EVAL_CKPT}" \
     --data-dir "${DATA_DIR}" \

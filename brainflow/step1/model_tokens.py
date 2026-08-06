@@ -45,6 +45,46 @@ def soft_clip_loss(preds: torch.Tensor, targs: torch.Tensor, temp: float) -> tor
     return (loss1 + loss2) / 2
 
 
+def mixco(x: torch.Tensor, beta: float = 0.15, s_thresh: float = 0.5):
+    """Convex-mix a random subset of the batch with a shuffled copy of itself.
+
+    MindEye2's BiMixCo augmentation. NSD gives ~27k train trials per subject for a
+    777M-parameter model, and run 347831 showed val_cos falling from the *first*
+    eval -- the model is data-starved, not capacity-starved. Mixing voxel
+    patterns manufactures interpolated training points; the contrastive target
+    becomes the matching two-hot distribution (see :func:`mixco_nce`).
+
+    Returns ``(mixed, perm, betas, select)``; rows outside ``select`` are
+    untouched and carry ``beta = 1``.
+    """
+    B = x.shape[0]
+    device = x.device
+    perm = torch.randperm(B, device=device)
+    betas = torch.distributions.Beta(beta, beta).sample([B]).to(device, x.dtype)
+    select = torch.rand(B, device=device) <= s_thresh
+    betas = torch.where(select, betas, torch.ones_like(betas))
+    shape = [B] + [1] * (x.dim() - 1)
+    bview = betas.view(shape)
+    return x * bview + x[perm] * (1 - bview), perm, betas, select
+
+
+def mixco_nce(preds: torch.Tensor, targs: torch.Tensor, temp: float,
+              perm: torch.Tensor, betas: torch.Tensor,
+              select: torch.Tensor) -> torch.Tensor:
+    """InfoNCE whose target is two-hot: beta on self, 1-beta on the mix partner."""
+    sim = (preds @ targs.T) / temp
+    B = preds.shape[0]
+    idx = torch.arange(B, device=preds.device)
+    probs = torch.zeros_like(sim)
+    probs[idx, idx] = betas.to(sim.dtype)
+    # += (not =) so a row that happened to draw itself as its partner still sums to 1
+    sel = idx[select]
+    probs[sel, perm[select]] = probs[sel, perm[select]] + (1 - betas[select]).to(sim.dtype)
+    loss1 = -(sim.log_softmax(dim=-1) * probs).sum(dim=-1).mean()
+    loss2 = -(sim.T.log_softmax(dim=-1) * probs.T).sum(dim=-1).mean()
+    return (loss1 + loss2) / 2
+
+
 @dataclass
 class TokenStep1Config:
     # --- target / conditioning dims -------------------------------------
@@ -93,6 +133,11 @@ class TokenStep1Config:
     lambda_radius: float = 1.0    # radius side-model
     lambda_clip: float = 0.033    # SoftCLIP contrastive (blueprint-tuned)
     clip_temp: float = 0.006
+
+    # --- BiMixCo augmentation (anti-overfit; 0 disables) -----------------
+    mixup_pct: float = 0.0        # fraction of epochs trained with mixed voxels
+    mixco_beta: float = 0.15      # Beta(b, b) mixing coefficient
+    mixco_s_thresh: float = 0.5   # fraction of the batch that gets mixed
 
     # --- low-level pathway (spatial layout -> decoder img2img init) ------
     low_level: bool = True
@@ -437,7 +482,17 @@ class TokenStep1Model(nn.Module):
     #  Training
     # ====================================================================
     def training_step(self, fmri, subject, target_std, target_raw=None, target_cls=None,
-                      target_img=None, low_only=False):
+                      target_img=None, low_only=False, use_mixco=False):
+        """One optimisation step.
+
+        ``use_mixco`` mixes the voxel batch and swaps the contrastive target for
+        the two-hot MixCo one. The flow / regression / radius targets stay
+        *unmixed* (as in MindEye2): a slerp between two different images' token
+        sequences is not a valid point on the target manifold, so mixing them
+        would corrupt the flow objective rather than regularise it. The mixed
+        brain vector paired with an unmixed target acts as input noise for those
+        heads, which is the intended effect.
+        """
         cfg = self.cfg
         B = fmri.shape[0]; device = fmri.device
         if low_only:
@@ -450,6 +505,11 @@ class TokenStep1Model(nn.Module):
             out = {k: v.detach() for k, v in out.items()} | {
                 "loss": cfg.lambda_low * out["low"]}
             return out
+        mix = None
+        fmri_clean = fmri
+        if use_mixco and cfg.mixup_pct > 0:
+            fmri, perm, betas, select = mixco(fmri, cfg.mixco_beta, cfg.mixco_s_thresh)
+            mix = (perm, betas, select)
         brain = self.backbone(fmri, subject)
         cls_dir = None
         if cfg.two_head and target_cls is not None:
@@ -460,8 +520,11 @@ class TokenStep1Model(nn.Module):
             out |= self._patch_step_sphere(brain, target_raw, cls_dir, B, device)
         else:
             out |= self._patch_step_euclidean(brain, target_std, cls_dir, B, device)
-        out |= self._contrastive_loss(brain, target_std, cls_dir, device)
-        out |= self._low_level_loss(fmri, subject, target_img)
+        out |= self._contrastive_loss(brain, target_std, cls_dir, device, mix=mix)
+        # Unmixed voxels: the low head reads raw fMRI directly and regresses the
+        # image's spatial layout, so a blended input against an unblended target
+        # is straight label noise for it (it has no contrastive term to absorb it).
+        out |= self._low_level_loss(fmri_clean, subject, target_img)
 
         total = (cfg.lambda_flow * out["flow"] + cfg.lambda_reg * out["reg"]
                  + cfg.lambda_cos * out["cos"] + cfg.lambda_clip * out["clip"]
@@ -559,7 +622,7 @@ class TokenStep1Model(nn.Module):
         loss_flow = F.mse_loss(v, ut)
         return {"flow": loss_flow, "reg": loss_reg, "cos": loss_cos}
 
-    def _contrastive_loss(self, brain, target_std, cls_dir, device):
+    def _contrastive_loss(self, brain, target_std, cls_dir, device, mix=None):
         cfg = self.cfg
         if cfg.lambda_clip <= 0:
             return {"clip": torch.zeros((), device=device)}
@@ -570,6 +633,9 @@ class TokenStep1Model(nn.Module):
             z = cls_dir
         else:
             z = F.normalize(target_std.mean(dim=1).float(), dim=-1)
+        if mix is not None:
+            perm, betas, select = mix
+            return {"clip": mixco_nce(b, z, cfg.clip_temp, perm, betas, select)}
         return {"clip": soft_clip_loss(b, z, cfg.clip_temp)}
 
     # ====================================================================
