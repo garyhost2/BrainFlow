@@ -108,7 +108,9 @@ def main():
             fmri = batch["fmri"].to(device, non_blocking=True)
             tok, cls_hat = model.predict_tokens(fmri, batch["subject"], stats)
             blur = model.predict_lowlevel(fmri, batch["subject"])
-            preds.append(decoder.decode(tok, cls_hat, init_image=blur, strength=cfg.ll_strength))
+            lat = model.predict_low_latent(fmri, batch["subject"])
+            preds.append(decoder.decode(tok, cls_hat, init_image=blur, init_latent=lat,
+                                        strength=cfg.ll_strength))
             gts.append(batch["image"])
             subjects_seen.append(int(batch["subject"]))
             if args.retrieval:

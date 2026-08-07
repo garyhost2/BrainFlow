@@ -79,10 +79,29 @@ once because it *fuses* a high-level and a low-level pathway; we only have the h
       `BLEND_WS="0.25 0.5 0.75" COND_SOURCES="blend" N_IMAGES=982 sbatch slurm/sweep_step1b.sbatch`
 - [ ] **#5 — Regularisation sweep (now exposed).** `--enc-drop` (was hardcoded 0.15), `--weight-decay`,
       `--fmri-noise-std`, plus `--lambda-cos` / `--lambda-reg`. Cheaper than any architecture change.
-- [ ] **#6 — SD-VAE-latent low head (escalation).** Predict the *VAE latent* of a blurred image rather than
-      raw RGB — MindEye2's actual mechanism. Head outputs 4×96×96 (no sigmoid); target `VAE.encode(blur(GT))`;
-      L1 in latent space; decoder takes `init_latent` directly. **Gate with a smoke first** (à la
-      `smoke_lowlevel`, GT-latent → img2img, N=8). Only worth it if #1–#3 leave PixCorr short.
+- [ ] **#6 — SD-VAE-latent low head (BUILT 2026-08-07, `--ll-target latent`).** Predicts `E(blur(GT))` in
+      R^{4×96×96} — the img2img init the sampler actually starts from — instead of a blurry RGB image that
+      then has to survive a sigmoid and a VAE re-encode. `LatentLowLevelHead` is linear (no sigmoid: latents
+      are unbounded and ~unit-Gaussian per channel), the target is per-channel standardised from train-split
+      statistics, and `decoder.decode(init_latent=...)` takes it directly. Latents are cached per subject
+      (~74 KB/image fp16 ≈ 2 GB/subject) so the VAE never runs during training.
+
+      Useful property: with a zero-init head the L1 starts at `E|N(0,1)| = 0.798`, which **is** the
+      "predicted the channel mean" score. So the logged `low` is self-calibrating — below 0.798 the head has
+      learned layout, at 0.798 it has collapsed. The four RGB attempts needed an external reference
+      (`blur_mse ≈ 0.07`) to see this at all.
+
+      **Order of operations — the smoke gate is not optional:**
+      1. `SUBJECT=1 N=16 sbatch slurm/smoke_latent.sbatch`
+      2. `python -m scripts.build_latent_targets --subjects 1 2 3 4 5 6 7 8 --ll-size 64` (needs the A100)
+      3. `TRAIN_EXTRA="--init-from <prior>/best.pt --freeze-token --ll-target latent --ll-strength <from smoke>"`
+
+      The smoke runs three arms and prints two gate lines. `latent` must match `rgb` (same blur, so
+      disagreement means the new code path is wrong). More importantly it adds an arm the earlier smokes
+      never had: **`mean`**, the constant per-channel mean latent — what a *collapsed* head predicts. Four
+      low heads have now collapsed toward the mean, so if `latent − mean` is small, most of the img2img
+      PixCorr gain is "any smooth init" rather than decoded brain signal, and a PixCorr number obtained that
+      way would not mean what it appears to mean. `latent − mean` is the honest headroom, not `latent`.
 
 ## Eval correctness (M0)
 

@@ -69,6 +69,10 @@ def parse_args():
                     help="blurry-image resolution the low head predicts (lower = more learnable)")
     ap.add_argument("--ll-loss", type=str, default="l1", choices=["l1", "huber", "mse"],
                     help="low-level loss; l1/huber are far less mean-seeking than mse")
+    ap.add_argument("--ll-target", type=str, default="rgb", choices=["rgb", "latent"],
+                    help="what the low head regresses: a blurry RGB image, or the "
+                         "VAE latent E(blur(GT)) the decoder actually starts from. "
+                         "'latent' needs the cache from scripts/build_latent_targets.py")
     ap.add_argument("--no-low-level", dest="low_level", action="store_false", default=True)
     ap.add_argument("--val-frac", type=float, default=0.1,
                     help="train fraction held out for leakage-free selection (0 disables)")
@@ -129,6 +133,15 @@ def main():
         tensors, args.subjects, args.target_dir, device, args.mindeye_src,
         hf_cache=hf_cache)
     stats: TargetStats = targets["_stats"]
+    lat_stats = None
+    if args.low_level and args.ll_target == "latent":
+        from brainflow.step1.targets_latent import build_or_load_latent_targets
+        # decoder=None: refuse to build a 2 GB/subject cache inside a training job.
+        targets |= build_or_load_latent_targets(
+            tensors, args.subjects, args.target_dir, decoder=None, ll_size=args.ll_size)
+        lat_stats = targets["_lat_stats"]
+        print(f"✓ blurry-latent targets loaded (ll_size={args.ll_size}, "
+              f"channel std={lat_stats['std'].tolist()})")
     bundle = build_step1_loaders(tensors, targets, args.subjects, args.batch_size,
                                  num_workers=args.num_workers, fmri_noise_std=args.fmri_noise_std,
                                  val_frac=args.val_frac, seed=args.seed)
@@ -141,12 +154,15 @@ def main():
                            solver=args.solver, low_level=args.low_level,
                            lambda_low=args.lambda_low, ll_strength=args.ll_strength,
                            ll_size=args.ll_size, ll_loss=args.ll_loss,
+                           ll_target=args.ll_target,
                            lambda_cos=args.lambda_cos, lambda_reg=args.lambda_reg,
                            enc_drop=args.enc_drop, mixup_pct=args.mixup_pct,
                            mixco_beta=args.mixco_beta, mixco_s_thresh=args.mixco_s_thresh)
     model = TokenStep1Model(cfg, bundle.voxels).to(device)
     if cfg.geometry == "sphere" and cfg.center_tokens:
         model.set_target_mean(stats.mean)
+    if lat_stats is not None and model.low_head is not None:
+        model.low_head.set_latent_stats(lat_stats["mean"], lat_stats["std"])
     if args.init_from:
         ck = torch.load(args.init_from, map_location="cpu")
         res = model.load_state_dict(ck["model"], strict=False)
@@ -212,12 +228,15 @@ def main():
             if tgt_cls is not None:
                 tgt_cls = tgt_cls.to(device, non_blocking=True)
             tgt_img = batch["image"].to(device, non_blocking=True)
+            tgt_lat = batch.get("lat")
+            if tgt_lat is not None:
+                tgt_lat = tgt_lat.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 ld = model.training_step(fmri, batch["subject"], tgt_std,
                                          target_raw=tgt_raw, target_cls=tgt_cls,
                                          target_img=tgt_img, low_only=low_only,
-                                         use_mixco=use_mixco)
+                                         use_mixco=use_mixco, target_lat=tgt_lat)
                 loss = ld["loss"]
             loss.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
@@ -293,15 +312,26 @@ def main():
                             tok, cls_hat = model.predict_tokens(fmri, batch["subject"], stats,
                                                                 cond_source=cfg.cond_source)
                             blur = model.predict_lowlevel(fmri, batch["subject"])
+                            lat = model.predict_low_latent(fmri, batch["subject"])
+                            # How good is the predicted layout vs the target the head is
+                            # trained on? (the img2img ceiling driver). Reported as
+                            # blur_mse in both modes so the two are directly comparable
+                            # -- in latent mode it is MSE in STANDARDISED latent space,
+                            # where 1.0 is what predicting the mean scores.
                             if blur is not None:
-                                # How good is the predicted blurry layout vs the GT-blurry
-                                # target the head is trained on? (the img2img ceiling driver)
                                 gtb = F.interpolate(batch["image"][:take].float().to(device),
                                                     cfg.ll_size, mode="bilinear",
                                                     align_corners=False).clamp(0, 1)
                                 blur_sq += F.mse_loss(blur, gtb).item() * take
                                 blur_n += take
+                            elif lat is not None and batch.get("lat") is not None:
+                                gl = model.low_head.standardize(
+                                    batch["lat"][:take].float().to(device))
+                                blur_sq += F.mse_loss(
+                                    model.low_head.standardize(lat), gl).item() * take
+                                blur_n += take
                             preds.append(decoder.decode(tok, cls_hat, init_image=blur,
+                                                        init_latent=lat,
                                                         strength=cfg.ll_strength))
                             gts.append(batch["image"][:take])
                             got[s] = got.get(s, 0) + take

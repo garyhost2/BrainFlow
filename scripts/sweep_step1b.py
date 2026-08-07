@@ -103,7 +103,9 @@ def _eval_config(model, subset, stats, decoder, clip_metric, device, *,
             f, subj, stats, cond_source=cond_source, cfg_scale=cfg_scale,
             n_steps=steps, solver=solver)
         blur = model.predict_lowlevel(f, subj)
-        preds.append(decoder.decode(tok, cls_hat, init_image=blur, strength=strength))
+        lat = model.predict_low_latent(f, subj)
+        preds.append(decoder.decode(tok, cls_hat, init_image=blur, init_latent=lat,
+                                    strength=strength))
         gts.append(imgs)
         if retrieval:
             tok_p.append(tok.detach().to("cpu", torch.float16))
