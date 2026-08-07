@@ -347,12 +347,138 @@ def test_mixco_leaves_low_level_head_on_clean_voxels():
 
     seen = {}
     orig = model._low_level_loss
-    def spy(f, subject, target_img):
+    def spy(f, subject, target_img, target_lat=None):
         seen["fmri"] = f
-        return orig(f, subject, target_img)
+        return orig(f, subject, target_img, target_lat)
     model._low_level_loss = spy
 
     out = model.training_step(fmri, 1, None, target_raw=raw, target_cls=cls,
                               target_img=img, use_mixco=True)
     assert torch.isfinite(out["low"])
     assert seen["fmri"] is fmri, "low head was fed the MIXED voxels"
+
+
+# ---------------------------------------------------------------------------
+#  VAE-latent low-level head (ll_target="latent")
+# ---------------------------------------------------------------------------
+def _latent_cfg():
+    cfg = _tiny_cfg("sphere")
+    cfg.ll_target = "latent"
+    cfg.ll_hidden = 32
+    cfg.ll_base = 32
+    return cfg
+
+
+def test_latent_head_outputs_decoder_latent_shape():
+    from brainflow.step1.model_tokens import LatentLowLevelHead
+    model = TokenStep1Model(_latent_cfg(), {1: 10})
+    assert isinstance(model.low_head, LatentLowLevelHead)
+    assert model.low_is_latent
+    out = model.low_head(torch.randn(2, 10), 1)
+    assert out.shape == (2, 4, 96, 96)      # SDXLUnCLIPDecoder.LATENT_SHAPE
+
+
+def test_latent_head_shape_matches_decoder_constant():
+    from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder
+    model = TokenStep1Model(_latent_cfg(), {1: 10})
+    out = model.low_head(torch.randn(1, 10), 1)
+    assert tuple(out.shape[1:]) == SDXLUnCLIPDecoder.LATENT_SHAPE
+
+
+def test_latent_head_is_linear_not_sigmoid():
+    """Latents are ~unit-Gaussian and unbounded; a sigmoid would cap them in (0,1)."""
+    model = TokenStep1Model(_latent_cfg(), {1: 10})
+    torch.nn.init.normal_(model.low_head.out.weight, std=1.0)
+    torch.nn.init.normal_(model.low_head.out.bias, std=3.0)
+    out = model.low_head(torch.randn(4, 10), 1)
+    assert out.min() < 0.0, "output is non-negative -> squashed like a sigmoid"
+    assert out.abs().max() > 1.0, "output is bounded in unit range"
+
+
+def test_latent_standardize_round_trip():
+    model = TokenStep1Model(_latent_cfg(), {1: 10})
+    model.low_head.set_latent_stats(torch.tensor([1., -2., 0.5, 3.]),
+                                    torch.tensor([2., 0.5, 1.5, 4.]))
+    lat = torch.randn(3, 4, 96, 96) * 2 + 1
+    back = model.low_head.unstandardize(model.low_head.standardize(lat))
+    assert torch.allclose(back, lat, atol=1e-4)
+
+
+def test_latent_low_loss_trains_and_uses_the_latent_target():
+    cfg = _latent_cfg()
+    model = TokenStep1Model(cfg, {1: 10})
+    model.set_target_mean(torch.zeros(8))
+    out = model.training_step(torch.randn(2, 10), 1, None,
+                              target_raw=torch.randn(2, 4, 8),
+                              target_cls=torch.randn(2, 10),
+                              target_img=torch.rand(2, 3, 32, 32),
+                              target_lat=torch.randn(2, 4, 96, 96))
+    assert torch.isfinite(out["low"]) and out["low"] > 0
+    out["loss"].backward()
+    assert model.low_head.out.weight.grad is not None
+
+
+def test_latent_head_ignores_rgb_target():
+    """With ll_target=latent, an RGB-only batch must yield no low term (not a crash)."""
+    model = TokenStep1Model(_latent_cfg(), {1: 10})
+    model.set_target_mean(torch.zeros(8))
+    out = model.training_step(torch.randn(2, 10), 1, None,
+                              target_raw=torch.randn(2, 4, 8),
+                              target_cls=torch.randn(2, 10),
+                              target_img=torch.rand(2, 3, 32, 32))
+    assert "low" not in out
+
+
+def test_predict_low_latent_and_lowlevel_are_exclusive():
+    lat_model = TokenStep1Model(_latent_cfg(), {1: 10}).eval()
+    rgb_model = _model("sphere", low_level=True)
+    f = torch.randn(2, 10)
+    assert lat_model.predict_lowlevel(f, 1) is None
+    assert lat_model.predict_low_latent(f, 1).shape == (2, 4, 96, 96)
+    assert rgb_model.predict_low_latent(f, 1) is None
+    assert rgb_model.predict_lowlevel(f, 1) is not None
+
+
+def test_predict_low_latent_unstandardizes():
+    model = TokenStep1Model(_latent_cfg(), {1: 10}).eval()
+    model.low_head.set_latent_stats(torch.full((4,), 5.0), torch.full((4,), 3.0))
+    torch.nn.init.normal_(model.low_head.out.weight, std=0.5)
+    f = torch.randn(2, 10)
+    raw = model.low_head(f, 1)
+    assert torch.allclose(model.predict_low_latent(f, 1), raw * 3.0 + 5.0, atol=1e-4)
+
+
+def test_latent_head_can_overfit_two_distinct_layouts():
+    """The capability the four RGB heads lacked: fit two different targets.
+
+    The targets are SMOOTH low-frequency fields, which is what a VAE latent of a
+    blurred image looks like. White noise would be an unfair bar: the head
+    upsamples a 12x12 grid through convs, so high-frequency detail is outside
+    its hypothesis space by construction.
+    """
+    cfg = _latent_cfg()
+    model = TokenStep1Model(cfg, {1: 10})
+    model.set_target_mean(torch.zeros(8))
+    torch.manual_seed(0)
+    fmri = torch.randn(2, 10)
+    coarse = torch.randn(1, 4, 6, 6)
+    lat = F.interpolate(torch.cat([coarse, -coarse]), 96, mode="bilinear",
+                        align_corners=False)          # two opposite smooth layouts
+    opt = torch.optim.Adam(model.low_head.parameters(), lr=3e-3)
+    first = None
+    for _ in range(80):
+        opt.zero_grad()
+        loss = model._low_level_loss(fmri, 1, None, lat)["low"]
+        loss.backward(); opt.step()
+        first = loss.item() if first is None else first
+    assert loss.item() < 0.5 * first, f"did not fit: {first:.4f} -> {loss.item():.4f}"
+
+
+def test_old_rgb_checkpoint_config_still_builds_rgb_head():
+    """A cfg pickled before ll_target existed must not silently become a latent head."""
+    from brainflow.step1.model_tokens import LowLevelHead
+    cfg = _tiny_cfg("sphere")
+    del cfg.ll_target                       # simulate an older pickled dataclass
+    model = TokenStep1Model(cfg, {1: 10})
+    assert isinstance(model.low_head, LowLevelHead)
+    assert not model.low_is_latent

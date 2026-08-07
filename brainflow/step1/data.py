@@ -9,12 +9,13 @@ from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset, Sampler
 
 class Step1Dataset(Dataset):
     def __init__(self, fmri, target_emb, images, subject_id, fmri_mu, fmri_std,
-                 cls_emb=None, augment=False, noise_std=0.0):
+                 cls_emb=None, augment=False, noise_std=0.0, lat=None):
         assert len(fmri) == len(target_emb) == len(images)
         self.fmri = ((fmri.float() - fmri_mu) / fmri_std)
 
         self.emb = target_emb
         self.cls = cls_emb            # optional pooled bigG CLS direction
+        self.lat = lat                # optional blurry-image VAE latent target
         self.images = images
         self.subject_id = int(subject_id)
         self.augment = augment
@@ -34,6 +35,8 @@ class Step1Dataset(Dataset):
                 "subject": self.subject_id}
         if self.cls is not None:
             item["cls"] = self.cls[i].float()
+        if self.lat is not None:
+            item["lat"] = self.lat[i].float()
         return item
 
 def _collate(batch):
@@ -45,6 +48,8 @@ def _collate(batch):
     }
     if "cls" in batch[0]:
         out["cls"] = torch.stack([b["cls"] for b in batch])
+    if "lat" in batch[0]:
+        out["lat"] = torch.stack([b["lat"] for b in batch])
     return out
 
 class SubjectSampler(Sampler):
@@ -119,13 +124,15 @@ def build_step1_loaders(tensors: dict, targets: dict, subjects: list[int],
         mu = fmri_stats[s]["mu"]; std = fmri_stats[s]["std"].clamp_min(1e-6)
         cls_tr = targets.get(f"cls_train_{s}")
         cls_te = targets.get(f"cls_test_{s}")
+        lat_tr = targets.get(f"lat_train_{s}")
+        lat_te = targets.get(f"lat_test_{s}")
         tr_aug = Step1Dataset(
             tensors[f"fmri_train_{s}"], targets[f"emb_train_{s}"], tensors[f"imgs_train_{s}"],
-            s, mu, std, cls_emb=cls_tr, augment=True, noise_std=fmri_noise_std)
+            s, mu, std, cls_emb=cls_tr, augment=True, noise_std=fmri_noise_std, lat=lat_tr)
         if val_frac > 0:
             tr_plain = Step1Dataset(
                 tensors[f"fmri_train_{s}"], targets[f"emb_train_{s}"], tensors[f"imgs_train_{s}"],
-                s, mu, std, cls_emb=cls_tr, augment=False)
+                s, mu, std, cls_emb=cls_tr, augment=False, lat=lat_tr)
             n = len(tr_aug)
             g = torch.Generator().manual_seed(seed + int(s))
             perm = torch.randperm(n, generator=g).tolist()
@@ -136,7 +143,7 @@ def build_step1_loaders(tensors: dict, targets: dict, subjects: list[int],
             train_sets.append(tr_aug)
         eval_sets.append(Step1Dataset(
             tensors[f"fmri_test_{s}"], targets[f"emb_test_{s}"], tensors[f"imgs_test_{s}"],
-            s, mu, std, cls_emb=cls_te, augment=False))
+            s, mu, std, cls_emb=cls_te, augment=False, lat=lat_te))
 
     train_sampler = SubjectSampler([len(d) for d in train_sets], batch_size, shuffle=True, drop_last=True)
     eval_sampler = SubjectSampler([len(d) for d in eval_sets], batch_size, shuffle=False, drop_last=False)

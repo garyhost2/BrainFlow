@@ -121,6 +121,9 @@ class SDXLUnCLIPDecoder:
             vec[:, lo:hi] = cls_emb_row.to(vec.device, vec.dtype).reshape(1, hi - lo)
         return vec
 
+    #: Spatial shape of the img2img latent (768 / 8 with the SDXL VAE's 4 channels).
+    LATENT_SHAPE = (4, 96, 96)
+
     @torch.no_grad()
     def _encode_init(self, img):
         """Blurry RGB [0,1] (B,3,h,w) -> scaled VAE latent (B,4,96,96) for img2img."""
@@ -128,6 +131,21 @@ class SDXLUnCLIPDecoder:
                           align_corners=False).clamp(0, 1)
         with torch.cuda.amp.autocast(dtype=torch.float16), self.engine.ema_scope():
             return self.engine.encode_first_stage(x * 2.0 - 1.0)
+
+    @torch.no_grad()
+    def encode_blurry(self, img, ll_size: int | None = None):
+        """Public: RGB [0,1] -> the img2img latent, optionally blurring first.
+
+        ``ll_size`` downsamples before the encode, which is exactly the blur the
+        low-level head is asked to predict. Used to precompute the latent target
+        cache so training never has to run the VAE.
+        """
+        x = img.to(self.device).float()
+        if x.dtype == torch.uint8:
+            x = x / 255.0
+        if ll_size:
+            x = F.interpolate(x.clamp(0, 1), ll_size, mode="bilinear", align_corners=False)
+        return self._encode_init(x.clamp(0, 1))
 
     @torch.no_grad()
     def _recon_one(self, x, vector, init_latent=None, strength=1.0, num_samples=1):
@@ -182,14 +200,20 @@ class SDXLUnCLIPDecoder:
 
     @torch.no_grad()
     def decode(self, tokens_raw: torch.Tensor, cls_emb: torch.Tensor | None = None,
-               init_image: torch.Tensor | None = None, strength: float = 1.0) -> torch.Tensor:
+               init_image: torch.Tensor | None = None, strength: float = 1.0,
+               init_latent: torch.Tensor | None = None) -> torch.Tensor:
         """Decode raw patch tokens, optionally with CLS in the pooled slot and a
-        blurry ``init_image`` for img2img (low-level pathway).
+        blurry init for img2img (low-level pathway).
 
-        ``tokens_raw``: (B, 256, 1664) reassembled raw tokens.
-        ``cls_emb``:    (B, 1280) predicted global directions, or None.
-        ``init_image``: (B, 3, h, w) blurry layout in [0,1]; None => pure-noise decode.
-        ``strength``:   img2img strength in (0,1]; lower = preserve more layout.
+        ``tokens_raw``:  (B, 256, 1664) reassembled raw tokens.
+        ``cls_emb``:     (B, 1280) predicted global directions, or None.
+        ``init_image``:  (B, 3, h, w) blurry layout in [0,1]; None => pure-noise decode.
+        ``init_latent``: (B, 4, 96, 96) img2img latent, used INSTEAD of ``init_image``
+                         when given. This is the path for a head that predicts the
+                         latent directly -- it skips the RGB round-trip, so the
+                         head's output is never squeezed through a sigmoid and
+                         re-encoded by the VAE.
+        ``strength``:    img2img strength in (0,1]; lower = preserve more layout.
         """
         # Encode the blurry init PER-IMAGE inside the loop rather than as one
         # batched VAE.encode over the whole eval batch. At 768x768 the batched
@@ -197,11 +221,17 @@ class SDXLUnCLIPDecoder:
         # co-resident with the training model + AdamW state. GroupNorm (not
         # BatchNorm) makes the per-image encode numerically identical to slicing
         # a batched encode, and the UNet sampling below is already batch-1.
-        use_init = init_image is not None and strength < 1.0
+        have_init = init_latent is not None or init_image is not None
+        use_init = have_init and strength < 1.0
         imgs = []
         for i in range(tokens_raw.shape[0]):
             vec = self._vector(None if cls_emb is None else cls_emb[i:i + 1])
-            il = self._encode_init(init_image[i:i + 1]) if use_init else None
+            if not use_init:
+                il = None
+            elif init_latent is not None:
+                il = init_latent[i:i + 1].to(self.device).float()
+            else:
+                il = self._encode_init(init_image[i:i + 1])
             s = self._recon_one(tokens_raw[i:i + 1].to(self.device), vec,
                                 init_latent=il, strength=strength, num_samples=1)
             if self.out_size and self.out_size != s.shape[-1]:

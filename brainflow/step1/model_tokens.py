@@ -141,6 +141,10 @@ class TokenStep1Config:
 
     # --- low-level pathway (spatial layout -> decoder img2img init) ------
     low_level: bool = True
+    ll_target: str = "rgb"        # rgb | latent -- what the low head regresses.
+                                  # "latent" predicts E(blur(GT)) in R^{4x96x96},
+                                  # the decoder's actual img2img init (no VAE
+                                  # round-trip, no sigmoid on an unbounded target).
     ll_size: int = 64             # blurry-image resolution (lower = lower-dim,
                                   # more learnable target; MSE@128 regressed to mean)
     ll_base: int = 256            # channels at the 8x8 stem
@@ -327,6 +331,74 @@ class LowLevelHead(nn.Module):
         return torch.sigmoid(self.out(self.ups(h)))     # (B, 3, ll_size, ll_size) in [0,1]
 
 
+class LatentLowLevelHead(nn.Module):
+    """Brain voxels -> the decoder's img2img LATENT (4 x 96 x 96), not RGB.
+
+    Same voxel-encoder front end as :class:`LowLevelHead`, but it regresses
+    ``E(blur(GT))`` -- the thing the sampler actually starts from -- instead of a
+    blurry image that then has to survive a sigmoid and a VAE re-encode.
+
+    Two consequences that matter for the failure mode we measured:
+
+    * **no sigmoid.** Latents are roughly unit-Gaussian per channel (that is what
+      the model's ``scale_factor`` is for), so the output is linear. A sigmoid on
+      an unbounded target is exactly the kind of squashing that makes a head
+      collapse to the mean.
+    * **the loss lives in latent space**, where the VAE has already thrown away
+      the high-frequency detail fMRI cannot predict. In pixel space that
+      unpredictable detail dominates the L1 and the cheapest way to reduce it is
+      to predict the mean -- which is what runs 344971/344991 did.
+
+    The target is standardised per channel (train-split statistics), so the head
+    predicts a unit-scale field and :meth:`unstandardize` puts it back.
+    """
+
+    def __init__(self, cfg: "TokenStep1Config", voxels_per_subject: dict[int, int]):
+        super().__init__()
+        self.base = cfg.ll_base
+        self.grid = 12                      # 12 -> 24 -> 48 -> 96
+        h = cfg.ll_hidden
+        self.input_proj = nn.ModuleDict({
+            str(s): nn.Linear(v, h) for s, v in voxels_per_subject.items()})
+        self.stem = nn.Sequential(nn.LayerNorm(h), nn.GELU(), nn.Dropout(cfg.enc_drop))
+        self.to_grid = nn.Sequential(
+            nn.Linear(h, self.base * self.grid * self.grid), nn.GELU())
+        self.mix = nn.Sequential(
+            nn.Conv2d(self.base, self.base, 3, padding=1),
+            nn.GroupNorm(8, self.base), nn.SiLU())
+        blocks, c = [], self.base
+        for _ in range(3):                  # 12 -> 96
+            nc = max(c // 2, 32)
+            blocks.append(nn.Sequential(
+                nn.Upsample(scale_factor=2, mode="nearest"),
+                nn.Conv2d(c, nc, 3, padding=1), nn.GroupNorm(8, nc), nn.SiLU(),
+                nn.Conv2d(nc, nc, 3, padding=1), nn.SiLU()))
+            c = nc
+        self.ups = nn.Sequential(*blocks)
+        self.out = nn.Conv2d(c, 4, 3, padding=1)
+        nn.init.zeros_(self.out.weight); nn.init.zeros_(self.out.bias)
+        # Standardisation of the latent target; overwritten from the cache stats.
+        self.register_buffer("lat_mean", torch.zeros(4))
+        self.register_buffer("lat_std", torch.ones(4))
+
+    def set_latent_stats(self, mean, std):
+        self.lat_mean.copy_(mean.to(self.lat_mean.device, self.lat_mean.dtype))
+        self.lat_std.copy_(std.to(self.lat_std.device, self.lat_std.dtype))
+
+    def standardize(self, lat):
+        return (lat - self.lat_mean.view(1, -1, 1, 1)) / self.lat_std.view(1, -1, 1, 1)
+
+    def unstandardize(self, z):
+        return z * self.lat_std.view(1, -1, 1, 1) + self.lat_mean.view(1, -1, 1, 1)
+
+    def forward(self, fmri, subject):
+        """Standardised latent prediction (B, 4, 96, 96)."""
+        B = fmri.shape[0]
+        x = self.stem(self.input_proj[str(int(subject))](fmri))
+        h = self.to_grid(x).view(B, self.base, self.grid, self.grid)
+        return self.out(self.ups(self.mix(h)))
+
+
 # --------------------------------------------------------------------------
 #  Patch prior (DiT) -- velocity field on the oblique manifold
 # --------------------------------------------------------------------------
@@ -463,7 +535,11 @@ class TokenStep1Model(nn.Module):
             nn.Linear(cfg.brain_dim, clip_out),
         )
         self.radius_head = RadiusHead(cfg)
-        self.low_head = LowLevelHead(cfg, voxels_per_subject) if cfg.low_level else None
+        self.low_head = None
+        if cfg.low_level:
+            head_cls = (LatentLowLevelHead if getattr(cfg, "ll_target", "rgb") == "latent"
+                        else LowLevelHead)
+            self.low_head = head_cls(cfg, voxels_per_subject)
         self.register_buffer("tgt_mean", torch.zeros(cfg.token_dim))
 
     def set_target_mean(self, mean):
@@ -482,7 +558,7 @@ class TokenStep1Model(nn.Module):
     #  Training
     # ====================================================================
     def training_step(self, fmri, subject, target_std, target_raw=None, target_cls=None,
-                      target_img=None, low_only=False, use_mixco=False):
+                      target_img=None, low_only=False, use_mixco=False, target_lat=None):
         """One optimisation step.
 
         ``use_mixco`` mixes the voxel batch and swaps the contrastive target for
@@ -499,9 +575,11 @@ class TokenStep1Model(nn.Module):
             # Frozen-token warm-start: train ONLY the low-level head. It reads raw
             # voxels through its own encoder, so skip the frozen backbone AND the
             # whole DiT prior / CLS / contrastive forward+backward entirely.
-            out = self._low_level_loss(fmri, subject, target_img)
+            out = self._low_level_loss(fmri, subject, target_img, target_lat)
             if "low" not in out:
-                raise ValueError("low_only training needs low_head enabled + target_img")
+                raise ValueError(
+                    "low_only training needs low_head enabled + the matching target "
+                    "(target_img for ll_target=rgb, target_lat for ll_target=latent)")
             out = {k: v.detach() for k, v in out.items()} | {
                 "loss": cfg.lambda_low * out["low"]}
             return out
@@ -524,7 +602,7 @@ class TokenStep1Model(nn.Module):
         # Unmixed voxels: the low head reads raw fMRI directly and regresses the
         # image's spatial layout, so a blended input against an unblended target
         # is straight label noise for it (it has no contrastive term to absorb it).
-        out |= self._low_level_loss(fmri_clean, subject, target_img)
+        out |= self._low_level_loss(fmri_clean, subject, target_img, target_lat)
 
         total = (cfg.lambda_flow * out["flow"] + cfg.lambda_reg * out["reg"]
                  + cfg.lambda_cos * out["cos"] + cfg.lambda_clip * out["clip"]
@@ -537,27 +615,51 @@ class TokenStep1Model(nn.Module):
         out["loss"] = total
         return out
 
-    def _low_level_loss(self, fmri, subject, target_img):
-        if self.low_head is None or target_img is None:
+    @property
+    def low_is_latent(self) -> bool:
+        return isinstance(self.low_head, LatentLowLevelHead)
+
+    def _low_level_loss(self, fmri, subject, target_img, target_lat=None):
+        if self.low_head is None:
             return {}
-        blur = F.interpolate(target_img.float(), self.cfg.ll_size, mode="bilinear",
-                             align_corners=False).clamp(0, 1)
+        if self.low_is_latent:
+            if target_lat is None:
+                return {}
+            # Both sides standardised: the head predicts a unit-scale field.
+            target = self.low_head.standardize(target_lat.float())
+        elif target_img is not None:
+            target = F.interpolate(target_img.float(), self.cfg.ll_size,
+                                   mode="bilinear", align_corners=False).clamp(0, 1)
+        else:
+            return {}
         pred = self.low_head(fmri, subject)
         mode = getattr(self.cfg, "ll_loss", "l1")
         if mode == "mse":
-            low = F.mse_loss(pred, blur)
+            low = F.mse_loss(pred, target)
         elif mode == "huber":
-            low = F.huber_loss(pred, blur, delta=0.1)
+            low = F.huber_loss(pred, target, delta=0.1)
         else:                                    # "l1" (default): least mean-seeking
-            low = F.l1_loss(pred, blur)
+            low = F.l1_loss(pred, target)
         return {"low": low}
 
     @torch.no_grad()
     def predict_lowlevel(self, fmri, subject):
-        """Blurry RGB layout for the decoder's img2img init, or None if disabled."""
-        if self.low_head is None:
+        """Blurry RGB layout for the decoder's img2img init.
+
+        None when the low pathway is off *or* when it predicts a latent -- use
+        :meth:`predict_low_latent` for that. The two are mutually exclusive, so a
+        caller can pass both to ``decoder.decode`` and let the None fall through.
+        """
+        if self.low_head is None or self.low_is_latent:
             return None
         return self.low_head(fmri, subject)
+
+    @torch.no_grad()
+    def predict_low_latent(self, fmri, subject):
+        """Predicted img2img latent (B,4,96,96) in the decoder's space, or None."""
+        if not self.low_is_latent:
+            return None
+        return self.low_head.unstandardize(self.low_head(fmri, subject).float())
 
     def _cls_flow_loss(self, brain, cls_dir, B, device):
         if self.cls_prior is None or cls_dir is None:
