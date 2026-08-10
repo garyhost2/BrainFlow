@@ -93,7 +93,8 @@ def _collect(loader, n):
 @torch.no_grad()
 def _eval_config(model, subset, stats, decoder, clip_metric, device, *,
                  cond_source, cfg_scale, strength, steps, solver, n,
-                 blend_w=None, full_metrics=True, retrieval=True, pool=300):
+                 blend_w=None, full_metrics=True, retrieval=True, pool=300,
+                 grid_path=None):
     if blend_w is not None:
         model.cfg.blend_w = blend_w
     preds, gts, tok_p, tok_g = [], [], [], []
@@ -122,6 +123,15 @@ def _eval_config(model, subset, stats, decoder, clip_metric, device, *,
     if retrieval and tok_p:
         m.update(retrieval_metrics(torch.cat(tok_p)[:n], torch.cat(tok_g)[:n],
                                    batch_size=pool, device=device))
+    if grid_path is not None:
+        # A qualitative panel per config -- the sweep produced no images at all
+        # before, so picking a config for the paper figure meant re-decoding.
+        try:
+            from torchvision.utils import save_image
+            k = min(16, pred.shape[0])
+            save_image(torch.cat([gt[:k], pred[:k]]), str(grid_path), nrow=k)
+        except Exception as e:
+            print(f"  [grid skipped] {e}")
     return m
 
 
@@ -160,11 +170,13 @@ def main():
 
     rows = []
     for cond, cfgs, bw, st in configs:
+        tag = f"{cond}_cfg{cfgs:g}" + (f"_bw{bw:g}" if bw is not None else "") + f"_str{st:g}"
         m = _eval_config(model, subset, stats, decoder, clip_metric, device,
                          cond_source=cond, cfg_scale=cfgs, strength=st,
                          steps=args.steps, solver=args.solver, n=args.n_images,
                          blend_w=bw, full_metrics=args.full_metrics,
-                         retrieval=args.retrieval, pool=args.retrieval_pool)
+                         retrieval=args.retrieval, pool=args.retrieval_pool,
+                         grid_path=out_dir / f"grid_{tag}.png")
         row = {"cond_source": cond, "cfg_scale": cfgs, "blend_w": bw,
                "strength": st, **m}
         rows.append(row)

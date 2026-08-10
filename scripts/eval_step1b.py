@@ -37,7 +37,13 @@ def parse_args():
                     help="[lo hi] positions in the unCLIP 'vector' slot to fill with c_cls")
     ap.add_argument("--ll-strength", type=float, default=None,
                     help="override the checkpoint's img2img strength (low-level pathway)")
-    ap.add_argument("--max-images", type=int, default=10_000)
+    ap.add_argument("--max-images", type=int, default=982,
+                    help="images PER SUBJECT (982 = the full NSD test set)")
+    ap.add_argument("--eval-subjects", type=int, nargs="+", default=None,
+                    help="which of the checkpoint's subjects to score. Default: the "
+                         "first one only (~1.2 h). Every subject is scored SEPARATELY "
+                         "and a mean row is reported -- pooling them would put the same "
+                         "image in another subject's foil set.")
     ap.add_argument("--no-full-metrics", dest="full_metrics", action="store_false",
                     default=True,
                     help="skip the 8-metric NSD table (AlexNet/Inception/EffNet/SwAV)")
@@ -100,64 +106,110 @@ def main():
                                 cls_vector_slot=tuple(args.cls_vector_slot))
     clip_metric = CLIPMetric(device, hf_cache=hf_cache)
 
-    preds, gts = [], []
-    tok_pred, tok_gt = [], []
-    subjects_seen = []
+    want = args.eval_subjects or [subjects[0]]
+    unknown = [s for s in want if s not in subjects]
+    if unknown:
+        raise SystemExit(f"--eval-subjects {unknown} not in the checkpoint ({subjects})")
+    print(f"▶ scoring subjects {want} separately, ≤{args.max_images} images each "
+          f"(~1.2 h per subject at 982). Checkpoint covers {subjects}.")
+
+    # Collect per subject. Scoring subjects separately is not just cosmetic: 2-way
+    # identification and retrieval draw their foils from the scored set, so pooling
+    # subjects would put the SAME image (seen by someone else) in the foil pool and
+    # deflate both. It is also the only way the numbers line up with the
+    # single-subject rows in the published tables.
+    bank: dict[int, dict[str, list]] = {s: {"pred": [], "gt": [], "tp": [], "tg": []}
+                                        for s in want}
     with torch.no_grad():
         for batch in tqdm(bundle.eval, desc="eval"):
-            fmri = batch["fmri"].to(device, non_blocking=True)
-            tok, cls_hat = model.predict_tokens(fmri, batch["subject"], stats)
-            blur = model.predict_lowlevel(fmri, batch["subject"])
-            lat = model.predict_low_latent(fmri, batch["subject"])
-            preds.append(decoder.decode(tok, cls_hat, init_image=blur, init_latent=lat,
-                                        strength=cfg.ll_strength))
-            gts.append(batch["image"])
-            subjects_seen.append(int(batch["subject"]))
+            s = int(batch["subject"])
+            if s not in bank:
+                continue
+            got = sum(p.shape[0] for p in bank[s]["pred"])
+            if got >= args.max_images:
+                if all(sum(p.shape[0] for p in b["pred"]) >= args.max_images
+                       for b in bank.values()):
+                    break
+                continue
+            take = min(batch["fmri"].shape[0], args.max_images - got)
+            fmri = batch["fmri"][:take].to(device, non_blocking=True)
+            tok, cls_hat = model.predict_tokens(fmri, s, stats)
+            blur = model.predict_lowlevel(fmri, s)
+            lat = model.predict_low_latent(fmri, s)
+            bank[s]["pred"].append(decoder.decode(tok, cls_hat, init_image=blur,
+                                                  init_latent=lat,
+                                                  strength=cfg.ll_strength))
+            bank[s]["gt"].append(batch["image"][:take])
             if args.retrieval:
                 # Retrieval runs on the predicted embedding, not on pixels. Park it
                 # on CPU in fp16: 982 x 256 x 1664 is ~0.8 GB per side in fp16.
-                tok_pred.append(tok.detach().to("cpu", torch.float16))
-                tok_gt.append(batch["emb"].to("cpu", torch.float16))
-            if sum(p.shape[0] for p in preds) >= args.max_images:
-                break
-    n = min(args.max_images, sum(p.shape[0] for p in preds))
-    pred = torch.cat(preds)[:n]; gt = torch.cat(gts)[:n]
+                bank[s]["tp"].append(tok.detach().to("cpu", torch.float16))
+                bank[s]["tg"].append(batch["emb"][:take].to("cpu", torch.float16))
 
-    # Legacy keys: identical definitions to every run before 2026-08, kept so the
-    # new NSD-convention numbers below can be diffed against the old ones.
-    metrics = {"n": pred.shape[0],
-               "subjects_evaluated": sorted(set(subjects_seen)),
-               "legacy_PixCorr": pixcorr(pred, gt), "legacy_SSIM": ssim(pred, gt)}
-    metrics.update({f"legacy_{k}": v for k, v in clip_metric.score(pred, gt).items()})
+    def _score(pred, gt, tp, tg):
+        # Legacy keys keep the pre-2026-08 definitions so every historical run
+        # stays comparable; the unprefixed keys are the NSD-convention ones.
+        m = {"n": int(pred.shape[0]),
+             "legacy_PixCorr": pixcorr(pred, gt), "legacy_SSIM": ssim(pred, gt)}
+        m.update({f"legacy_{k}": v for k, v in clip_metric.score(pred, gt).items()})
+        if args.full_metrics:
+            m.update(evaluate_full(pred, gt, device))
+        else:
+            m["PixCorr"] = m["legacy_PixCorr"]; m["SSIM"] = m["legacy_SSIM"]
+            m["CLIP_2way"] = m["legacy_CLIP_2way"]
+        if tp:
+            m.update(retrieval_metrics(torch.cat(tp), torch.cat(tg),
+                                       batch_size=args.retrieval_pool, device=device))
+        return m
 
+    per_subject = {}
+    for s in want:
+        b = bank[s]
+        if not b["pred"]:
+            print(f"[warn] subject {s}: no batches collected, skipping")
+            continue
+        pred = torch.cat(b["pred"]); gt = torch.cat(b["gt"])
+        per_subject[s] = _score(pred, gt, b["tp"], b["tg"])
+        print(f"  subj{s:02d}: PixCorr={per_subject[s]['PixCorr']:.3f} "
+              f"SSIM={per_subject[s]['SSIM']:.3f} "
+              f"CLIP_2way={per_subject[s]['CLIP_2way']:.3f} (n={per_subject[s]['n']})",
+              flush=True)
+        try:
+            from torchvision.utils import save_image
+            k = min(16, pred.shape[0])
+            save_image(torch.cat([gt[:k], pred[:k]]),
+                       str(out_dir / f"recon_grid_s{s}.png"), nrow=k)
+        except Exception as e:
+            print(f"[grid skipped] {e}")
+        b["pred"].clear(); b["gt"].clear(); b["tp"].clear(); b["tg"].clear()
+
+    if not per_subject:
+        raise SystemExit("no subject produced any images")
+
+    # Mean over subjects, which is how the published tables aggregate. Averaged
+    # only over subjects that actually reported a key (SwAV can be skipped if the
+    # torch.hub download fails), so one missing metric cannot silently bias it.
+    keys = [k for k, v in next(iter(per_subject.values())).items()
+            if isinstance(v, (int, float))]
+    mean = {}
+    for k in keys:
+        vals = [v[k] for v in per_subject.values() if k in v]
+        if vals:
+            mean[k] = float(sum(vals) / len(vals))
+    out = {"config": {"cond_source": args.cond_source, "cfg_scale": args.cfg_scale,
+                      "steps": args.steps, "solver": args.solver,
+                      "ll_strength": cfg.ll_strength, "ckpt": args.ckpt},
+           "subjects": sorted(per_subject), "per_subject": per_subject, "mean": mean}
+    (out_dir / "metrics.json").write_text(json.dumps(out, indent=2))
+
+    print("\n" + json.dumps(mean, indent=2))
     if args.full_metrics:
-        metrics.update(evaluate_full(pred, gt, device))
-    else:
-        metrics["PixCorr"] = metrics["legacy_PixCorr"]
-        metrics["SSIM"] = metrics["legacy_SSIM"]
-
-    if args.retrieval and tok_pred:
-        tp = torch.cat(tok_pred)[:n]; tg = torch.cat(tok_gt)[:n]
-        metrics.update(retrieval_metrics(tp, tg, batch_size=args.retrieval_pool,
-                                         device=device))
-        del tp, tg
-    tok_pred.clear(); tok_gt.clear()
-
-    print(json.dumps(metrics, indent=2))
-    if len(set(subjects_seen)) > 1:
-        print(f"\n[warn] {len(set(subjects_seen))} subjects pooled into one metric set. "
-              "2-way / retrieval foils then include the SAME image seen by another "
-              "subject, which deflates them. Use --max-images 982 for a single subject.")
-    if args.full_metrics:
-        print("\n" + format_comparison(metrics))
-    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
-    try:
-        from torchvision.utils import save_image
-        k = min(16, pred.shape[0])
-        save_image(torch.cat([gt[:k], pred[:k]]), str(out_dir / "recon_grid.png"), nrow=k)
-        print(f"✓ grid -> {out_dir/'recon_grid.png'}")
-    except Exception as e:
-        print(f"[grid skipped] {e}")
+        label = (f"mean of {len(per_subject)} subjects" if len(per_subject) > 1
+                 else f"subject {sorted(per_subject)[0]}")
+        print(f"\n=== {label} vs the published NSD table ===")
+        print(format_comparison(mean))
+    print(f"\n✓ metrics -> {out_dir/'metrics.json'}")
+    print(f"✓ grids   -> {out_dir}/recon_grid_s*.png")
 
 if __name__ == "__main__":
     main()
