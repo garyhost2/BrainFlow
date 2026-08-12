@@ -1,0 +1,484 @@
+import torch
+import torch.nn.functional as F
+
+from brainflow.step1.sphere import (
+    random_sphere, project_tangent, exp_map, log_map,
+    slerp, slerp_velocity, polar_encode, polar_decode, tangent_noise,
+)
+from brainflow.step1.model_tokens import TokenStep1Config, TokenStep1Model
+
+torch.manual_seed(0)
+
+
+# --------------------------------------------------------------------------
+#  Geometry primitives (section 5 of the paper)
+# --------------------------------------------------------------------------
+def test_random_sphere_unit_norm():
+    z = random_sphere((5, 7, 16), "cpu")
+    assert torch.allclose(z.norm(dim=-1), torch.ones(5, 7), atol=1e-5)
+
+
+def test_project_tangent_orthogonal():
+    z = random_sphere((4, 16), "cpu")
+    v = torch.randn(4, 16)
+    w = project_tangent(v, z)
+    assert torch.allclose((w * z).sum(-1), torch.zeros(4), atol=1e-5)
+
+
+def test_exp_map_preserves_norm_and_identity():
+    z = random_sphere((4, 16), "cpu")
+    w = project_tangent(torch.randn(4, 16), z)
+    out = exp_map(z, w)
+    assert torch.allclose(out.norm(dim=-1), torch.ones(4), atol=1e-5)
+    assert torch.allclose(exp_map(z, torch.zeros_like(z)), z, atol=1e-5)
+
+
+def test_exp_log_inverse():
+    z = random_sphere((6, 32), "cpu")
+    y = random_sphere((6, 32), "cpu")
+    assert torch.allclose(exp_map(z, log_map(z, y)), y, atol=1e-4)
+
+
+def test_slerp_endpoints_and_norm():
+    z0 = random_sphere((8, 24), "cpu")
+    z1 = random_sphere((8, 24), "cpu")
+    t0 = torch.zeros(8, 1)
+    t1 = torch.ones(8, 1)
+    assert torch.allclose(slerp(z0, z1, t0), z0, atol=1e-5)
+    assert torch.allclose(slerp(z0, z1, t1), z1, atol=1e-5)
+    zt = slerp(z0, z1, torch.full((8, 1), 0.37))
+    assert torch.allclose(zt.norm(dim=-1), torch.ones(8), atol=1e-5)
+
+
+def test_slerp_velocity_is_tangent_and_matches_finite_diff():
+    z0 = random_sphere((8, 24), "cpu").double()
+    z1 = random_sphere((8, 24), "cpu").double()
+    t = torch.full((8, 1), 0.41, dtype=torch.float64)
+    zt = slerp(z0, z1, t)
+    v = slerp_velocity(z0, z1, t)
+    assert torch.allclose((v * zt).sum(-1), torch.zeros(8, dtype=torch.float64), atol=1e-6)
+    h = 1e-6
+    fd = (slerp(z0, z1, t + h) - slerp(z0, z1, t - h)) / (2 * h)
+    assert torch.allclose(v, fd, atol=1e-4)
+
+
+def test_polar_round_trip():
+    x = torch.randn(3, 5, 16)
+    mean = torch.randn(16)
+    z, r = polar_encode(x, mean)
+    assert torch.allclose(z.norm(dim=-1), torch.ones(3, 5), atol=1e-5)
+    assert torch.allclose(polar_decode(z, r, mean), x, atol=1e-4)
+
+
+def test_tangent_noise_stays_on_sphere():
+    z = random_sphere((4, 32), "cpu")
+    out = tangent_noise(z, kappa=0.1)
+    assert torch.allclose(out.norm(dim=-1), torch.ones(4), atol=1e-5)
+    assert torch.allclose(tangent_noise(z, 0.0), z)
+
+
+# --------------------------------------------------------------------------
+#  Two-head model (sections 7-9)
+# --------------------------------------------------------------------------
+def _tiny_cfg(geometry, two_head=True, low_level=True):
+    return TokenStep1Config(
+        token_len=4, token_dim=8, cls_dim=10, brain_dim=6, n_brain_tokens=3,
+        enc_hidden=16, enc_blocks=1, reg_depth=1, reg_heads=2,
+        prior_width=16, prior_depth=1, prior_heads=2, time_dim=8,
+        cls_width=16, cls_depth=1, cls_heads=2,
+        low_level=low_level, ll_size=16, ll_base=32,
+        geometry=geometry, two_head=two_head, lambda_radius=1.0, n_steps=4, subjects=[1],
+    )
+
+
+def _model(geometry, two_head=True, train=False, low_level=True):
+    cfg = _tiny_cfg(geometry, two_head, low_level)
+    model = TokenStep1Model(cfg, {1: 10})
+    model.set_target_mean(torch.zeros(8))
+    return model if train else model.eval()
+
+
+def test_two_head_sphere_training_step_trains_both_flows():
+    model = _model("sphere", two_head=True, train=True)
+    fmri = torch.randn(2, 10)
+    out = model.training_step(fmri, 1, None,
+                              target_raw=torch.randn(2, 4, 8),
+                              target_cls=torch.randn(2, 10))
+    assert torch.isfinite(out["loss"]) and out["loss"].requires_grad
+    for k in ("flow", "rcfm", "reg", "cos", "clip", "radius"):
+        assert torch.isfinite(out[k])
+    assert out["rcfm"] > 0          # the CLS head actually receives a signal
+    assert out["clip"] > 0          # SoftCLIP anchored on the true CLS
+    out["loss"].backward()
+
+
+def test_two_head_predict_returns_unit_cls():
+    model = _model("sphere", two_head=True)
+    fmri = torch.randn(2, 10)
+    for cond in ("regression", "prior", "blend"):
+        tok, cls_hat = model.predict_tokens(fmri, 1, None, cond_source=cond)
+        assert tok.shape == (2, 4, 8) and torch.isfinite(tok).all()
+        assert cls_hat.shape == (2, 10)
+        assert torch.allclose(cls_hat.norm(dim=-1), torch.ones(2), atol=1e-5)
+
+
+def test_cls_conditioning_changes_patch_velocity():
+    """The patch prior must actually use c_cls (not ignore the conditioning)."""
+    model = _model("sphere", two_head=True)
+    # The output head and AdaLN are zero-initialised; perturb them so the
+    # conditioning pathways (extra K/V token + AdaLN modulation) are live.
+    torch.nn.init.normal_(model.prior.out.weight, std=0.1)
+    torch.nn.init.normal_(model.prior.out.bias, std=0.1)
+    torch.nn.init.normal_(model.prior.cls_ada.weight, std=0.1)
+    for blk in model.prior.blocks:
+        torch.nn.init.normal_(blk.ada[-1].weight, std=0.1)
+    z = random_sphere((2, 4, 8), "cpu")
+    t = torch.full((2,), 0.5)
+    brain = model.backbone(torch.randn(2, 10), 1)
+    a = model.prior(z, t, brain, torch.randn(2, 10))
+    b = model.prior(z, t, brain, torch.randn(2, 10))
+    assert not torch.allclose(a, b)
+
+
+def test_geodesic_euler_and_heun_both_finite_on_sphere():
+    model = _model("sphere", two_head=True)
+    fmri = torch.randn(2, 10)
+    for solver in ("euler", "heun"):
+        tok, cls_hat = model.predict_tokens(fmri, 1, None, cond_source="prior", solver=solver)
+        assert torch.isfinite(tok).all() and torch.isfinite(cls_hat).all()
+
+
+def test_single_head_predict_has_no_cls():
+    model = _model("sphere", two_head=False)
+    tok, cls_hat = model.predict_tokens(torch.randn(2, 10), 1, None, cond_source="prior")
+    assert tok.shape == (2, 4, 8) and torch.isfinite(tok).all()
+    assert cls_hat is None
+
+
+def test_euclidean_two_head_path_trains():
+    model = _model("euclidean", two_head=True, train=True)
+    out = model.training_step(torch.randn(2, 10), 1, torch.randn(2, 4, 8),
+                              target_cls=torch.randn(2, 10))
+    assert torch.isfinite(out["loss"]) and out["loss"].requires_grad
+    out["loss"].backward()
+
+
+def test_euclidean_single_head_baseline_still_works():
+    model = _model("euclidean", two_head=False, train=True)
+    out = model.training_step(torch.randn(2, 10), 1, torch.randn(2, 4, 8))
+    assert torch.isfinite(out["loss"]) and out["loss"].requires_grad
+    assert out["rcfm"] == 0          # no CLS head -> no RCFM term
+    out["loss"].backward()
+
+
+# --------------------------------------------------------------------------
+#  Low-level (blurry-image / img2img) pathway
+# --------------------------------------------------------------------------
+def test_low_level_head_predicts_blurry_image():
+    model = _model("sphere", two_head=True)
+    blur = model.predict_lowlevel(torch.randn(2, 10), 1)
+    assert blur.shape == (2, 3, 16, 16)
+    assert blur.min() >= 0.0 and blur.max() <= 1.0          # sigmoid output
+
+
+def test_low_level_loss_trains():
+    model = _model("sphere", two_head=True, train=True)
+    out = model.training_step(torch.randn(2, 10), 1, None,
+                              target_raw=torch.randn(2, 4, 8),
+                              target_cls=torch.randn(2, 10),
+                              target_img=torch.rand(2, 3, 32, 32))
+    assert "low" in out and torch.isfinite(out["low"]) and out["low"] > 0
+    out["loss"].backward()
+    assert model.low_head.out.weight.grad is not None
+
+
+def test_low_level_disabled():
+    model = _model("sphere", two_head=True, low_level=False)
+    assert model.low_head is None
+    assert model.predict_lowlevel(torch.randn(2, 10), 1) is None
+    out = model.training_step(torch.randn(2, 10), 1, None,
+                              target_raw=torch.randn(2, 4, 8),
+                              target_cls=torch.randn(2, 10),
+                              target_img=torch.rand(2, 3, 32, 32))
+    assert "low" not in out          # no head -> no term
+
+
+def test_ll_loss_modes_all_train():
+    import dataclasses
+    for mode in ("l1", "huber", "mse"):
+        cfg = dataclasses.replace(_tiny_cfg("sphere"), ll_loss=mode)
+        model = TokenStep1Model(cfg, {1: 10}); model.train()
+        out = model.training_step(torch.randn(2, 10), 1, None,
+                                  target_raw=torch.randn(2, 4, 8),
+                                  target_cls=torch.randn(2, 10),
+                                  target_img=torch.rand(2, 3, 32, 32), low_only=True)
+        assert torch.isfinite(out["low"]) and out["low"] > 0, mode
+        out["loss"].backward()
+        assert model.low_head.out.weight.grad is not None, mode
+
+
+def test_low_head_can_overfit_two_distinct_layouts():
+    # The MSE->mean failure would show as inability to separate two targets. With
+    # the voxel-fed head + L1, a few steps must drive the loss well below the
+    # constant-prediction floor (proves it learns structure, not the average).
+    torch.manual_seed(0)
+    model = _model("sphere", train=True)
+    fmri = torch.randn(2, 10)
+    tgt = torch.rand(2, 3, 32, 32)
+    tgt[0] *= 0.2; tgt[1] = 1.0 - tgt[1] * 0.2          # two very different images
+    opt = torch.optim.Adam(model.low_head.parameters(), lr=1e-2)
+    first = None
+    for _ in range(150):
+        opt.zero_grad()
+        out = model.training_step(fmri, 1, None, target_img=tgt, low_only=True)
+        out["loss"].backward(); opt.step()
+        first = first if first is not None else out["low"].item()
+    assert out["low"].item() < 0.5 * first    # loss must drop, i.e. it fits the layouts
+
+
+def test_low_only_fast_path_trains_only_the_head():
+    # --freeze-token: freeze everything except low_head, then low_only training
+    # must (a) skip the prior/CLS/contrastive terms, (b) produce a finite low-only
+    # loss, and (c) send gradients to low_head but NOT to the frozen token model.
+    model = _model("sphere", two_head=True, train=True)
+    for name, p in model.named_parameters():
+        p.requires_grad_(name.startswith("low_head"))
+
+    out = model.training_step(torch.randn(2, 10), 1, None,
+                              target_raw=torch.randn(2, 4, 8),
+                              target_cls=torch.randn(2, 10),
+                              target_img=torch.rand(2, 3, 32, 32),
+                              low_only=True)
+    assert set(out) == {"low", "loss"}                 # only the low-level term
+    assert torch.isfinite(out["loss"]) and out["loss"] > 0
+    out["loss"].backward()
+    assert model.low_head.out.weight.grad is not None  # head learns
+    # every frozen token-model param stayed grad-free (no prior drift)
+    assert all(p.grad is None for n, p in model.named_parameters()
+               if not n.startswith("low_head"))
+
+
+# ---------------------------------------------------------------------------
+#  BiMixCo augmentation (anti-overfit)
+# ---------------------------------------------------------------------------
+def test_mixco_mixes_only_selected_rows_and_stays_convex():
+    from brainflow.step1.model_tokens import mixco
+    torch.manual_seed(0)
+    x = torch.randn(64, 12)
+    mixed, perm, betas, select = mixco(x, beta=0.15, s_thresh=0.5)
+    assert mixed.shape == x.shape
+    assert perm.shape == (64,) and betas.shape == (64,) and select.shape == (64,)
+    assert (betas[~select] == 1).all()                 # unselected rows untouched
+    assert torch.allclose(mixed[~select], x[~select])
+    assert ((betas >= 0) & (betas <= 1)).all()
+    # each mixed row is exactly the convex combination it claims to be
+    exp = x * betas[:, None] + x[perm] * (1 - betas[:, None])
+    assert torch.allclose(mixed, exp, atol=1e-6)
+    assert select.float().mean() > 0.2                 # roughly half, not none
+
+
+def test_mixco_nce_target_rows_sum_to_one():
+    """The two-hot target must be a distribution, incl. when a row draws itself."""
+    from brainflow.step1.model_tokens import mixco_nce
+    torch.manual_seed(0)
+    B, D = 8, 5
+    preds = F.normalize(torch.randn(B, D), dim=-1)
+    targs = F.normalize(torch.randn(B, D), dim=-1)
+    perm = torch.arange(B)                              # pathological: self-partner
+    betas = torch.full((B,), 0.3)
+    select = torch.ones(B, dtype=torch.bool)
+    loss = mixco_nce(preds, targs, 0.006, perm, betas, select)
+    assert torch.isfinite(loss) and loss > 0
+    # a perfect predictor of the unmixed target scores better than a random one
+    perm2 = torch.roll(torch.arange(B), 1)
+    good = mixco_nce(targs, targs, 0.006, perm2, torch.ones(B), select)
+    bad = mixco_nce(preds, targs, 0.006, perm2, torch.ones(B), select)
+    assert good < bad
+
+
+def test_training_step_with_mixco_trains_and_differs_from_clean():
+    from brainflow.step1.model_tokens import TokenStep1Config
+    cfg = _tiny_cfg("sphere")
+    cfg.mixup_pct = 0.33
+    model = TokenStep1Model(cfg, {1: 10})
+    model.set_target_mean(torch.zeros(8))
+    fmri = torch.randn(8, 10)
+    raw = torch.randn(8, 4, 8)
+    cls = torch.randn(8, 10)
+
+    torch.manual_seed(0)
+    mixed = model.training_step(fmri, 1, None, target_raw=raw, target_cls=cls,
+                                use_mixco=True)
+    torch.manual_seed(0)
+    clean = model.training_step(fmri, 1, None, target_raw=raw, target_cls=cls,
+                                use_mixco=False)
+    assert torch.isfinite(mixed["loss"]) and mixed["loss"].requires_grad
+    assert not torch.allclose(mixed["clip"], clean["clip"])   # contrastive changed
+    mixed["loss"].backward()
+    assert model.backbone.input_proj["1"].weight.grad is not None
+
+
+def test_mixco_off_by_default():
+    """Default config must reproduce the clean SoftCLIP path exactly."""
+    model = _model("sphere", train=True)
+    assert model.cfg.mixup_pct == 0.0
+    fmri = torch.randn(4, 10); raw = torch.randn(4, 4, 8); cls = torch.randn(4, 10)
+    torch.manual_seed(0)
+    a = model.training_step(fmri, 1, None, target_raw=raw, target_cls=cls,
+                            use_mixco=True)          # flag on, but mixup_pct=0
+    torch.manual_seed(0)
+    b = model.training_step(fmri, 1, None, target_raw=raw, target_cls=cls)
+    assert torch.allclose(a["clip"], b["clip"])
+
+
+def test_mixco_leaves_low_level_head_on_clean_voxels():
+    """The low head regresses spatial layout; a mixed input would be label noise.
+
+    Asserted by spying on the tensor ``_low_level_loss`` actually receives -- a
+    seed-matched loss comparison cannot show this, because mixco draws from the
+    RNG and so shifts the head's own dropout mask.
+    """
+    cfg = _tiny_cfg("sphere")
+    cfg.mixup_pct = 0.33
+    model = TokenStep1Model(cfg, {1: 10})
+    model.set_target_mean(torch.zeros(8))
+    fmri = torch.randn(8, 10); raw = torch.randn(8, 4, 8)
+    cls = torch.randn(8, 10); img = torch.rand(8, 3, 32, 32)
+
+    seen = {}
+    orig = model._low_level_loss
+    def spy(f, subject, target_img, target_lat=None):
+        seen["fmri"] = f
+        return orig(f, subject, target_img, target_lat)
+    model._low_level_loss = spy
+
+    out = model.training_step(fmri, 1, None, target_raw=raw, target_cls=cls,
+                              target_img=img, use_mixco=True)
+    assert torch.isfinite(out["low"])
+    assert seen["fmri"] is fmri, "low head was fed the MIXED voxels"
+
+
+# ---------------------------------------------------------------------------
+#  VAE-latent low-level head (ll_target="latent")
+# ---------------------------------------------------------------------------
+def _latent_cfg():
+    cfg = _tiny_cfg("sphere")
+    cfg.ll_target = "latent"
+    cfg.ll_hidden = 32
+    cfg.ll_base = 32
+    return cfg
+
+
+def test_latent_head_outputs_decoder_latent_shape():
+    from brainflow.step1.model_tokens import LatentLowLevelHead
+    model = TokenStep1Model(_latent_cfg(), {1: 10})
+    assert isinstance(model.low_head, LatentLowLevelHead)
+    assert model.low_is_latent
+    out = model.low_head(torch.randn(2, 10), 1)
+    assert out.shape == (2, 4, 96, 96)      # SDXLUnCLIPDecoder.LATENT_SHAPE
+
+
+def test_latent_head_shape_matches_decoder_constant():
+    from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder
+    model = TokenStep1Model(_latent_cfg(), {1: 10})
+    out = model.low_head(torch.randn(1, 10), 1)
+    assert tuple(out.shape[1:]) == SDXLUnCLIPDecoder.LATENT_SHAPE
+
+
+def test_latent_head_is_linear_not_sigmoid():
+    """Latents are ~unit-Gaussian and unbounded; a sigmoid would cap them in (0,1)."""
+    model = TokenStep1Model(_latent_cfg(), {1: 10})
+    torch.nn.init.normal_(model.low_head.out.weight, std=1.0)
+    torch.nn.init.normal_(model.low_head.out.bias, std=3.0)
+    out = model.low_head(torch.randn(4, 10), 1)
+    assert out.min() < 0.0, "output is non-negative -> squashed like a sigmoid"
+    assert out.abs().max() > 1.0, "output is bounded in unit range"
+
+
+def test_latent_standardize_round_trip():
+    model = TokenStep1Model(_latent_cfg(), {1: 10})
+    model.low_head.set_latent_stats(torch.tensor([1., -2., 0.5, 3.]),
+                                    torch.tensor([2., 0.5, 1.5, 4.]))
+    lat = torch.randn(3, 4, 96, 96) * 2 + 1
+    back = model.low_head.unstandardize(model.low_head.standardize(lat))
+    assert torch.allclose(back, lat, atol=1e-4)
+
+
+def test_latent_low_loss_trains_and_uses_the_latent_target():
+    cfg = _latent_cfg()
+    model = TokenStep1Model(cfg, {1: 10})
+    model.set_target_mean(torch.zeros(8))
+    out = model.training_step(torch.randn(2, 10), 1, None,
+                              target_raw=torch.randn(2, 4, 8),
+                              target_cls=torch.randn(2, 10),
+                              target_img=torch.rand(2, 3, 32, 32),
+                              target_lat=torch.randn(2, 4, 96, 96))
+    assert torch.isfinite(out["low"]) and out["low"] > 0
+    out["loss"].backward()
+    assert model.low_head.out.weight.grad is not None
+
+
+def test_latent_head_ignores_rgb_target():
+    """With ll_target=latent, an RGB-only batch must yield no low term (not a crash)."""
+    model = TokenStep1Model(_latent_cfg(), {1: 10})
+    model.set_target_mean(torch.zeros(8))
+    out = model.training_step(torch.randn(2, 10), 1, None,
+                              target_raw=torch.randn(2, 4, 8),
+                              target_cls=torch.randn(2, 10),
+                              target_img=torch.rand(2, 3, 32, 32))
+    assert "low" not in out
+
+
+def test_predict_low_latent_and_lowlevel_are_exclusive():
+    lat_model = TokenStep1Model(_latent_cfg(), {1: 10}).eval()
+    rgb_model = _model("sphere", low_level=True)
+    f = torch.randn(2, 10)
+    assert lat_model.predict_lowlevel(f, 1) is None
+    assert lat_model.predict_low_latent(f, 1).shape == (2, 4, 96, 96)
+    assert rgb_model.predict_low_latent(f, 1) is None
+    assert rgb_model.predict_lowlevel(f, 1) is not None
+
+
+def test_predict_low_latent_unstandardizes():
+    model = TokenStep1Model(_latent_cfg(), {1: 10}).eval()
+    model.low_head.set_latent_stats(torch.full((4,), 5.0), torch.full((4,), 3.0))
+    torch.nn.init.normal_(model.low_head.out.weight, std=0.5)
+    f = torch.randn(2, 10)
+    raw = model.low_head(f, 1)
+    assert torch.allclose(model.predict_low_latent(f, 1), raw * 3.0 + 5.0, atol=1e-4)
+
+
+def test_latent_head_can_overfit_two_distinct_layouts():
+    """The capability the four RGB heads lacked: fit two different targets.
+
+    The targets are SMOOTH low-frequency fields, which is what a VAE latent of a
+    blurred image looks like. White noise would be an unfair bar: the head
+    upsamples a 12x12 grid through convs, so high-frequency detail is outside
+    its hypothesis space by construction.
+    """
+    cfg = _latent_cfg()
+    model = TokenStep1Model(cfg, {1: 10})
+    model.set_target_mean(torch.zeros(8))
+    torch.manual_seed(0)
+    fmri = torch.randn(2, 10)
+    coarse = torch.randn(1, 4, 6, 6)
+    lat = F.interpolate(torch.cat([coarse, -coarse]), 96, mode="bilinear",
+                        align_corners=False)          # two opposite smooth layouts
+    opt = torch.optim.Adam(model.low_head.parameters(), lr=3e-3)
+    first = None
+    for _ in range(80):
+        opt.zero_grad()
+        loss = model._low_level_loss(fmri, 1, None, lat)["low"]
+        loss.backward(); opt.step()
+        first = loss.item() if first is None else first
+    assert loss.item() < 0.5 * first, f"did not fit: {first:.4f} -> {loss.item():.4f}"
+
+
+def test_old_rgb_checkpoint_config_still_builds_rgb_head():
+    """A cfg pickled before ll_target existed must not silently become a latent head."""
+    from brainflow.step1.model_tokens import LowLevelHead
+    cfg = _tiny_cfg("sphere")
+    del cfg.ll_target                       # simulate an older pickled dataclass
+    model = TokenStep1Model(cfg, {1: 10})
+    assert isinstance(model.low_head, LowLevelHead)
+    assert not model.low_is_latent
