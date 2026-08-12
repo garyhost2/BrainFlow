@@ -5,6 +5,7 @@ required.  Only PixCorr and SSIM are exercised (all network-dependent metrics
 are skipped).
 """
 from __future__ import annotations
+import os
 import sys
 from pathlib import Path
 
@@ -13,7 +14,9 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from brainflow.metrics_full import evaluate_full, two_way_identification
+from brainflow.metrics_full import (evaluate_full, two_way_identification,
+                                    correlation_distance, retrieval_metrics,
+                                    ssim_grayscale, format_comparison)
 
 _SKIP = ["AlexNet(2)", "AlexNet(5)", "Inception", "CLIP", "EffNet-B", "SwAV"]
 _EXPECTED_KEYS = {"PixCorr", "SSIM"}
@@ -75,6 +78,9 @@ class TestSelfTestScript:
             [sys.executable, "-m", "scripts.eval_full", "--self-test"],
             capture_output=True, text=True,
             cwd=str(Path(__file__).resolve().parent.parent),
+            # The script prints non-ASCII; a cp1252 console (Windows) would raise
+            # UnicodeEncodeError on the print, not on anything being measured.
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
         assert result.returncode == 0, (
             f"--self-test failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
@@ -86,6 +92,9 @@ class TestSelfTestScript:
             [sys.executable, "-m", "scripts.eval_full", "--self-test"],
             capture_output=True, text=True,
             cwd=str(Path(__file__).resolve().parent.parent),
+            # The script prints non-ASCII; a cp1252 console (Windows) would raise
+            # UnicodeEncodeError on the print, not on anything being measured.
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
         assert "PixCorr" in result.stdout
         assert "SSIM" in result.stdout
@@ -126,6 +135,90 @@ class TestEvaluateFullTwoWayKeys:
             "CLIP_2way", "EffNet-B_2way", "SwAV_2way",
         }
         assert expected <= result.keys()
+
+
+class TestCorrelationDistance:
+    """EffNet-B / SwAV are DISTANCES in the NSD tables: lower = better."""
+
+    def test_identical_features_are_zero(self):
+        x = torch.randn(16, 64)
+        assert correlation_distance(x, x.clone()) == pytest.approx(0.0, abs=1e-5)
+
+    def test_random_features_near_one(self):
+        torch.manual_seed(0)
+        d = correlation_distance(torch.randn(256, 512), torch.randn(256, 512))
+        assert 0.9 <= d <= 1.1
+
+    def test_better_prediction_has_smaller_distance(self):
+        torch.manual_seed(0)
+        target = torch.randn(64, 128)
+        close = target + 0.1 * torch.randn_like(target)
+        far = target + 2.0 * torch.randn_like(target)
+        assert correlation_distance(close, target) < correlation_distance(far, target)
+
+    def test_evaluate_full_reports_effnet_as_distance(self, monkeypatch):
+        """A perfect reconstruction must give EffNet-B ~0, not ~1."""
+        def _pair(pred, target, device):
+            x = torch.randn(pred.shape[0], 32)
+            return x, x.clone()
+        monkeypatch.setattr("brainflow.metrics_full._effnet_feature_pair", _pair)
+        monkeypatch.setattr("brainflow.metrics_full._swav_feature_pair", _pair)
+        x = torch.rand(4, 3, 64, 64)
+        result = evaluate_full(x, x.clone(), device="cpu",
+                               skip=["AlexNet(2)", "AlexNet(5)", "Inception", "CLIP"])
+        assert result["EffNet-B"] < 0.01
+        assert result["SwAV"] < 0.01
+
+
+class TestSSIMGrayscale:
+    def test_identical_is_one(self):
+        x = torch.rand(4, 3, 64, 64)
+        assert ssim_grayscale(x, x.clone()) == pytest.approx(1.0, abs=1e-4)
+
+    def test_noise_is_low(self):
+        torch.manual_seed(0)
+        assert ssim_grayscale(torch.rand(4, 3, 64, 64), torch.rand(4, 3, 64, 64)) < 0.2
+
+    def test_valid_window_not_zero_padded(self):
+        """A uniform image pair scores 1.0; zero-padded borders would drag it down."""
+        x = torch.full((2, 3, 32, 32), 0.7)
+        assert ssim_grayscale(x, x.clone()) == pytest.approx(1.0, abs=1e-4)
+
+
+class TestRetrieval:
+    def test_perfect_prediction_is_one(self):
+        torch.manual_seed(0)
+        emb = torch.randn(64, 8, 16)
+        r = retrieval_metrics(emb, emb.clone(), batch_size=32)
+        assert r["retrieval_fwd"] == 1.0 and r["retrieval_bwd"] == 1.0
+
+    def test_random_prediction_is_chance(self):
+        torch.manual_seed(0)
+        r = retrieval_metrics(torch.randn(300, 128), torch.randn(300, 128),
+                              batch_size=300)
+        assert r["retrieval_fwd"] < 0.05          # chance = 1/300
+        assert r["retrieval_bwd"] < 0.05
+
+    def test_drops_short_trailing_pool(self):
+        """982 images at pool=300 must score 3 pools of 300, not 3 + a soft 82."""
+        emb = torch.randn(982, 64)
+        r = retrieval_metrics(emb, emb.clone(), batch_size=300)
+        assert r["retrieval_pools"] == 3 and r["retrieval_pool"] == 300
+
+    def test_pool_smaller_than_n(self):
+        emb = torch.randn(10, 64)
+        r = retrieval_metrics(emb, emb.clone(), batch_size=300)
+        assert r["retrieval_pool"] == 10 and r["retrieval_pools"] == 1
+
+
+class TestComparisonTable:
+    def test_renders_our_row_and_references(self):
+        metrics = {"PixCorr": 0.164, "SSIM": 0.348, "CLIP_2way": 0.703,
+                   "EffNet-B": 0.85, "SwAV": 0.60}
+        table = format_comparison(metrics)
+        assert "**ours**" in table and "MindEye2" in table
+        assert "0.164" in table
+        assert "--" in table          # AlexNet columns are absent -> placeholder
 
 
 if __name__ == "__main__":

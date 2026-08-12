@@ -41,6 +41,41 @@ def ssim_pytorch(pred: torch.Tensor, target: torch.Tensor,
     return float(((2 * mx * my + C1) * (2 * sxy + C2) /
                   ((mx ** 2 + my ** 2 + C1) * (sx + sy + C2))).mean())
 
+# rgb2gray (Rec. 709 luma) -- the coefficients skimage.color.rgb2gray uses, which
+# is what the NSD papers feed to structural_similarity.
+_GRAY_W = torch.tensor([0.2125, 0.7154, 0.0721])
+
+def ssim_grayscale(pred: torch.Tensor, target: torch.Tensor,
+                   ws: int = 11, sigma: float = 1.5) -> float:
+    """SSIM as the NSD leaderboard computes it (MindEye2 / Ozcelik / Takagi).
+
+    Their call is ``skimage.metrics.structural_similarity(rec, gt,
+    gaussian_weights=True, sigma=1.5, use_sample_covariance=False,
+    data_range=1.0)`` on ``rgb2gray`` images. Two details matter and both were
+    wrong in :func:`ssim_pytorch`:
+
+    * **grayscale, not per-channel** -- SSIM on 3 independent RGB planes is a
+      different (lower) number;
+    * **valid window, not zero-padded** -- skimage crops ``(ws-1)//2`` px off
+      each edge, so no window ever sees padding. Zero-padding compares the
+      border against black and biases the score *down*.
+    """
+    C1, C2 = 0.01 ** 2, 0.03 ** 2
+    w = _GRAY_W.to(pred.device, torch.float32).view(1, 3, 1, 1)
+    p = (pred.float() * w).sum(1, keepdim=True)
+    t = (target.float() * w).sum(1, keepdim=True)
+    g = torch.arange(ws, dtype=torch.float32, device=pred.device) - (ws - 1) / 2
+    g = torch.exp(-g ** 2 / (2 * sigma ** 2)); g = g / g.sum()
+    k = g.outer(g).view(1, 1, ws, ws)
+    def mu(x):
+        return F.conv2d(x, k)                      # padding=0 == skimage's crop
+    mp = mu(p); mt = mu(t)
+    sp = mu(p * p) - mp ** 2
+    st = mu(t * t) - mt ** 2
+    spt = mu(p * t) - mp * mt
+    return float(((2 * mp * mt + C1) * (2 * spt + C2) /
+                  ((mp ** 2 + mt ** 2 + C1) * (sp + st + C2))).mean())
+
 def _normalise(imgs: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
     mean = mean.view(1, 3, 1, 1).to(imgs.device)
     std  = std.view(1, 3, 1, 1).to(imgs.device)
@@ -51,16 +86,81 @@ def _mean_cosine(pred_feats: torch.Tensor, target_feats: torch.Tensor) -> float:
     target_feats = F.normalize(target_feats.float(), dim=-1)
     return float((pred_feats * target_feats).sum(-1).mean())
 
+def _center_normalize(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """Row-wise mean-subtract + L2-normalise, so a dot product IS Pearson r."""
+    x = x.float()
+    x = x - x.mean(dim=-1, keepdim=True)
+    return x / x.norm(dim=-1, keepdim=True).clamp_min(eps)
+
+def correlation_distance(pred_feats: torch.Tensor, target_feats: torch.Tensor) -> float:
+    """Mean ``1 - pearson_r`` between paired feature vectors -- LOWER IS BETTER.
+
+    This is ``scipy.spatial.distance.correlation`` averaged over images, which is
+    how the NSD tables report EffNet-B and SwAV. Reporting a similarity there (as
+    this module used to) inverts the ranking against every published number.
+    """
+    r = (_center_normalize(pred_feats) * _center_normalize(target_feats)).sum(-1)
+    return float((1.0 - r).mean())
+
 def two_way_identification(pred_feats: torch.Tensor, target_feats: torch.Tensor) -> float:
-    pred_feats = F.normalize(pred_feats.float(), dim=-1)
-    target_feats = F.normalize(target_feats.float(), dim=-1)
-    sim = pred_feats @ target_feats.T
+    """Fraction of (image, foil) pairs where the recon matches its own ground truth.
+
+    Uses *Pearson correlation* between feature vectors, matching the NSD
+    convention (``np.corrcoef`` on the two feature stacks). Plain cosine leaves
+    the feature mean in, which for post-ReLU activations is a large shared
+    component that compresses the spread between congruent and foil pairs.
+    """
+    p = _center_normalize(pred_feats)
+    t = _center_normalize(target_feats)
+    sim = p @ t.T
     correct = sim.diag().unsqueeze(1)
     if sim.shape[0] < 2:
         return 1.0
     foil_mask = ~torch.eye(sim.shape[0], dtype=torch.bool, device=sim.device)
     foil = sim[foil_mask].view(sim.shape[0], sim.shape[0] - 1)
     return float((correct > foil).float().mean())
+
+@torch.no_grad()
+def retrieval_metrics(pred_emb: torch.Tensor, target_emb: torch.Tensor,
+                      batch_size: int = 300, seed: int = 0,
+                      device=None) -> dict[str, float]:
+    """Top-1 image/brain retrieval within random pools of ``batch_size`` candidates.
+
+    The NSD retrieval columns are computed on the *predicted CLIP embedding*, not
+    on decoded pixels -- so this needs no diffusion pass and is essentially free.
+    ``pred_emb``/``target_emb`` are flattened and L2-normalised (MindEye2 does the
+    same with its 256x1664 sequence).
+
+    * ``retrieval_fwd`` -- given a ground-truth image embedding, pick its brain
+      prediction out of the pool.
+    * ``retrieval_bwd`` -- given a brain prediction, pick its ground-truth image.
+
+    Only full-size pools are scored: a short trailing pool has fewer distractors
+    and would inflate the average.
+    """
+    # Cast per pool, not up front: the sequence-valued embedding is 982x256x1664,
+    # so a whole-tensor .float() would materialise ~1.7 GB per side.
+    p = pred_emb.flatten(1)
+    t = target_emb.flatten(1)
+    n = p.shape[0]
+    if n < 2:
+        return {"retrieval_fwd": float("nan"), "retrieval_bwd": float("nan"),
+                "retrieval_pool": 0, "retrieval_pools": 0}
+    pool = min(batch_size, n)
+    perm = torch.randperm(n, generator=torch.Generator().manual_seed(seed))
+    n_pools = max(1, n // pool)
+    fwd = bwd = 0.0
+    for i in range(n_pools):
+        idx = perm[i * pool:(i + 1) * pool]
+        dev = device or p.device
+        pb = F.normalize(p[idx].to(dev, torch.float32), dim=-1)
+        tb = F.normalize(t[idx].to(dev, torch.float32), dim=-1)
+        sim = tb @ pb.T                          # rows: GT image, cols: brain pred
+        labels = torch.arange(len(idx), device=sim.device)
+        fwd += float((sim.argmax(dim=1) == labels).float().mean())
+        bwd += float((sim.T.argmax(dim=1) == labels).float().mean())
+    return {"retrieval_fwd": fwd / n_pools, "retrieval_bwd": bwd / n_pools,
+            "retrieval_pool": pool, "retrieval_pools": n_pools}
 
 def _get_clip(device):
     if "clip" not in _MODEL_CACHE:
@@ -206,9 +306,10 @@ def _effnet_feature_pair(pred: torch.Tensor, target: torch.Tensor, device) -> tu
     return fp, ft
 
 @torch.no_grad()
-def effnet_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float:
+def effnet_distance(pred: torch.Tensor, target: torch.Tensor, device) -> float:
+    """EffNet-B correlation *distance* (the NSD column). Lower is better."""
     fp, ft = _effnet_feature_pair(pred, target, device)
-    return _mean_cosine(fp, ft)
+    return correlation_distance(fp, ft)
 
 @torch.no_grad()
 def _swav_feature_pair(pred: torch.Tensor, target: torch.Tensor, device) -> tuple[torch.Tensor, torch.Tensor] | None:
@@ -231,12 +332,13 @@ def _swav_feature_pair(pred: torch.Tensor, target: torch.Tensor, device) -> tupl
     return fp, ft
 
 @torch.no_grad()
-def swav_similarity(pred: torch.Tensor, target: torch.Tensor, device) -> float:
+def swav_distance(pred: torch.Tensor, target: torch.Tensor, device) -> float:
+    """SwAV correlation *distance* (the NSD column). Lower is better."""
     feats = _swav_feature_pair(pred, target, device)
     if feats is None:
         raise RuntimeError("SwAV is unavailable")
     fp, ft = feats
-    return _mean_cosine(fp, ft)
+    return correlation_distance(fp, ft)
 
 @torch.no_grad()
 def evaluate_full(
@@ -249,7 +351,7 @@ def evaluate_full(
     metrics: dict[str, float] = {}
 
     metrics["PixCorr"] = pixel_correlation(pred_images, target_images)
-    metrics["SSIM"]    = ssim_pytorch(pred_images.cpu(), target_images.cpu())
+    metrics["SSIM"]    = ssim_grayscale(pred_images.cpu(), target_images.cpu())
 
     if "AlexNet(2)" not in skip:
         fp, ft = _alexnet_feature_pair(pred_images, target_images, ALEXNET_EARLY_LAYER, device)
@@ -267,9 +369,11 @@ def evaluate_full(
         fp, ft = _clip_feature_pair(pred_images, target_images, device)
         metrics["CLIP"] = _mean_cosine(fp, ft)
         metrics["CLIP_2way"] = two_way_identification(fp, ft)
+    # EffNet-B and SwAV are DISTANCES in the NSD tables (lower = better); every
+    # other column here is a similarity or an accuracy (higher = better).
     if "EffNet-B" not in skip:
         fp, ft = _effnet_feature_pair(pred_images, target_images, device)
-        metrics["EffNet-B"] = _mean_cosine(fp, ft)
+        metrics["EffNet-B"] = correlation_distance(fp, ft)
         metrics["EffNet-B_2way"] = two_way_identification(fp, ft)
     if "SwAV" not in skip:
         feats = _swav_feature_pair(pred_images, target_images, device)
@@ -277,7 +381,49 @@ def evaluate_full(
             skip.append("SwAV")
         else:
             fp, ft = feats
-            metrics["SwAV"] = _mean_cosine(fp, ft)
+            metrics["SwAV"] = correlation_distance(fp, ft)
             metrics["SwAV_2way"] = two_way_identification(fp, ft)
 
     return metrics
+
+#: Metrics where a LOWER value is better (correlation distances).
+LOWER_IS_BETTER = ("EffNet-B", "SwAV")
+
+#: The published NSD reconstruction table, for side-by-side reporting.
+#: AlexNet/Inception/CLIP are 2-way identification accuracies; EffNet-B and SwAV
+#: are correlation distances (lower better).
+NSD_REFERENCE = {
+    "MindEye2 (1 subj, 40h)": {
+        "PixCorr": 0.322, "SSIM": 0.431, "AlexNet(2)_2way": 0.964,
+        "AlexNet(5)_2way": 0.984, "Inception_2way": 0.942, "CLIP_2way": 0.930,
+        "EffNet-B": 0.619, "SwAV": 0.344,
+    },
+    "Ozcelik & VanRullen 2023": {
+        "PixCorr": 0.273, "SSIM": 0.365, "AlexNet(2)_2way": 0.947,
+        "AlexNet(5)_2way": 0.978, "Inception_2way": 0.936, "CLIP_2way": 0.909,
+        "EffNet-B": 0.728, "SwAV": 0.421,
+    },
+    "Takagi & Nishimoto 2023": {
+        "PixCorr": 0.246, "SSIM": 0.410, "AlexNet(2)_2way": 0.789,
+        "AlexNet(5)_2way": 0.869, "Inception_2way": 0.867, "CLIP_2way": 0.821,
+        "EffNet-B": 0.811, "SwAV": 0.504,
+    },
+}
+
+def format_comparison(metrics: dict[str, float], reference: dict | None = None) -> str:
+    """Render our metrics next to the published NSD numbers as a markdown table."""
+    reference = NSD_REFERENCE if reference is None else reference
+    cols = ["PixCorr", "SSIM", "AlexNet(2)_2way", "AlexNet(5)_2way",
+            "Inception_2way", "CLIP_2way", "EffNet-B", "SwAV"]
+    head = ["method"] + [c.replace("_2way", "") for c in cols]
+    lines = ["| " + " | ".join(head) + " |",
+             "|" + "---|" * len(head)]
+    def row(name, d):
+        cells = [f"{d[c]:.3f}" if c in d and d[c] == d[c] else "--" for c in cols]
+        return "| " + " | ".join([name] + cells) + " |"
+    lines.append(row("**ours**", metrics))
+    for name, d in reference.items():
+        lines.append(row(name, d))
+    lines.append("")
+    lines.append("EffNet-B and SwAV are correlation distances: LOWER is better.")
+    return "\n".join(lines)
