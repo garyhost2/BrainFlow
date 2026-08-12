@@ -14,6 +14,8 @@ from brainflow.step1.targets import TargetStats
 from brainflow.step1.data import build_step1_loaders
 from brainflow.step1.metrics import EMA, pixcorr, ssim, CLIPMetric
 from brainflow.step1.decoder_sgm import quiet_benign_warnings
+from brainflow.step1.instrument import (latent_diagnostics, train_val_gap,
+                                        grad_norms, write_manifest)
 
 def setup_a100():
     torch.set_float32_matmul_precision("high")
@@ -51,6 +53,39 @@ def parse_args():
     ap.add_argument("--mixco-s-thresh", type=float, default=0.5)
     ap.add_argument("--geometry", type=str, default="sphere",
                     choices=["euclidean", "sphere"])
+    # --- R-XFM ------------------------------------------------------------
+    ap.add_argument("--flow-source", type=str, default="anchor_var",
+                    choices=["noise", "anchor_det", "anchor_var"],
+                    help="what the flow transports FROM. 'noise' is the legacy "
+                         "step1c behaviour (uniform on the sphere, ~90 deg from "
+                         "every target); the anchor sources start at the "
+                         "regression anchor, so v==0 is the identity and the "
+                         "prior is bounded below by cond_source=regression.")
+    ap.add_argument("--anchor-jitter-rad", type=float, default=0.15,
+                    help="expected geodesic displacement (radians) of a draw from "
+                         "q(z0|fMRI). Keep well below the measured anchor error "
+                         "(log anchor_theta_deg): cos(z0,z1) ~ cos(jitter)*cos(theta).")
+    ap.add_argument("--lambda-kl", type=float, default=0.1,
+                    help="wrapped-Gaussian KL, nats per tangent dim. Stops sigma "
+                         "collapsing to 0; it is a floor, not a strong prior.")
+    ap.add_argument("--lambda-clip-tok", type=float, default=0.0,
+                    help="token-level SoftCLIP on pooled predicted tokens (the "
+                         "256x1664 sequence the decoder actually consumes)")
+    ap.add_argument("--cls-cond-mode", type=str, default="jitter",
+                    choices=["teacher", "jitter", "sampled", "none"],
+                    help="how the patch prior sees c_cls at TRAIN time. 'teacher' "
+                         "is the legacy exposure-bias trap: ground truth at train, "
+                         "a sampled estimate at inference.")
+    ap.add_argument("--cls-jitter-kappa", type=float, default=0.02)
+    ap.add_argument("--stochastic-source", action="store_true",
+                    help="draw z0 ~ q at inference instead of using the mode")
+    ap.add_argument("--diag-batches", type=int, default=8,
+                    help="batches per latent-diagnostic pass (train and val each)")
+    ap.add_argument("--decode-steps", type=int, default=20,
+                    help="ODE steps used inside the latent diagnostics")
+    ap.add_argument("--gradnorm-every", type=int, default=200,
+                    help="steps between per-term gradient-norm probes (0 disables). "
+                         "Costs one backward per term, so keep it sparse.")
     ap.add_argument("--two-head", dest="two_head", action="store_true", default=True,
                     help="structured CLS + patch factorisation (paper default)")
     ap.add_argument("--no-two-head", dest="two_head", action="store_false",
@@ -106,6 +141,14 @@ def lr_at(step, total, warm, base, mn):
     prog = (step - warm) / max(1, total - warm)
     return mn + 0.5 * (base - mn) * (1 + math.cos(math.pi * prog))
 
+def _append_metrics(out_dir, row: dict):
+    """One JSON object per eval, appended. paper_report.py reads the tail."""
+    import json
+    with open(Path(out_dir) / "diagnostics.jsonl", "a") as f:
+        f.write(json.dumps({k: (float(v) if isinstance(v, (int, float)) else v)
+                            for k, v in row.items()}) + "\n")
+
+
 @torch.no_grad()
 def eval_token_cosine(model, loader, stats, device):
     model.eval()
@@ -157,7 +200,14 @@ def main():
                            ll_target=args.ll_target,
                            lambda_cos=args.lambda_cos, lambda_reg=args.lambda_reg,
                            enc_drop=args.enc_drop, mixup_pct=args.mixup_pct,
-                           mixco_beta=args.mixco_beta, mixco_s_thresh=args.mixco_s_thresh)
+                           mixco_beta=args.mixco_beta, mixco_s_thresh=args.mixco_s_thresh,
+                           flow_source=args.flow_source,
+                           anchor_jitter_rad=args.anchor_jitter_rad,
+                           lambda_kl=args.lambda_kl,
+                           lambda_clip_tok=args.lambda_clip_tok,
+                           cls_cond_mode=args.cls_cond_mode,
+                           cls_jitter_kappa=args.cls_jitter_kappa,
+                           stochastic_source=args.stochastic_source)
     model = TokenStep1Model(cfg, bundle.voxels).to(device)
     if cfg.geometry == "sphere" and cfg.center_tokens:
         model.set_target_mean(stats.mean)
@@ -181,6 +231,18 @@ def main():
             n_frozen += 0 if train_it else p.numel()
         print(f"✓ freeze-token: {n_frozen/1e6:.1f}M frozen, {n_train/1e6:.2f}M trainable "
               f"(low_head only); best.pt selected on PixCorr+SSIM")
+    write_manifest(out_dir, args=args, cfg=cfg, model=model, voxels=bundle.voxels)
+    if cfg.geometry == "sphere" and cfg.flow_source != "noise":
+        print(f"✓ R-XFM source={cfg.flow_source} jitter={cfg.anchor_jitter_rad} rad "
+              f"| cls_cond={cfg.cls_cond_mode} | cfg_scale={cfg.cfg_scale}")
+        if cfg.cfg_scale != 1.0:
+            print("  [warn] classifier-free guidance with an anchor source is "
+                  "incoherent: the 'unconditional' branch drops the brain tokens "
+                  "while z0 is itself brain-derived. Prefer --cfg-scale 1.0.")
+    if args.lambda_reg > 0:
+        print(f"  [warn] --lambda-reg {args.lambda_reg}: for unit vectors "
+              f"mse(a,b) == (2/d)*(1-cos(a,b)), so `reg` is `cos` scaled by "
+              f"1/{cfg.token_dim // 2}. It is very likely not doing what you think.")
     if args.compile:
         model = torch.compile(model)
     ema = EMA(model, decay=args.ema_decay)
@@ -232,12 +294,27 @@ def main():
             if tgt_lat is not None:
                 tgt_lat = tgt_lat.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
+            probe = (args.gradnorm_every and step % args.gradnorm_every == 0
+                     and not low_only)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 ld = model.training_step(fmri, batch["subject"], tgt_std,
                                          target_raw=tgt_raw, target_cls=tgt_cls,
                                          target_img=tgt_img, low_only=low_only,
-                                         use_mixco=use_mixco, target_lat=tgt_lat)
+                                         use_mixco=use_mixco, target_lat=tgt_lat,
+                                         keep_term_graph=probe)
                 loss = ld["loss"]
+
+            # Per-term gradient norms: loss WEIGHTS are uninterpretable when the
+            # terms have different natural scales (`reg` is `cos` scaled by 2/d).
+            # Measured, not guessed. autograd.grad does not touch .grad, and every
+            # probe retains the graph, so loss.backward() below is unaffected.
+            if probe:
+                gn = grad_norms({k: v for k, v in ld.items() if k != "loss"},
+                                model.parameters())
+                print("  gradnorm | " + "  ".join(
+                    f"{k.split('/')[-1]}={v:.3e}" for k, v in sorted(gn.items())))
+                _append_metrics(out_dir, {"step": step, **gn})
+
             loss.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
@@ -264,6 +341,32 @@ def main():
                 print("[warn] no validation split (--val-frac 0); selecting on TEST is leaky.")
             sel_cos = eval_token_cosine(model, sel_loader, stats, device)
             msg = f"Ep{epoch:4d} | {sel_name}_cos={sel_cos:.4f}"
+
+            # Latent-space diagnostics: seconds, no decode. `delta_cos` is what
+            # the flow ADDS over its own starting point -- if it is <= 0 the prior
+            # is dead weight no matter what the decoded metrics say.
+            diag = latent_diagnostics(model, sel_loader, device,
+                                      n_steps=args.decode_steps,
+                                      solver=args.solver, max_batches=args.diag_batches,
+                                      prefix="val/")
+            diag_tr = latent_diagnostics(model, bundle.train, device,
+                                         n_steps=args.decode_steps,
+                                         solver=args.solver,
+                                         max_batches=args.diag_batches, prefix="train/")
+            diag |= diag_tr
+            diag |= train_val_gap(diag_tr, {k: v for k, v in diag.items()
+                                            if k.startswith("val/")})
+            if "val/delta_cos" in diag:
+                msg += (f" | Dcos={diag['val/delta_cos']:+.4f}"
+                        f" anchor={diag['val/anchor_cos']:.4f}"
+                        f" flow={diag['val/flow_cos']:.4f}"
+                        f" retr={diag.get('val/retr_fwd_300', float('nan')):.3f}")
+                if "val/cls_cos_hat_true" in diag:
+                    msg += f" clsCos={diag['val/cls_cos_hat_true']:.3f}"
+                if "val/sigma_mean" in diag:
+                    k_tan = cfg.token_dim - 1
+                    msg += f" jit={diag['val/sigma_mean'] * (k_tan ** 0.5):.3f}rad"
+            _append_metrics(out_dir, {"epoch": epoch, **diag})
             if bundle.val is not None:
                 msg += f" test_cos={eval_token_cosine(model, bundle.eval, stats, device):.4f}"
             ema.restore(model)
