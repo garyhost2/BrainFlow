@@ -31,8 +31,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .model import ResMLP, SinusoidalTime
-from .sphere import (random_sphere, project_tangent, exp_map,
-                     slerp, slerp_velocity, polar_encode, polar_decode)
+from .sphere import (random_sphere, project_tangent, exp_map, log_map,
+                     slerp, slerp_velocity, polar_encode, polar_decode,
+                     tangent_noise_rad)
 
 
 def soft_clip_loss(preds: torch.Tensor, targs: torch.Tensor, temp: float) -> torch.Tensor:
@@ -125,13 +126,105 @@ class TokenStep1Config:
     t_min: float = 0.02
     t_max: float = 0.98
 
+    # --- R-XFM: what the flow transports FROM ---------------------------
+    # "noise"      -- legacy: z0 ~ Uniform(S^{d-1}). On S^1663 a uniform sample has
+    #                 cos ~ 0 +/- 1/sqrt(d) with the target, i.e. ~90 deg away and
+    #                 equidistant from every target: z0 carries no information and
+    #                 the whole burden falls on cross-attention.
+    # "anchor_det" -- z0 = the regression anchor mu (a point).
+    # "anchor_var" -- z0 ~ q(.|fMRI), a wrapped Gaussian on the sphere centred on
+    #                 mu. This is the flow-matching source NeuroFlow's XFM uses,
+    #                 specialised to the oblique manifold. The KL keeps sigma from
+    #                 collapsing to 0, which would degenerate the flow into a
+    #                 residual regressor.
+    # Under any anchor source, v == 0 makes the ODE the identity, so the flow
+    # recovers the regression baseline exactly -- it can only refine it.
+    flow_source: str = "anchor_var"
+    # --- R-XFM: WHAT the velocity field parameterises ---------------------
+    # For geodesic paths the velocity and the endpoint are exactly equivalent,
+    #     u_t = slerp_velocity(z0, z1, t) = Log_{z_t}(z1) / (1 - t),
+    # verified to 4e-8 .. 2e-6 max abs error over t in [0.1, 0.9] at d=1664. The
+    # choice is therefore purely about the LOSS GEOMETRY, and the two differ a lot:
+    #
+    #   "velocity" -- mse(v, u_t). Substituting the identity above,
+    #       ||v - u_t||^2 = ||Log_{z_t}(zhat1) - Log_{z_t}(z1)||^2 / (1 - t)^2,
+    #     i.e. endpoint error implicitly weighted by 1/(1-t)^2: 1.2x at t=0.1,
+    #     100x at t=0.9, 2500x at t=0.98. Capacity is spent where the problem is
+    #     trivial (near the target) and starved at t->0, which is exactly where
+    #     inference STARTS. Additionally ||u_t|| = theta exactly, so as the anchor
+    #     improves the whole term shrinks quadratically: measured 738x smaller than
+    #     `cos` at theta=68.3deg and 827x at theta=15deg.
+    #
+    #   "endpoint" -- the net predicts zhat1 = normalize(z_t + raw) and the loss is
+    #     1 - cos(zhat1, z1), uniform in t. Same ODE, same solver; removes the
+    #     1/(1-t)^2 misweighting, puts the flow term on the same numeric scale as
+    #     `cos`, and -- because `out` is zero-initialised -- gives zhat1 = z_t at
+    #     init, hence v == 0, hence the identity flow. The prior therefore starts
+    #     EXACTLY at the regression anchor by construction rather than by hope.
+    # "auto" resolves to "endpoint" on the sphere and "velocity" under
+    # geometry="euclidean", where the geodesic identity does not apply. Setting
+    # "endpoint" explicitly alongside a non-spherical geometry is an error rather
+    # than a silent downgrade.
+    flow_param: str = "auto"          # auto | endpoint | velocity
+
+    def resolved_flow_param(self) -> str:
+        if self.flow_param != "auto":
+            return self.flow_param
+        return "endpoint" if self.geometry == "sphere" else "velocity"
+    # Posterior width, given as the EXPECTED GEODESIC DISPLACEMENT in radians of a
+    # draw from its base point mu. Dimension-independent, unlike a per-coordinate
+    # sigma: the two are related by sigma = jitter / sqrt(d - 1).
+    #
+    # This must stay a SMALL FRACTION of the anchor error, not match it. A draw is
+    # displaced in a *random* tangent direction while the target sits in one
+    # specific direction, so in high dimensions
+    #     cos(z0, z1) ~ cos(jitter) * cos(theta).
+    # At the measured anchor error (cos 0.37, theta = 68.3 deg), "calibrating"
+    # jitter to theta would drop cos(z0, z1) to 0.126 -- strictly worse than the
+    # anchor. The default 0.15 rad (8.6 deg) costs 0.370 -> 0.366, i.e. nothing,
+    # while still giving the velocity field a neighbourhood to be defined on.
+    anchor_jitter_rad: float = 0.15
+    # How the patch prior sees the global direction during TRAINING. It is
+    # teacher-forced on ground-truth c_cls today but consumes a *sampled* estimate
+    # at inference, so it learns to lean on a signal that is far better at train
+    # time than at test time.
+    #   "teacher" -- legacy (ground truth)
+    #   "jitter"  -- geodesic rotation of the truth by cls_jitter_kappa (cheap)
+    #   "sampled" -- scheduled sampling: run the CLS prior, no grad (accurate, slow)
+    #   "none"    -- do not condition the patch prior on c_cls
+    cls_cond_mode: str = "jitter"
+    # Geodesic displacement in RADIANS applied to the true c_cls at train time.
+    # Calibrate from the logged val/cls_cos_hat_true: rad = arccos(cls_cos_hat_true).
+    # (The previous `cls_jitter_kappa=0.02` was a per-coordinate sigma, which on
+    # S^1279 realises 0.02*sqrt(1279) = 0.715 rad = 41 deg -- 36x its nominal value
+    # and comparable to the anchor's own 68 deg error, i.e. the conditioning signal
+    # was being destroyed rather than de-teacher-forced.)
+    cls_jitter_rad: float = 0.30
+    cls_ss_prob: float = 0.5           # P(use the sampled estimate) in "sampled" mode
+    cls_ss_steps: int = 8              # cheap solver budget for scheduled sampling
+
     # --- loss weights ---------------------------------------------------
     lambda_flow: float = 1.0      # patch flow
     lambda_rcfm: float = 1.0      # global CLS flow
-    lambda_reg: float = 1.0       # regression anchor
+    # NOTE: for unit vectors mse(a,b) = (2/d) * (1 - cos(a,b)), so `reg` and `cos`
+    # are the SAME objective and lambda_reg is worth lambda_cos/832 at d=1664.
+    # Default 0: `reg` is still computed and logged, but excluded from the total.
+    lambda_reg: float = 0.0       # (deprecated -- see lambda_cos)
     lambda_cos: float = 0.5       # per-token angular fidelity
     lambda_radius: float = 1.0    # radius side-model
     lambda_clip: float = 0.033    # SoftCLIP contrastive (blueprint-tuned)
+    # Token-level SoftCLIP on the FLATTENED 256x1664 grid -- the only discriminative
+    # signal that touches what the decoder actually consumes. `lambda_clip` above
+    # acts on clip_proj(mean(brain)), a 2.4M head that is NOT on the decoder path,
+    # so without this every one of the 425,984 numbers the decoder eats is
+    # supervised by mean-seeking losses alone. NeuroFlow applies SoftCLIP directly
+    # to its flow endpoint over the flattened grid (neurovae.py:57, preds.flatten(1))
+    # and ablates it at 86.4% -> 0.3% raw retrieval.
+    lambda_clip_tok: float = 0.0
+    # Wrapped-Gaussian KL, in nats per tangent dimension. Its only job is to stop
+    # sigma collapsing to 0 (which would degenerate the flow into a deterministic
+    # residual regressor); it is a floor, not a strong prior.
+    lambda_kl: float = 0.1
     clip_temp: float = 0.006
 
     # --- BiMixCo augmentation (anti-overfit; 0 disables) -----------------
@@ -159,10 +252,25 @@ class TokenStep1Config:
     solver: str = "heun"          # geodesic Heun (sphere) / Heun (euclidean)
     cond_source: str = "prior"    # prior | regression | blend
     blend_w: float = 0.5
+    stochastic_source: bool = False   # draw z0 ~ q at inference (multi-sample arm)
+                                      # instead of using the posterior mode mu
 
     # --- geometry / centering -------------------------------------------
     geometry: str = "sphere"      # sphere (paper) | euclidean (ablation A)
     center_tokens: bool = True
+    # How the token mean subtracted before the polar split is pooled.
+    #   "global"       -- ONE R^d vector averaged over images AND all N positions
+    #                     (targets_bigg._accum_stats reshapes (-1, d) first). Every
+    #                     centred direction z_i then retains the offset common to
+    #                     position i across all images, which is content-free but
+    #                     still counted by every cosine in the repo -- so part of
+    #                     the reported anchor cos is a positional prior the flow
+    #                     cannot improve and the ranking metrics discount.
+    #   "per_position" -- one R^d vector PER position (N, d). z_i is then the
+    #                     image-specific deviation at that position, which is the
+    #                     quantity the contrastive/2-way metrics actually reward.
+    # Run scripts/check_centering.py to measure the split before choosing.
+    center_mode: str = "global"   # global | per_position
     subjects: list[int] = field(default_factory=lambda: [1])
 
 
@@ -399,6 +507,71 @@ class LatentLowLevelHead(nn.Module):
         return self.out(self.ups(self.mix(h)))
 
 
+def sigma_from_jitter(jitter_rad: float, k: int) -> float:
+    """Per-coordinate tangent sigma giving an expected geodesic step of ``jitter_rad``.
+
+    An isotropic tangent Gaussian N(0, sigma^2 I_k) has expected norm ~ sigma*sqrt(k),
+    and on the sphere that norm *is* the geodesic distance travelled by Exp_mu. So
+    the interpretable knob is the displacement in radians, and sigma follows.
+    """
+    return jitter_rad / math.sqrt(max(1, k))
+
+
+class LogSigmaHead(nn.Module):
+    """Per-token log-sigma of the anchor posterior q(z0 | fMRI).
+
+    Same cross-attention shape as :class:`RadiusHead` (256 queries over the brain
+    tokens, one scalar out) so each token gets its own uncertainty: the anchor is
+    not uniformly wrong across the sequence, and a single global sigma would force
+    the flow to over-correct confident tokens and under-correct unreliable ones.
+
+    Deliberately a *separate* module rather than an extra output channel on
+    ``radius_head`` so that ``--init-from`` can warm-start every existing
+    ``step1c`` checkpoint with ``strict=False``: the pretrained ``reg_head`` and
+    ``radius_head`` load unchanged and only this head starts fresh.
+    """
+
+    def __init__(self, cfg: "TokenStep1Config"):
+        super().__init__()
+        d = cfg.brain_dim
+        self.queries = nn.Parameter(torch.randn(1, cfg.token_len, d) * 0.02)
+        self.cross = nn.ModuleList([CrossAttn(d, d, cfg.reg_heads)
+                                    for _ in range(cfg.radius_depth)])
+        self.mlps = nn.ModuleList([
+            nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d * 4), nn.GELU(), nn.Linear(d * 4, d))
+            for _ in range(cfg.radius_depth)])
+        self.out = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, 1))
+        # Start at the prior width: a fresh head must not inject a huge or a
+        # degenerate sigma into the very first flow batches.
+        nn.init.zeros_(self.out[-1].weight)
+        sigma_p = sigma_from_jitter(cfg.anchor_jitter_rad, cfg.token_dim - 1)
+        nn.init.constant_(self.out[-1].bias, math.log(sigma_p))
+
+    def forward(self, brain):
+        B = brain.shape[0]
+        x = self.queries.expand(B, -1, -1)
+        for cr, mlp in zip(self.cross, self.mlps):
+            x = cr(x, brain)
+            x = x + mlp(x)
+        return self.out(x).squeeze(-1)              # (B, token_len) log-sigma
+
+
+def wrapped_gaussian_kl(logs: torch.Tensor, sigma_p: float) -> torch.Tensor:
+    """KL( N(0, sigma^2 I_k) || N(0, sigma_p^2 I_k) ) / k, in nats per tangent dim.
+
+    The posterior is a wrapped Gaussian on S^{d-1}: isotropic in the tangent space
+    at the base point mu, pushed onto the manifold by Exp_mu. Its KL against an
+    isotropic tangent prior has the usual diagonal-Gaussian closed form,
+
+        KL = (k/2) * [ sigma^2/sigma_p^2 - 1 + 2*log(sigma_p/sigma) ]
+
+    We divide by the tangent dimension k = d-1 so the term is O(1) and
+    ``lambda_kl`` is scale-free; multiply back by ``k * n_tokens`` to report nats.
+    """
+    var_ratio = (2 * logs).exp() / (sigma_p ** 2)
+    return 0.5 * (var_ratio - 1.0 - 2 * logs + 2 * math.log(sigma_p))
+
+
 # --------------------------------------------------------------------------
 #  Patch prior (DiT) -- velocity field on the oblique manifold
 # --------------------------------------------------------------------------
@@ -522,6 +695,16 @@ class ClsFlowPrior(nn.Module):
 class TokenStep1Model(nn.Module):
     def __init__(self, cfg: TokenStep1Config, voxels_per_subject: dict[int, int]):
         super().__init__()
+        if cfg.flow_param not in ("auto", "endpoint", "velocity"):
+            raise ValueError(f"Unknown flow_param: {cfg.flow_param!r}")
+        if cfg.flow_param == "endpoint" and cfg.geometry != "sphere":
+            raise ValueError(
+                "flow_param='endpoint' is defined by the geodesic identity "
+                "u_t = Log_{z_t}(z1)/(1-t) and is therefore sphere-only; "
+                "use geometry='sphere' or flow_param='velocity'.")
+        self.flow_param = cfg.resolved_flow_param()
+        if cfg.center_mode not in ("global", "per_position"):
+            raise ValueError(f"Unknown center_mode: {cfg.center_mode!r}")
         self.cfg = cfg
         self.backbone = TokenBackbone(cfg, voxels_per_subject)
         self.reg_head = TokenRegHead(cfg)
@@ -535,15 +718,142 @@ class TokenStep1Model(nn.Module):
             nn.Linear(cfg.brain_dim, clip_out),
         )
         self.radius_head = RadiusHead(cfg)
+        # Only instantiated for the variational source, so "noise"/"anchor_det"
+        # checkpoints stay byte-compatible with step1c.
+        self.logs_head = LogSigmaHead(cfg) if cfg.flow_source == "anchor_var" else None
         self.low_head = None
         if cfg.low_level:
             head_cls = (LatentLowLevelHead if getattr(cfg, "ll_target", "rgb") == "latent"
                         else LowLevelHead)
             self.low_head = head_cls(cfg, voxels_per_subject)
-        self.register_buffer("tgt_mean", torch.zeros(cfg.token_dim))
+        # (d,) for center_mode="global", (N, d) for "per_position". Both broadcast
+        # against (B, N, d) in polar_encode/polar_decode.
+        self.register_buffer(
+            "tgt_mean",
+            torch.zeros(cfg.token_len, cfg.token_dim)
+            if cfg.center_mode == "per_position" else torch.zeros(cfg.token_dim))
 
     def set_target_mean(self, mean):
-        self.tgt_mean.copy_(mean.to(self.tgt_mean.device, self.tgt_mean.dtype))
+        mean = mean.to(self.tgt_mean.device, self.tgt_mean.dtype)
+        if mean.shape != self.tgt_mean.shape:
+            if self.cfg.center_mode == "per_position" and mean.dim() == 1:
+                # A global mean broadcast to every position: legal, just uninformative.
+                mean = mean.unsqueeze(0).expand_as(self.tgt_mean).contiguous()
+            else:
+                raise ValueError(
+                    f"tgt_mean shape {tuple(mean.shape)} does not match "
+                    f"center_mode={self.cfg.center_mode!r} "
+                    f"(expected {tuple(self.tgt_mean.shape)})")
+        self.tgt_mean.copy_(mean)
+
+
+    # ---- anchor posterior q(z0 | fMRI) ---------------------------------
+    def anchor(self, brain):
+        """(mu, logs, logr): base direction, per-token log-sigma, log-radius.
+
+        ``mu`` is the regression anchor -- the same tensor ``cond_source
+        ="regression"`` decodes today, so the flow's starting point *is* the
+        current best-performing configuration.
+        """
+        mu = F.normalize(self.reg_head(brain).float(), dim=-1)
+        logr = self.radius_head(brain).float()
+        logs = None
+        if self.logs_head is not None:
+            k = self.cfg.token_dim - 1
+            # Cap sigma so the expected geodesic step sigma*sqrt(k) stays under pi
+            # (beyond that the wrapped Gaussian folds around the sphere and the
+            # "small perturbation" reading of the posterior stops holding).
+            # Cap the learned sigma at a geodesic step of pi/2: beyond that the
+            # draw is orthogonal to mu in expectation and the anchor's information
+            # is gone (cos(z0, z1) ~ cos(jitter)*cos(theta) -> 0).
+            hi = math.log(sigma_from_jitter(math.pi / 2, k))
+            logs = self.logs_head(brain).float().clamp(-12.0, hi)
+        return mu, logs, logr
+
+    def sample_anchor(self, mu, logs, detach_base: bool = False):
+        """Draw z0 ~ q on the manifold; falls back to mu when deterministic.
+
+        ``detach_base`` detaches the BASE POINT mu while leaving sigma's graph
+        intact. That distinction is the whole variational apparatus:
+
+        * detaching everything (the previous ``z0 = z0.detach()``) leaves the KL as
+          the ONLY gradient into ``logs_head``. Its unique minimiser is
+          sigma = sigma_p -- exactly where :class:`LogSigmaHead` is initialised --
+          so the head's gradient is identically zero at step 0 and stays there.
+          Measured: after 200 AdamW steps log-sigma moved from -3.968687 to
+          [-3.969174, -3.968141], a per-token spread of 4.2e-06. The head was a
+          constant, and ``anchor_var`` was ``anchor_det`` plus fixed jitter.
+        * detaching only mu keeps the intended asymmetry: the flow loss may not
+          shorten its own path by degrading the anchor (mu is supervised by
+          ``loss_cos``), but it CAN choose how wide a neighbourhood of mu it is
+          willing to be defined on. The flow pushes sigma down, the KL floors it,
+          and the equilibrium is the usual variational trade-off.
+        """
+        if logs is None:
+            return mu.detach() if detach_base else mu
+        base = mu.detach() if detach_base else mu
+        eps = torch.randn_like(base) * logs.exp().unsqueeze(-1)
+        return exp_map(base, project_tangent(eps, base))
+
+    def _flow_source(self, mu, logs, shape, device, dtype, detach_base: bool = False):
+        src = self.cfg.flow_source
+        if src == "noise":
+            return random_sphere(shape, device, dtype)
+        if src == "anchor_det":
+            return mu.detach() if detach_base else mu
+        if src == "anchor_var":
+            return self.sample_anchor(mu, logs, detach_base=detach_base)
+        raise ValueError(f"Unknown flow_source: {src!r}")
+
+    # ---- velocity field: endpoint or velocity parameterisation ----------
+    def _prior_velocity(self, zt, t, brain, cls_emb):
+        """v(z_t, t) on the oblique manifold, tangent at ``zt``.
+
+        Under ``flow_param="endpoint"`` the net emits a residual toward the
+        predicted endpoint and the velocity follows from the exact geodesic
+        identity  u_t = Log_{z_t}(z1) / (1 - t).  ``self.prior.out`` is
+        zero-initialised, so at init zhat1 == z_t, v == 0, and the ODE is the
+        identity map -- the sampler returns the anchor unchanged.
+        """
+        raw = self.prior(zt, t, brain, cls_emb).float()
+        if self.flow_param != "endpoint":
+            return raw
+        z1_hat = F.normalize(zt.float() + raw, dim=-1)
+        # 1 - t is bounded below by 1 - t_max so the division cannot blow up at the
+        # final step; _tq applies the same clamp to the integrator's time grid.
+        one_minus_t = (1.0 - t).clamp_min(1.0 - self.cfg.t_max)
+        while one_minus_t.dim() < zt.dim():
+            one_minus_t = one_minus_t.unsqueeze(-1)
+        return log_map(zt.float(), z1_hat) / one_minus_t
+
+    def _prior_endpoint(self, zt, t, brain, cls_emb):
+        """The predicted endpoint zhat1 itself (endpoint parameterisation only)."""
+        raw = self.prior(zt, t, brain, cls_emb).float()
+        return F.normalize(zt.float() + raw, dim=-1)
+
+    def _cls_cond(self, brain, cls_dir):
+        """Global-direction conditioning for the patch prior at TRAIN time.
+
+        Teacher-forcing on ground-truth ``c_cls`` is an exposure-bias trap: c_cls
+        is a near-complete semantic summary of the image, so a prior handed the
+        true one for free learns to route around the brain tokens, then meets a
+        sampled estimate at inference that it has never seen.
+        """
+        mode = self.cfg.cls_cond_mode
+        if cls_dir is None or mode == "none":
+            return None
+        if mode == "teacher":
+            return cls_dir
+        if mode == "jitter":
+            # RADIANS, not a per-coordinate sigma -- see cls_jitter_rad.
+            return tangent_noise_rad(cls_dir, self.cfg.cls_jitter_rad)
+        if mode == "sampled":
+            if not self.training or torch.rand(()) >= self.cfg.cls_ss_prob:
+                return cls_dir
+            with torch.no_grad():
+                return self._sample_cls(brain, self.cfg.cls_ss_steps,
+                                        self.cfg.cls_cfg_scale, "euler").detach()
+        raise ValueError(f"Unknown cls_cond_mode: {mode!r}")
 
     # ---- time sampling (logit-normal + endpoint mass) -------------------
     def _sample_t(self, B, device):
@@ -558,7 +868,8 @@ class TokenStep1Model(nn.Module):
     #  Training
     # ====================================================================
     def training_step(self, fmri, subject, target_std, target_raw=None, target_cls=None,
-                      target_img=None, low_only=False, use_mixco=False, target_lat=None):
+                      target_img=None, low_only=False, use_mixco=False, target_lat=None,
+                      keep_term_graph=False):
         """One optimisation step.
 
         ``use_mixco`` mixes the voxel batch and swaps the contrastive target for
@@ -594,24 +905,38 @@ class TokenStep1Model(nn.Module):
             cls_dir = F.normalize(target_cls.float(), dim=-1)        # (B, cls_dim)
 
         out = self._cls_flow_loss(brain, cls_dir, B, device)         # RCFM term
+        # The RCFM head is trained on the TRUE direction; only the *patch prior's*
+        # conditioning is de-teacher-forced (see _cls_cond).
+        cls_cond = self._cls_cond(brain, cls_dir)
         if cfg.geometry == "sphere":
-            out |= self._patch_step_sphere(brain, target_raw, cls_dir, B, device)
+            out |= self._patch_step_sphere(brain, target_raw, cls_cond, B, device)
         else:
-            out |= self._patch_step_euclidean(brain, target_std, cls_dir, B, device)
+            out |= self._patch_step_euclidean(brain, target_std, cls_cond, B, device)
         out |= self._contrastive_loss(brain, target_std, cls_dir, device, mix=mix)
         # Unmixed voxels: the low head reads raw fMRI directly and regresses the
         # image's spatial layout, so a blended input against an unblended target
         # is straight label noise for it (it has no contrastive term to absorb it).
         out |= self._low_level_loss(fmri_clean, subject, target_img, target_lat)
 
-        total = (cfg.lambda_flow * out["flow"] + cfg.lambda_reg * out["reg"]
+        total = (cfg.lambda_flow * out["flow"]
                  + cfg.lambda_cos * out["cos"] + cfg.lambda_clip * out["clip"]
                  + cfg.lambda_rcfm * out["rcfm"])
+        if cfg.lambda_reg > 0 and "reg" in out:
+            # Kept for backward compatibility only; `reg` == `cos` * 2/d.
+            total = total + cfg.lambda_reg * out["reg"]
         if "radius" in out:
             total = total + cfg.lambda_radius * out["radius"]
+        if "kl" in out:
+            total = total + cfg.lambda_kl * out["kl"]
+        if "clip_tok" in out:
+            total = total + cfg.lambda_clip_tok * out["clip_tok"]
         if "low" in out:
             total = total + cfg.lambda_low * out["low"]
-        out = {k: v.detach() for k, v in out.items()}
+        # Terms are detached for logging by default. `keep_term_graph` retains
+        # them so instrument.grad_norms can measure each term's own gradient --
+        # without it the probe silently reports nothing.
+        if not keep_term_graph:
+            out = {k: v.detach() for k, v in out.items()}
         out["loss"] = total
         return out
 
@@ -687,25 +1012,63 @@ class TokenStep1Model(nn.Module):
         return brain_in, cls_in
 
     def _patch_step_sphere(self, brain, target_raw, cls_dir, B, device):
+        """R-XFM: transport the anchor posterior onto the bigG token manifold.
+
+        The source is ``q(z0 | fMRI)`` rather than ``Uniform(S^{d-1})``. Two
+        consequences that matter here:
+
+        * every point on the geodesic ``slerp(z0, z1, t)`` carries brain
+          information, so the DiT learns a short residual transport instead of a
+          full generative map from an uninformative start;
+        * ``v == 0`` is the identity flow, so the prior is bounded below by the
+          regression anchor. Previously the prior *competed* with the anchor and
+          lost (blend PixCorr 0.131 < regression 0.164); now it can only refine.
+        """
         cfg = self.cfg
         z1, r1 = polar_encode(target_raw.float(), self.tgt_mean.float())
 
-        reg_dir = F.normalize(self.reg_head(brain).float(), dim=-1)
-        loss_reg = F.mse_loss(reg_dir, z1)
-        loss_cos = 1.0 - F.cosine_similarity(reg_dir, z1, dim=-1).mean()
-
-        logr = self.radius_head(brain).float()
+        mu, logs, logr = self.anchor(brain)
+        loss_cos = 1.0 - F.cosine_similarity(mu, z1, dim=-1).mean()
         loss_radius = F.mse_loss(logr, r1.log())
+        # Same objective as loss_cos up to the factor 2/d (see lambda_reg); kept
+        # for log continuity with step1c runs, weighted 0 by default.
+        loss_reg = F.mse_loss(mu, z1)
+
+        out = {"reg": loss_reg, "cos": loss_cos, "radius": loss_radius}
+        if logs is not None:
+            sigma_p = sigma_from_jitter(cfg.anchor_jitter_rad, cfg.token_dim - 1)
+            out["kl"] = wrapped_gaussian_kl(logs, sigma_p).mean()
+
+        # The anchor is supervised by loss_cos; letting the flow's loss also push on
+        # mu would let the model shorten its own path by degrading the anchor. So
+        # the BASE POINT is detached -- but sigma is not, or logs_head receives no
+        # gradient at all and freezes at its initialisation (see sample_anchor).
+        z0 = self._flow_source(mu, logs, z1.shape, device, z1.dtype, detach_base=True)
 
         t = self._sample_t(B, device)
         tb = t[:, None, None]
-        z0 = random_sphere(z1.shape, device, z1.dtype)
         zt = slerp(z0, z1, tb)
-        ut = slerp_velocity(z0, z1, tb)
         brain_in, cls_in = self._patch_cond(brain, cls_dir, B, device)
-        v = project_tangent(self.prior(zt, t, brain_in, cls_in).float(), zt)
-        loss_flow = F.mse_loss(v, ut)
-        return {"flow": loss_flow, "reg": loss_reg, "cos": loss_cos, "radius": loss_radius}
+
+        if self.flow_param == "endpoint":
+            # Predict the endpoint and score it directly: uniform in t, same scale
+            # as `cos`, and zero-init => zhat1 == zt => v == 0 => identity flow.
+            z1_hat = self._prior_endpoint(zt, t, brain_in, cls_in)
+            out["flow"] = 1.0 - F.cosine_similarity(z1_hat, z1, dim=-1).mean()
+        else:
+            ut = slerp_velocity(z0, z1, tb)
+            v = project_tangent(self.prior(zt, t, brain_in, cls_in).float(), zt)
+            out["flow"] = F.mse_loss(v, ut)
+
+        # Discriminative supervision on the decoder path. `clip` above aligns a
+        # pooled 2.4M projection that the decoder never sees; this aligns the
+        # flattened 256x1664 grid it actually consumes, preserving per-position
+        # structure (NeuroFlow flattens before normalising, neurovae.py:57).
+        if cfg.lambda_clip_tok > 0:
+            out["clip_tok"] = soft_clip_loss(
+                F.normalize(mu.flatten(1), dim=-1),
+                F.normalize(z1.flatten(1), dim=-1), cfg.clip_temp)
+        return out
 
     def _patch_step_euclidean(self, brain, target_std, cls_dir, B, device):
         cfg = self.cfg
@@ -737,8 +1100,15 @@ class TokenStep1Model(nn.Module):
             z = F.normalize(target_std.mean(dim=1).float(), dim=-1)
         if mix is not None:
             perm, betas, select = mix
-            return {"clip": mixco_nce(b, z, cfg.clip_temp, perm, betas, select)}
-        return {"clip": soft_clip_loss(b, z, cfg.clip_temp)}
+            out = {"clip": mixco_nce(b, z, cfg.clip_temp, perm, betas, select)}
+        else:
+            out = {"clip": soft_clip_loss(b, z, cfg.clip_temp)}
+
+        # NOTE: the token-level SoftCLIP lives in _patch_step_sphere, where mu and
+        # the centred target z1 already exist -- computing it here would re-run
+        # reg_head and would have to mean-pool the sequence, which destroys exactly
+        # the per-position structure the term is meant to supervise.
+        return out
 
     # ====================================================================
     #  Sampling
@@ -781,7 +1151,16 @@ class TokenStep1Model(nn.Module):
         return self._integrate_sphere(z0, vel, n_steps, solver)
 
     @torch.no_grad()
-    def _sample_prior_sphere(self, brain, cls_hat, n_steps, cfg_scale, solver):
+    def _sample_prior_sphere(self, brain, cls_hat, n_steps, cfg_scale, solver,
+                             z0=None):
+        """Integrate the velocity field from ``z0`` (defaults to the flow source).
+
+        Note on CFG: with an anchor source, guidance is incoherent -- the
+        "unconditional" branch drops the brain tokens while ``z0`` is itself
+        brain-derived, so the two branches do not differ in the way CFG assumes.
+        Keep ``cfg_scale=1.0`` for anchor sources (NeuroFlow's XFM removes
+        classifier guidance for the same reason).
+        """
         cfg = self.cfg
         B = brain.shape[0]; device = brain.device
         null_b = self.prior.null_brain.to(brain.dtype).expand(B, -1, -1)
@@ -789,13 +1168,14 @@ class TokenStep1Model(nn.Module):
 
         def vel(z, tq):
             t = torch.full((B,), tq, device=device)
-            vc = self.prior(z, t, brain, cls_hat)
+            vc = self._prior_velocity(z, t, brain, cls_hat)
             if cfg_scale != 1.0:
-                vu = self.prior(z, t, null_b, null_c)
+                vu = self._prior_velocity(z, t, null_b, null_c)
                 return vu + cfg_scale * (vc - vu)
             return vc
 
-        z0 = random_sphere((B, cfg.token_len, cfg.token_dim), device)
+        if z0 is None:
+            z0 = random_sphere((B, cfg.token_len, cfg.token_dim), device)
         return self._integrate_sphere(z0, vel, n_steps, solver)
 
     @torch.no_grad()
@@ -825,15 +1205,116 @@ class TokenStep1Model(nn.Module):
                 x = x + v1 * dt
         return x
 
+
+    def _infer_z0(self, mu, logs):
+        """Flow start at INFERENCE time.
+
+        Defaults to the posterior mode ``mu`` rather than a draw: at inference we
+        want the lowest-variance estimate. ``stochastic_source=True`` draws
+        instead, which is what the multi-sample / latent-averaging arm needs.
+        """
+        if self.cfg.flow_source == "noise":
+            return random_sphere(mu.shape, mu.device, mu.dtype)
+        if self.cfg.stochastic_source:
+            return self.sample_anchor(mu, logs)
+        return mu
+
+    @torch.no_grad()
+    def diagnose(self, fmri, subject, target_raw, *, target_cls=None,
+                 n_steps=20, solver="heun"):
+        """Latent-space diagnostics for :mod:`brainflow.step1.instrument`.
+
+        Returns per-sample tensors so the caller can aggregate across batches.
+        The key output is the pair (anchor_cos, flow_cos): their difference is
+        exactly what the flow contributes over its own starting point.
+        """
+        cfg = self.cfg
+        brain = self.backbone(fmri, subject)
+        z1, r1 = polar_encode(target_raw.float(), self.tgt_mean.float())
+        mu, logs, logr = self.anchor(brain)
+
+        cls_hat = None
+        cls_cos = None
+        if cfg.two_head and self.cls_prior is not None:
+            cls_hat = self._sample_cls(brain, n_steps, cfg.cls_cfg_scale, solver)
+            if target_cls is not None:
+                tc = F.normalize(target_cls.to(cls_hat.device).float(), dim=-1)
+                cls_cos = F.cosine_similarity(cls_hat, tc, dim=-1)
+
+        z0 = self._infer_z0(mu, logs)
+        z_flow = self._sample_prior_sphere(brain, cls_hat, n_steps, cfg.cfg_scale,
+                                           solver, z0=z0)
+        return {
+            "anchor_cos": F.cosine_similarity(z0, z1, dim=-1).mean(-1),
+            "flow_cos": F.cosine_similarity(z_flow, z1, dim=-1).mean(-1),
+            "cls_cos": cls_cos,
+            "logr_pred": logr,
+            "logr_true": r1.log(),
+            "sigma": (logs.exp() if logs is not None else None),
+            "z_flow": z_flow,
+        }
+
+    @torch.no_grad()
+    def _draw_sample(self, brain, mu, logs, n_steps, cfg_scale, solver):
+        cls_k = None
+        if self.cfg.two_head and self.cls_prior is not None:
+            cls_k = self._sample_cls(brain, n_steps, self.cfg.cls_cfg_scale, solver)
+        z0 = (random_sphere(mu.shape, mu.device, mu.dtype)
+              if self.cfg.flow_source == "noise" else self.sample_anchor(mu, logs))
+        z = self._sample_prior_sphere(brain, cls_k, n_steps, cfg_scale, solver, z0=z0)
+        return z, cls_k
+
+    @torch.no_grad()
+    def predict_tokens_frontier(self, fmri, subject, stats, *, ks, n_steps=None,
+                                cfg_scale=None, solver=None):
+        cfg = self.cfg
+        if cfg.geometry != "sphere":
+            raise ValueError("the multi-sample frontier is defined on the sphere only")
+        ks = sorted({int(k) for k in ks if int(k) >= 1})
+        if not ks:
+            raise ValueError("ks must contain at least one positive integer")
+        n_steps = n_steps or cfg.n_steps
+        cfg_scale = cfg.cfg_scale if cfg_scale is None else cfg_scale
+        solver = solver or cfg.solver
+
+        brain = self.backbone(fmri, subject)
+        mu, logs, logr = self.anchor(brain)
+        radius = logr.exp()
+        mean = self.tgt_mean.float()
+
+        z_acc = torch.zeros_like(mu)
+        cls_acc = None
+        out: dict[int, dict] = {}
+        for k in range(1, ks[-1] + 1):
+            z_k, cls_k = self._draw_sample(brain, mu, logs, n_steps, cfg_scale, solver)
+            z_acc = z_acc + z_k
+            if cls_k is not None:
+                cls_acc = cls_k if cls_acc is None else cls_acc + cls_k
+            if k in ks:
+                bar = z_acc / k
+                resultant = bar.norm(dim=-1)
+                out[k] = {
+                    "tokens": polar_decode(F.normalize(bar, dim=-1), radius, mean),
+                    "cls": None if cls_acc is None else F.normalize(cls_acc / k, dim=-1),
+                    "resultant": resultant.mean(dim=-1),
+                }
+        out["anchor"] = {
+            "tokens": polar_decode(mu, radius, mean),
+            "cls": None if cls_acc is None else F.normalize(cls_acc / ks[-1], dim=-1),
+            "resultant": torch.ones(mu.shape[0], device=mu.device),
+        }
+        return out
+
     @torch.no_grad()
     def predict_tokens(self, fmri, subject, stats, *, n_steps=None, cfg_scale=None,
-                       solver=None, cond_source=None):
+                       solver=None, cond_source=None, n_samples=1):
         """Return (raw_tokens[B,N,d], cls_hat[B,dcls] or None)."""
         cfg = self.cfg
         n_steps = n_steps or cfg.n_steps
         cfg_scale = cfg.cfg_scale if cfg_scale is None else cfg_scale
         solver = solver or cfg.solver
         cond_source = cond_source or cfg.cond_source
+        n_samples = max(1, int(n_samples))
         brain = self.backbone(fmri, subject)
 
         cls_hat = None
@@ -841,18 +1322,31 @@ class TokenStep1Model(nn.Module):
             cls_hat = self._sample_cls(brain, n_steps, cfg.cls_cfg_scale, solver)
 
         if cfg.geometry == "sphere":
+            mu, logs, logr = self.anchor(brain)
             if cond_source == "regression":
-                zdir = F.normalize(self.reg_head(brain).float(), dim=-1)
+                zdir = mu
             elif cond_source == "prior":
-                zdir = self._sample_prior_sphere(brain, cls_hat, n_steps, cfg_scale, solver)
+                if n_samples > 1:
+                    z_acc = torch.zeros_like(mu)
+                    cls_acc = None
+                    for _ in range(n_samples):
+                        z_k, cls_k = self._draw_sample(brain, mu, logs, n_steps,
+                                                       cfg_scale, solver)
+                        z_acc = z_acc + z_k
+                        if cls_k is not None:
+                            cls_acc = cls_k if cls_acc is None else cls_acc + cls_k
+                    zdir = F.normalize(z_acc / n_samples, dim=-1)
+                    if cls_acc is not None:
+                        cls_hat = F.normalize(cls_acc / n_samples, dim=-1)
+                else:
+                    zdir = self._sample_prior_sphere(brain, cls_hat, n_steps, cfg_scale,
+                                                     solver, z0=self._infer_z0(mu, logs))
             elif cond_source == "blend":
-                s = self._sample_prior_sphere(brain, cls_hat, n_steps, cfg_scale, solver)
-                r = F.normalize(self.reg_head(brain).float(), dim=-1)
-                zdir = F.normalize(cfg.blend_w * s + (1 - cfg.blend_w) * r, dim=-1)
+                sp = self._sample_prior_sphere(brain, cls_hat, n_steps, cfg_scale, solver)
+                zdir = F.normalize(cfg.blend_w * sp + (1 - cfg.blend_w) * mu, dim=-1)
             else:
                 raise ValueError(f"Unknown cond_source: {cond_source!r}")
-            radius = self.radius_head(brain).float().exp()
-            return polar_decode(zdir, radius, self.tgt_mean.float()), cls_hat
+            return polar_decode(zdir, logr.exp(), self.tgt_mean.float()), cls_hat
 
         if cond_source == "regression":
             z = self.reg_head(brain)

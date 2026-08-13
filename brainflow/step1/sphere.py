@@ -16,6 +16,8 @@ Conventions (matched to the paper and the test-suite):
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -48,11 +50,29 @@ def exp_map(z, w):
 
 
 def log_map(z, y):
-    """Log_z(y) = theta * P_z y / ||P_z y|| with theta = arccos<z,y> (eq. 5.x)."""
+    """Log_z(y) = theta * P_z y / ||P_z y|| with theta the angle between z and y.
+
+    theta comes from ``atan2(||P_z y||, <z,y>)``, not ``arccos<z,y>``. The arccos
+    form needs its argument clamped away from 1 to stay differentiable, and that
+    clamp puts a FLOOR under the output: at y == z it returned
+    ``arccos(1 - 1e-6) = 1.41e-3`` radians in a numerically-arbitrary direction
+    instead of 0. That is harmless when Log is only used to measure a real
+    displacement, but ``flow_param="endpoint"`` evaluates ``Log_{z_t}(zhat1)``
+    with ``zhat1 == z_t`` at initialisation, where the spurious 1.4e-3 became a
+    per-step drift that broke the identity-flow bound the whole design rests on.
+
+    ``atan2`` is exact and differentiable at theta = 0 and stays well-conditioned
+    near theta = pi, so no clamping of the angle is needed at all.
+    """
     p = project_tangent(y, z)
-    pn = p.norm(dim=-1, keepdim=True).clamp_min(EPS)
-    theta = (z * y).sum(-1, keepdim=True).clamp(-1 + EPS, 1 - EPS).arccos()
-    return theta * p / pn
+    pn = p.norm(dim=-1, keepdim=True)
+    dot = (z * y).sum(-1, keepdim=True)
+    theta = torch.atan2(pn, dot)
+    out = theta * p / pn.clamp_min(EPS)
+    # Coincident (theta -> 0): the limit is the zero tangent vector. Antipodal
+    # (theta -> pi) is genuinely undefined -- every direction is a geodesic -- so
+    # leave whatever direction the projection produced, with the correct norm pi.
+    return torch.where((pn < EPS) & (dot > 0), torch.zeros_like(out), out)
 
 
 def _angle(z0, z1):
@@ -99,8 +119,36 @@ def tangent_noise(z, kappa):
     Draw eta ~ N(0, kappa^2 I), project to T_z, and Exp back, giving a pure
     geodesic rotation (||z|| stays 1) -- the prior's actual error type, unlike a
     Euclidean perturbation which knocks z off the sphere.
+
+    ``kappa`` is a PER-COORDINATE sigma, so the realised geodesic displacement is
+    ``kappa * sqrt(d - 1)`` radians and therefore grows with the ambient width.
+    Callers that want to specify an ANGLE must use :func:`tangent_noise_rad`; this
+    stays the raw primitive.
     """
     if kappa <= 0:
         return z
     w = project_tangent(torch.randn_like(z) * kappa, z)
     return exp_map(z, w)
+
+
+def sigma_for_angle(rad: float, k: int) -> float:
+    """Per-coordinate tangent sigma giving an expected geodesic step of ``rad``.
+
+    An isotropic tangent Gaussian N(0, sigma^2 I_k) has expected norm ~ sigma*sqrt(k),
+    and on the sphere that norm *is* the geodesic distance travelled by Exp. So the
+    interpretable knob is the displacement in radians and sigma follows.
+    """
+    return rad / math.sqrt(max(1, k))
+
+
+def tangent_noise_rad(z, rad):
+    """Geodesic rotation of ``z`` by ``rad`` RADIANS, independent of dim(z).
+
+    ``tangent_noise(z, 0.02)`` on S^1279 displaces by 0.02*sqrt(1279) = 0.72 rad
+    (41 degrees), not 0.02 -- a 36x error that silently scales with the token
+    width. Every angular knob in the config is specified in radians and routed
+    through here so the two conventions cannot be mixed up again.
+    """
+    if rad <= 0:
+        return z
+    return tangent_noise(z, sigma_for_angle(rad, z.shape[-1] - 1))

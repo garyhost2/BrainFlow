@@ -14,6 +14,8 @@ from brainflow.step1.targets import TargetStats
 from brainflow.step1.data import build_step1_loaders
 from brainflow.step1.metrics import EMA, pixcorr, ssim, CLIPMetric
 from brainflow.step1.decoder_sgm import quiet_benign_warnings
+from brainflow.step1.instrument import (latent_diagnostics, train_val_gap,
+                                        grad_norms, write_manifest)
 
 def setup_a100():
     torch.set_float32_matmul_precision("high")
@@ -51,6 +53,72 @@ def parse_args():
     ap.add_argument("--mixco-s-thresh", type=float, default=0.5)
     ap.add_argument("--geometry", type=str, default="sphere",
                     choices=["euclidean", "sphere"])
+    # --- R-XFM ------------------------------------------------------------
+    ap.add_argument("--flow-source", type=str, default="anchor_var",
+                    choices=["noise", "anchor_det", "anchor_var"],
+                    help="what the flow transports FROM. 'noise' is the legacy "
+                         "step1c behaviour (uniform on the sphere, ~90 deg from "
+                         "every target); the anchor sources start at the "
+                         "regression anchor, so v==0 is the identity and the "
+                         "prior is bounded below by cond_source=regression.")
+    ap.add_argument("--flow-param", type=str, default="auto",
+                    choices=["auto", "endpoint", "velocity"],
+                    help="what the DiT emits. 'velocity' (legacy) trains mse(v, u_t), "
+                         "which by the identity u_t = Log_zt(z1)/(1-t) weights the "
+                         "endpoint error by 1/(1-t)^2 -- 100x at t=0.9, 2500x at "
+                         "t=0.98 -- i.e. capacity goes where the task is trivial and "
+                         "is starved at t->0 where inference starts. 'endpoint' "
+                         "predicts zhat1 and scores 1-cos(zhat1, z1), uniform in t.")
+    ap.add_argument("--cfg-scale", type=float, default=None,
+                    help="classifier-free guidance for the PATCH prior. Default "
+                         "resolves to 1.0 for anchor sources (guidance is incoherent "
+                         "when z0 is itself brain-derived, since the 'unconditional' "
+                         "branch drops the brain tokens) and 3.0 for --flow-source noise.")
+    ap.add_argument("--center-mode", type=str, default="global",
+                    choices=["global", "per_position"],
+                    help="how the token mean is pooled before the polar split. "
+                         "'global' averages over images AND all 256 positions, so "
+                         "every centred direction keeps a content-free positional "
+                         "offset that inflates every cosine in the repo. Run "
+                         "scripts/check_centering.py to measure the split first.")
+    ap.add_argument("--select-on", type=str, default="two_way",
+                    choices=["two_way", "retrieval", "cos"],
+                    help="signal for best.pt. 'cos' (legacy) calls predict_tokens "
+                         "with cond_source='regression', so it scores z0 and is "
+                         "structurally blind to the flow; it is also a pointwise "
+                         "functional while every deployed metric is a pairwise "
+                         "ranking one. 'two_way'/'retrieval' come from the latent "
+                         "diagnostics and are computed on the flow output.")
+    ap.add_argument("--anchor-jitter-rad", type=float, default=0.15,
+                    help="expected geodesic displacement (radians) of a draw from "
+                         "q(z0|fMRI). Keep well below the measured anchor error "
+                         "(log anchor_theta_deg): cos(z0,z1) ~ cos(jitter)*cos(theta).")
+    ap.add_argument("--lambda-kl", type=float, default=0.1,
+                    help="wrapped-Gaussian KL, nats per tangent dim. Stops sigma "
+                         "collapsing to 0; it is a floor, not a strong prior.")
+    ap.add_argument("--lambda-clip-tok", type=float, default=0.0,
+                    help="token-level SoftCLIP on pooled predicted tokens (the "
+                         "256x1664 sequence the decoder actually consumes)")
+    ap.add_argument("--cls-cond-mode", type=str, default="jitter",
+                    choices=["teacher", "jitter", "sampled", "none"],
+                    help="how the patch prior sees c_cls at TRAIN time. 'teacher' "
+                         "is the legacy exposure-bias trap: ground truth at train, "
+                         "a sampled estimate at inference.")
+    ap.add_argument("--cls-jitter-rad", type=float, default=0.30,
+                    help="geodesic displacement in RADIANS applied to the true "
+                         "c_cls at train time. Calibrate as arccos(cls_cos_hat_true) "
+                         "from the logged val/cls_cos_hat_true. (Replaces "
+                         "--cls-jitter-kappa, which was a per-coordinate sigma: 0.02 "
+                         "there realised 0.02*sqrt(1279) = 0.72 rad = 41 deg.)")
+    ap.add_argument("--stochastic-source", action="store_true",
+                    help="draw z0 ~ q at inference instead of using the mode")
+    ap.add_argument("--diag-batches", type=int, default=8,
+                    help="batches per latent-diagnostic pass (train and val each)")
+    ap.add_argument("--decode-steps", type=int, default=20,
+                    help="ODE steps used inside the latent diagnostics")
+    ap.add_argument("--gradnorm-every", type=int, default=200,
+                    help="steps between per-term gradient-norm probes (0 disables). "
+                         "Costs one backward per term, so keep it sparse.")
     ap.add_argument("--two-head", dest="two_head", action="store_true", default=True,
                     help="structured CLS + patch factorisation (paper default)")
     ap.add_argument("--no-two-head", dest="two_head", action="store_false",
@@ -106,6 +174,51 @@ def lr_at(step, total, warm, base, mn):
     prog = (step - warm) / max(1, total - warm)
     return mn + 0.5 * (base - mn) * (1 + math.cos(math.pi * prog))
 
+def _append_metrics(out_dir, row: dict):
+    """One JSON object per eval, appended. paper_report.py reads the tail."""
+    import json
+    with open(Path(out_dir) / "diagnostics.jsonl", "a") as f:
+        f.write(json.dumps({k: (float(v) if isinstance(v, (int, float)) else v)
+                            for k, v in row.items()}) + "\n")
+
+
+@torch.no_grad()
+def per_position_mean(targets, subjects, token_len, token_dim, chunk=512):
+    """Mean bigG token PER POSITION, pooled over images and subjects: (N, d).
+
+    ``targets_bigg._accum_stats`` reshapes to (-1, d) before accumulating, so
+    ``stats.mean`` is a single vector averaged over positions as well as images.
+    Streaming here in chunks keeps the (n_img, 256, 1664) mmap off the heap.
+    """
+    total = torch.zeros(token_len, token_dim, dtype=torch.float64)
+    count = 0
+    for s in subjects:
+        e = targets[f"emb_train_{s}"]
+        for i in range(0, len(e), chunk):
+            block = e[i:i + chunk].float()
+            total += block.sum(dim=0).double()
+            count += block.shape[0]
+    if count == 0:
+        raise ValueError("no training embeddings found for per-position centring")
+    return (total / count).float()
+
+
+def _load_shape_safe(model, state, label):
+    """load_state_dict(strict=False) that also drops SHAPE-mismatched entries.
+
+    ``tgt_mean`` is (d,) under center_mode='global' and (N, d) under
+    'per_position', so a warm-start across the two would raise instead of simply
+    starting that buffer fresh.
+    """
+    own = model.state_dict()
+    dropped = [k for k, v in state.items()
+               if k in own and tuple(own[k].shape) != tuple(v.shape)]
+    if dropped:
+        print(f"  [{label}] shape mismatch, kept fresh: {', '.join(dropped)}")
+    keep = {k: v for k, v in state.items() if k not in dropped}
+    return model.load_state_dict(keep, strict=False)
+
+
 @torch.no_grad()
 def eval_token_cosine(model, loader, stats, device):
     model.eval()
@@ -146,6 +259,15 @@ def main():
                                  num_workers=args.num_workers, fmri_noise_std=args.fmri_noise_std,
                                  val_frac=args.val_frac, seed=args.seed)
 
+    # CFG default depends on the flow source: with an anchor source the
+    # "unconditional" branch drops the brain tokens while z0 is itself
+    # brain-derived, so the two branches do not differ in the way guidance assumes.
+    cfg_scale = args.cfg_scale
+    if cfg_scale is None:
+        cfg_scale = 3.0 if args.flow_source == "noise" else 1.0
+        print(f"✓ --cfg-scale unset; resolved to {cfg_scale} for "
+              f"--flow-source {args.flow_source}")
+
     cfg = TokenStep1Config(subjects=args.subjects, enc_hidden=args.enc_hidden,
                            lambda_clip=args.lambda_clip, clip_temp=args.clip_temp,
                            geometry=args.geometry, uniform_t_prob=args.uniform_t_prob,
@@ -157,15 +279,27 @@ def main():
                            ll_target=args.ll_target,
                            lambda_cos=args.lambda_cos, lambda_reg=args.lambda_reg,
                            enc_drop=args.enc_drop, mixup_pct=args.mixup_pct,
-                           mixco_beta=args.mixco_beta, mixco_s_thresh=args.mixco_s_thresh)
+                           mixco_beta=args.mixco_beta, mixco_s_thresh=args.mixco_s_thresh,
+                           flow_source=args.flow_source,
+                           flow_param=args.flow_param,
+                           cfg_scale=cfg_scale,
+                           center_mode=args.center_mode,
+                           anchor_jitter_rad=args.anchor_jitter_rad,
+                           lambda_kl=args.lambda_kl,
+                           lambda_clip_tok=args.lambda_clip_tok,
+                           cls_cond_mode=args.cls_cond_mode,
+                           cls_jitter_rad=args.cls_jitter_rad,
+                           stochastic_source=args.stochastic_source)
     model = TokenStep1Model(cfg, bundle.voxels).to(device)
     if cfg.geometry == "sphere" and cfg.center_tokens:
-        model.set_target_mean(stats.mean)
+        model.set_target_mean(
+            per_position_mean(targets, args.subjects, cfg.token_len, cfg.token_dim)
+            if cfg.center_mode == "per_position" else stats.mean)
     if lat_stats is not None and model.low_head is not None:
         model.low_head.set_latent_stats(lat_stats["mean"], lat_stats["std"])
     if args.init_from:
         ck = torch.load(args.init_from, map_location="cpu")
-        res = model.load_state_dict(ck["model"], strict=False)
+        res = _load_shape_safe(model, ck["model"], "init-from")
         print(f"✓ warm-start from {args.init_from}: {len(res.missing_keys)} fresh params "
               f"(e.g. low_head), {len(res.unexpected_keys)} unexpected")
 
@@ -181,6 +315,24 @@ def main():
             n_frozen += 0 if train_it else p.numel()
         print(f"✓ freeze-token: {n_frozen/1e6:.1f}M frozen, {n_train/1e6:.2f}M trainable "
               f"(low_head only); best.pt selected on PixCorr+SSIM")
+    write_manifest(out_dir, args=args, cfg=cfg, model=model, voxels=bundle.voxels)
+    if cfg.geometry == "sphere" and cfg.flow_source != "noise":
+        print(f"✓ R-XFM source={cfg.flow_source} param={cfg.resolved_flow_param()} "
+              f"jitter={cfg.anchor_jitter_rad} rad | cls_cond={cfg.cls_cond_mode}"
+              f"({cfg.cls_jitter_rad} rad) | cfg_scale={cfg.cfg_scale} "
+              f"| center={cfg.center_mode} | select_on={args.select_on}")
+        if cfg.cfg_scale != 1.0:
+            print("  [warn] classifier-free guidance with an anchor source is "
+                  "incoherent: the 'unconditional' branch drops the brain tokens "
+                  "while z0 is itself brain-derived. Prefer --cfg-scale 1.0.")
+        if cfg.flow_source == "anchor_var" and cfg.lambda_kl <= 0:
+            print("  [warn] --lambda-kl 0 with anchor_var: nothing floors sigma, so "
+                  "the flow will drive it to 0 and the posterior degenerates to the "
+                  "deterministic anchor (equivalent to --flow-source anchor_det).")
+    if args.lambda_reg > 0:
+        print(f"  [warn] --lambda-reg {args.lambda_reg}: for unit vectors "
+              f"mse(a,b) == (2/d)*(1-cos(a,b)), so `reg` is `cos` scaled by "
+              f"1/{cfg.token_dim // 2}. It is very likely not doing what you think.")
     if args.compile:
         model = torch.compile(model)
     ema = EMA(model, decay=args.ema_decay)
@@ -232,12 +384,27 @@ def main():
             if tgt_lat is not None:
                 tgt_lat = tgt_lat.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
+            probe = (args.gradnorm_every and step % args.gradnorm_every == 0
+                     and not low_only)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 ld = model.training_step(fmri, batch["subject"], tgt_std,
                                          target_raw=tgt_raw, target_cls=tgt_cls,
                                          target_img=tgt_img, low_only=low_only,
-                                         use_mixco=use_mixco, target_lat=tgt_lat)
+                                         use_mixco=use_mixco, target_lat=tgt_lat,
+                                         keep_term_graph=probe)
                 loss = ld["loss"]
+
+            # Per-term gradient norms: loss WEIGHTS are uninterpretable when the
+            # terms have different natural scales (`reg` is `cos` scaled by 2/d).
+            # Measured, not guessed. autograd.grad does not touch .grad, and every
+            # probe retains the graph, so loss.backward() below is unaffected.
+            if probe:
+                gn = grad_norms({k: v for k, v in ld.items() if k != "loss"},
+                                model.parameters())
+                print("  gradnorm | " + "  ".join(
+                    f"{k.split('/')[-1]}={v:.3e}" for k, v in sorted(gn.items())))
+                _append_metrics(out_dir, {"step": step, **gn})
+
             loss.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
@@ -264,6 +431,33 @@ def main():
                 print("[warn] no validation split (--val-frac 0); selecting on TEST is leaky.")
             sel_cos = eval_token_cosine(model, sel_loader, stats, device)
             msg = f"Ep{epoch:4d} | {sel_name}_cos={sel_cos:.4f}"
+
+            # Latent-space diagnostics: seconds, no decode. `delta_cos` is what
+            # the flow ADDS over its own starting point -- if it is <= 0 the prior
+            # is dead weight no matter what the decoded metrics say.
+            diag = latent_diagnostics(model, sel_loader, device,
+                                      n_steps=args.decode_steps,
+                                      solver=args.solver, max_batches=args.diag_batches,
+                                      prefix="val/")
+            diag_tr = latent_diagnostics(model, bundle.train, device,
+                                         n_steps=args.decode_steps,
+                                         solver=args.solver,
+                                         max_batches=args.diag_batches, prefix="train/")
+            diag |= diag_tr
+            diag |= train_val_gap(diag_tr, {k: v for k, v in diag.items()
+                                            if k.startswith("val/")})
+            if "val/delta_cos" in diag:
+                msg += (f" | Dcos={diag['val/delta_cos']:+.4f}"
+                        f" anchor={diag['val/anchor_cos']:.4f}"
+                        f" flow={diag['val/flow_cos']:.4f}"
+                        f" 2way={diag.get('val/two_way', float('nan')):.3f}"
+                        f" retr={diag.get('val/retr_fwd_300', float('nan')):.3f}")
+                if "val/cls_cos_hat_true" in diag:
+                    msg += f" clsCos={diag['val/cls_cos_hat_true']:.3f}"
+                if "val/sigma_mean" in diag:
+                    k_tan = cfg.token_dim - 1
+                    msg += f" jit={diag['val/sigma_mean'] * (k_tan ** 0.5):.3f}rad"
+            _append_metrics(out_dir, {"epoch": epoch, **diag})
             if bundle.val is not None:
                 msg += f" test_cos={eval_token_cosine(model, bundle.eval, stats, device):.4f}"
             ema.restore(model)
@@ -278,12 +472,29 @@ def main():
                     "stats": stats.to_dict(), "voxels": bundle.voxels,
                     "subjects": args.subjects, "epoch": epoch}
             torch.save(ckpt, out_dir / "last.pt")
-            # Default: select best.pt on token cosine. In --freeze-token mode the
-            # token model is frozen (val_cos is constant), so best.pt is selected
-            # on the low-level image metric (PixCorr+SSIM) after the decode below.
-            if not low_only and sel_cos > best_cos:
-                best_cos = sel_cos
+            # Selection signal. `sel_cos` calls predict_tokens with
+            # cond_source="regression", so under R-XFM it scores exactly z0 and is
+            # structurally blind to delta_cos -- the quantity this branch exists to
+            # produce. It is also a POINTWISE functional (per-image, per-token inner
+            # product) while every deployed metric (CLIP-2way, retrieval) is a
+            # PAIRWISE ranking one; write the predictor as xhat = a*x + b*mbar + e
+            # and the pairwise metric is invariant to b after centring while the
+            # pointwise one is increasing in it, so the two can and did move in
+            # opposite directions (run 347831: val_cos fell from epoch 10 while
+            # decoded CLIP_2way climbed to epoch 110). Default to the flow-aware
+            # ranking statistic; --select-on cos restores the old behaviour.
+            sel_key = {"two_way": "val/two_way",
+                       "retrieval": "val/retr_fwd_300"}.get(args.select_on)
+            sel_val = sel_cos if sel_key is None else diag.get(sel_key)
+            if sel_val is None:
+                if epoch == args.eval_freq:
+                    print(f"[warn] --select-on {args.select_on} unavailable "
+                          f"({sel_key} missing from diagnostics); falling back to cos.")
+                sel_val = sel_cos
+            if not low_only and sel_val > best_cos:
+                best_cos = sel_val
                 torch.save(ckpt, out_dir / "best.pt")
+                msg += f"  ✓best.pt({args.select_on}={sel_val:.4f})"
 
             # Best-effort image metrics: guard so an OOM/failure just skips this
             # epoch's decode instead of killing the run, and always restore the
@@ -385,7 +596,8 @@ def main():
     if low_only:
         print(f"Done. best low-level PixCorr+SSIM={best_img:.4f}. Checkpoints in {out_dir}")
     else:
-        print(f"Done. best {('val' if bundle.val is not None else 'test')}_cos={best_cos:.4f}. "
+        split = "val" if bundle.val is not None else "test"
+        print(f"Done. best {split}/{args.select_on}={best_cos:.4f}. "
               f"Checkpoints in {out_dir}")
 
 def _save_grid(pred, gt, path, n=8):
