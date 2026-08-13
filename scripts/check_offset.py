@@ -55,6 +55,8 @@ def parse_args():
                     help="held-out trials used as the retrieval pool")
     ap.add_argument("--max-train", type=int, default=12000,
                     help="cap on ridge training rows (keeps this a CPU job)")
+    ap.add_argument("--min-margin", type=float, default=0.02,
+                    help="top-1 margin the winner must clear to count as conclusive")
     return ap.parse_args()
 
 
@@ -85,10 +87,9 @@ def ridge_fit(X: np.ndarray, Y: np.ndarray, alpha: float) -> np.ndarray:
 
 
 def score_offset(betas_path: Path, coco_cls: torch.Tensor, behav: np.ndarray,
-                 offset: int, args) -> dict:
+                 target_idx: np.ndarray, offset: int, args) -> dict:
     """Fit voxels -> bigG CLS under one offset, report held-out cos and top-1."""
     trial = behav[:, 5].astype(int)
-    coco = behav[:, 0].astype(int)
 
     with h5py.File(betas_path, "r", rdcc_nbytes=256 * 1024 * 1024) as f:
         key = list(f.keys())[0]
@@ -98,7 +99,13 @@ def score_offset(betas_path: Path, coco_cls: torch.Tensor, behav: np.ndarray,
         u, inv = np.unique(idx, return_inverse=True)
         X = f[key][u][inv].astype(np.float32)
 
-    Y = coco_cls[np.clip(coco, 0, len(coco_cls) - 1)].float().numpy()
+    # ``coco_cls`` is cls_train, which targets_bigg builds from imgs_train -- one
+    # row PER TRIAL, already image-aligned. It must therefore be indexed by ROW.
+    # Indexing it with behav[:, 0] (the 73k COCO id, range 0..72999) against an
+    # array of length n ~ 25k clipped roughly two thirds of all trials onto the
+    # same final row, giving both offsets a near-chance score and making the test
+    # structurally unable to decide anything.
+    Y = coco_cls[target_idx].float().numpy()
 
     n = len(X)
     n_eval = min(args.n_eval, n // 4)
@@ -154,7 +161,7 @@ def main():
 
     results = []
     for off in args.offsets:
-        r = score_offset(betas, coco_cls, behav,
+        r = score_offset(betas, coco_cls, behav, behav_idx,
                          offset=off, args=argparse.Namespace(**vars(args)))
         results.append(r)
         print(f"offset {off:+d}:  cos={r['cos']:.4f}   "
@@ -163,17 +170,31 @@ def main():
     best = max(results, key=lambda r: r["top1"])
     runner = sorted(results, key=lambda r: -r["top1"])[1] if len(results) > 1 else None
     print(f"\n=> best offset: {best['offset']:+d}")
+    conclusive = True
     if runner is not None:
         margin = best["top1"] - runner["top1"]
         print(f"   margin over next best: {margin:+.4f}")
-        if margin < 0.02:
-            print("   [warn] offsets are within noise of each other -- inconclusive. "
+        if margin < args.min_margin:
+            conclusive = False
+            print(f"   [warn] offsets are within noise of each other (margin "
+                  f"{margin:+.4f} < {args.min_margin}) -- inconclusive. "
                   "Raise --n-eval or --max-train before trusting this.")
+    if best["top1"] < 4 * best["chance"]:
+        conclusive = False
+        print(f"   [warn] the winning offset scores {best['top1']:.4f} against a "
+              f"chance of {best['chance']:.4f}: the ridge is barely above chance for "
+              "EVERY candidate, so this cannot discriminate. Check the target cache "
+              "and the voxel/behav alignment before trusting any arm downstream.")
     if best["offset"] != -1:
-        print("\n   brainflow/data.py:131 currently uses `all_trial - 1`. "
+        print("\n   brainflow/data.py:132 currently uses `all_trial - 1`. "
               f"This says it should be `all_trial + {best['offset']}`.")
-    return results
+    # Machine-readable verdict: gate1_rxfm.sbatch greps for this line, so an
+    # inconclusive run can no longer unblock the ablation just by existing.
+    print(f"\nGATE0: verdict={'CONCLUSIVE' if conclusive else 'INCONCLUSIVE'} "
+          f"offset={best['offset']:+d} top1={best['top1']:.4f} "
+          f"chance={best['chance']:.4f}")
+    return 0 if conclusive else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
