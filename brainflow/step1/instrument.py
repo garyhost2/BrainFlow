@@ -21,6 +21,7 @@ quietly beat the prior without anything in the logs saying so.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import subprocess
@@ -159,11 +160,16 @@ def latent_diagnostics(model, loader, device, *, n_steps: int = 20,
         out["sigma_max"] = max(sig_max)
 
     P = torch.cat(pred_pool); T = torch.cat(targ_pool)
-    from ..metrics_full import retrieval_metrics
+    from ..metrics_full import retrieval_metrics, two_way_identification
     r = retrieval_metrics(P, T, batch_size=300, device=torch.device("cpu"))
     out["retr_fwd_300"] = r["retrieval_fwd"]
     out["retr_bwd_300"] = r["retrieval_bwd"]
     out["retr_pools"] = float(r["retrieval_pools"])
+    # Two-way identification on the flow output. This is a PAIRWISE ranking
+    # statistic, the same family as the deployed CLIP-2way / Inception-2way, and
+    # unlike `sel_cos` it is computed on what the decoder receives (z_flow) rather
+    # than on the anchor. Diffusion-free, so it can drive checkpoint selection.
+    out["two_way"] = two_way_identification(P.float(), T.float())
     out["eff_rank"] = effective_rank(P)
     out["dispersion"] = dispersion(P)
     out["n_samples"] = float(seen)
@@ -284,8 +290,13 @@ def write_manifest(out_dir: Path, *, args, cfg, model, voxels: dict,
         "torch": torch.__version__,
         "gpu": (torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"),
     }
-    payload["config_hash"] = str(abs(hash(json.dumps(payload["config"], sort_keys=True,
-                                                     default=str))) % (10 ** 12))
+    # blake2b, NOT the builtin hash(): PYTHONHASHSEED randomises str hashing per
+    # process, so two runs of the SAME config produced different config_hash values
+    # (measured: 338608003484 / 701515998413 / 248274948484 for one config across
+    # three interpreters) and paper_report.py could never group an ablation row.
+    payload["config_hash"] = hashlib.blake2b(
+        json.dumps(payload["config"], sort_keys=True, default=str).encode(),
+        digest_size=8).hexdigest()
     if extra:
         payload |= extra
     p = out_dir / "manifest.json"
