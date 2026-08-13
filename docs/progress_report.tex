@@ -1,0 +1,737 @@
+% ---------------------------------------------------------------------------
+%  BrainFlow: progress report for supervision
+%  Compile:  pdflatex progress_report.tex   (twice, for the propositions' refs)
+% ---------------------------------------------------------------------------
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}      % lmodern + T1: scalable fonts, required by microtype
+\usepackage{lmodern}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage[colorlinks=true,linkcolor=blue!55!black,citecolor=blue!55!black,
+            urlcolor=blue!55!black]{hyperref}
+\usepackage{microtype}
+\usepackage{enumitem}
+\setlist{itemsep=2pt,topsep=3pt,parsep=0pt}
+
+\newcommand{\Sph}[1]{\mathbb{S}^{#1}}
+\newcommand{\Exp}{\operatorname{Exp}}
+\newcommand{\Log}{\operatorname{Log}}
+\newcommand{\Proj}{\mathcal{P}}
+\newcommand{\Tang}[1]{T_{#1}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Unif}{\mathrm{Unif}}
+\newcommand{\KL}{\mathrm{KL}}
+\newcommand{\dcos}{\Delta\!\cos}
+
+\theoremstyle{plain}
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}[proposition]{Lemma}
+\theoremstyle{remark}
+\newtheorem*{remark}{Remark}
+
+\newenvironment{finding}[1]%
+  {\medskip\noindent\textbf{#1}\quad}%
+  {\medskip}
+
+\pagestyle{plain}
+
+\begin{document}
+
+% ===========================================================================
+\section{The chain of elimination}
+% ===========================================================================
+
+Each of the following results removed a class of explanation and narrowed what
+remained. I present them in that order because the argument for the present
+method is cumulative.
+
+\begin{finding}{F1. Pixel-space targets are not learnable from fMRI.}
+My first architecture ran conditional flow matching~\cite{lipman2023flow,
+liu2023rectified} over Stable-Diffusion VAE latents. It plateaued at PixCorr
+$0.12$--$0.15$. A variant that derived the flow source from the conditioning
+collapsed outright: the training loss fell $0.70\!\to\!0.095$ in five epochs
+while reconstruction quality \emph{fell}, because the model drove the source
+onto the target and made the velocity identically zero.
+\emph{Consequence:} move the learning problem into a semantic space, and treat
+source degeneracy as a first-class hazard, a lemma I return to in F8.
+\end{finding}
+
+\begin{finding}{F2. The token sequence admits neither a flat nor a spherical model.}
+bigG tokens are not unit-normalised, and the decoder consumes raw values.
+Modelling $X$ as a flat Gaussian ignores that CLIP semantics are carried by
+\emph{direction} (every downstream metric is a cosine), and it lets the flow
+leave the thin shell where real tokens live. Normalising the sequence destroys
+the magnitudes the decoder requires, irrecoverably.
+\emph{Consequence:} neither standard geometry is admissible, so I introduced the
+polar reparametrisation of \S\ref{sec:method}, which is the contribution of this
+work.
+\end{finding}
+
+\begin{finding}{F3. The manifold assumption holds only partially, and I measured it rather than assumed it.}
+The polar split is worthwhile only if the radii are close to uninformative. On
+real tokens I measured a relative radius spread of $8.2\%$ (an isotropic
+Gaussian would give $\approx\!1.7\%$), of which only $\approx\!7\%$ is
+positional, leaving $\approx\!8\%$ genuinely content-dependent; and a
+pairwise direction overlap of $|\cos| = 0.35$ uncentred, falling to $0.17$ after
+centring.
+\emph{Consequence:} the radius side-model must be a real model, so I made it a
+per-token cross-attention head; and centring is load-bearing, which is why
+\S\ref{sec:open} treats it as an open measurement rather than a settled choice.
+\end{finding}
+
+\begin{finding}{F4. The curved formulation earns its keep on stability, not only on accuracy.}
+At matched epochs the spherical model leads the flat Euclidean baseline on the
+semantic axis, and the flat baseline diverged outright (\texttt{NaN} collapse at
+epoch 60; its best checkpoint scored $0.082 / 0.205 / 0.712$).
+\emph{Consequence:} the geometry is retained. Notably, it also dissolves two
+correctness hazards of the flat formulation: guidance anisotropy under
+standardisation, and the temptation to normalise the sequence.
+\end{finding}
+
+\begin{finding}{F5. The decoder is not the bottleneck.}
+Decoding \emph{ground-truth} tokens reaches PixCorr $0.638$ on the full 982
+images. My prior's anchor sits at a mean token cosine of $\approx\!0.37$.
+\emph{Consequence:} all remaining headroom is in the prior. This is the single
+measurement that determined everything after it.
+\end{finding}
+
+\begin{finding}{F6. The low-level pathway fails from both directions, which indicts the target.}
+MindEye2 obtains its pixel scores by fusing a semantic pathway with a low-level
+one that supplies the sampler's initialisation. I implemented the same mechanism
+four times: mean-pooled tokens; a spatial token grid; a head reading raw voxels;
+and the same with $L_1$ on a lower-resolution target. The first three plateaued
+at exactly the score of predicting the per-image mean colour, and a $17.4$M head
+scored identically to a $1.5$M one ($0.0699$ vs.\ $0.0702$), so capacity was
+never the constraint. The fourth removed the mean-seeking behaviour and
+overfitted instead, validation error rising monotonically $0.083\!\to\!0.104$.
+\emph{Consequence:} underfitting and overfitting failing on the same objective
+indicts the \emph{target}, not the model. A $49$k-dimensional RGB image is not a
+learnable intermediate from $27$k trials. This result also supplies the first
+half of my argument in \S\ref{sec:pixcorr}.
+\end{finding}
+
+\begin{finding}{F7. Capacity is the wrong lever.}
+Widening the encoder $2048\!\to\!4096$ produced $0.091 / 0.233 / 0.748$ and
+overfitted from the \emph{first} evaluation: validation token cosine fell
+monotonically $0.3485\!\to\!0.3053$ across 150 epochs.
+\emph{Consequence:} the model is data-starved, not capacity-starved. Any
+remaining gain must come from better conditioning of the existing problem.
+\end{finding}
+
+\begin{finding}{F8. The generative model was being started from a strictly uninformative point.}
+This is the observation the present work turns on. The flow transported a
+uniform sample $z_0\sim\Unif(\Sph{d-1})$ onto the target. In $d=1664$
+dimensions, $\langle z_0,z_1\rangle \sim \mathcal{N}(0, 1/d)$, so the source is
+$\approx\!90^\circ$ from \emph{every} target and equidistant from all of them:
+it carries no information whatsoever. Meanwhile my regression anchor $\mu(c)$
+already stood at $\cos\approx0.37$.
+\emph{Consequence:} the transport was being asked to begin strictly behind a
+quantity I already possessed. Transporting from the anchor instead
+(\S\ref{sec:source}) makes $v\equiv0$ the identity map, so the prior is
+\emph{bounded below} by the anchor and can only refine it.
+\end{finding}
+
+\begin{finding}{F9. The training objective was mis-allocating capacity across time.}
+Having fixed the source, I re-derived the objective and found the velocity
+parametrisation ill-conditioned: it implicitly weights endpoint error by
+$1/(1-t)^2$, concentrating capacity where the problem is trivial and starving
+$t\!\to\!0$, which is where inference begins (\S\ref{sec:param}).
+\emph{Consequence:} predict the endpoint, not the velocity.
+\end{finding}
+
+\begin{finding}{F10. No discriminative signal reached the decoder's input.}
+The contrastive term acted on a pooled auxiliary projection that the decoder
+never sees. Every one of the $425{,}984$ numbers the decoder consumes was
+supervised by mean-seeking regression alone, the same condition that produced
+the collapses in F6.
+\emph{Consequence:} apply the contrastive loss to the flattened predicted token
+grid (\S\ref{sec:contrastive}).
+\end{finding}
+
+\noindent
+F1--F7 establish that the prior is the bottleneck and that neither capacity nor
+pixel-space supervision will move it. F8--F10 are the response, and together
+they define the method below.
+
+% ===========================================================================
+\section{The resulting method}
+\label{sec:method}
+% ===========================================================================
+
+\subsection{Polar reparametrisation onto the oblique manifold}
+
+I split each token about a fixed mean,
+\begin{equation}\label{eq:polar}
+X_i = \mu + r_i z_i,\qquad
+r_i = \lVert X_i-\mu\rVert \in \R_+,\qquad
+z_i = \tfrac{X_i-\mu}{r_i} \in \Sph{d-1},\qquad d=1664 .
+\end{equation}
+The map is a bijection, so the decoder still receives exact raw tokens. The
+directions live on the \emph{oblique manifold} $\mathcal{M}=(\Sph{d-1})^{N}$,
+$N=256$, and are modelled by Riemannian flow matching~\cite{chen2024riemannian};
+the radii are handled by a light side-model. I state plainly that this is an
+\emph{imposed} reparametrisation rather than native geometry, and F3 is its
+empirical justification.
+
+I further factor the sequence against the pooled embedding
+$c_{\mathrm{cls}}\in\Sph{1279}$, a near-complete semantic summary:
+$p(X\mid c) = p(c_{\mathrm{cls}}\mid c)\, p(X\mid c, c_{\mathrm{cls}})$, sampling
+the global direction first so that it steers local detail.
+
+\subsection{Geodesic transport and its singularities}
+
+For endpoints separated by $\theta=\arccos\langle z_0,z_1\rangle$ the conditional
+path is the great-circle interpolant, with target velocity
+\begin{equation}\label{eq:slerpvel}
+u_t=\frac{\theta}{\sin\theta}\Big(\!-\cos\big((1-t)\theta\big)z_0+\cos(t\theta)z_1\Big)
+\in\Tang{z_t}\Sph{d-1},
+\qquad \lVert u_t\rVert=\theta .
+\end{equation}
+Outputs are tangent-projected and integration uses the exponential map, so
+iterates stay on $\mathcal{M}$ exactly. Three obstacles required care:
+
+\begin{itemize}
+\item \textbf{Removable singularities at both ends.} The $1/\sin\theta$ factor is
+      singular for coincident \emph{and} antipodal endpoints. Both limits exist;
+      a naive implementation returns $0/0$ and propagates \texttt{NaN} through
+      the batch. I guard each expression on its degenerate set and substitute the
+      analytic limit.
+\item \textbf{Conditioning of the logarithmic map.} Writing
+      $\theta=\arccos\langle z,y\rangle$ needs the argument clamped away from
+      $\pm1$, and that clamp puts a \emph{floor} under $\Log_z(y)$: at $y=z$ it
+      returns a small vector in an arbitrary direction. This is harmless when
+      $\Log$ merely measures a displacement, but fatal in \S\ref{sec:param},
+      where it is evaluated at coincidence and integrated. The stable form,
+      $\theta=\operatorname{atan2}(\lVert\Proj_z y\rVert, \langle z,y\rangle)$,
+      is exact at $\theta=0$, well-conditioned near $\pi$, and needs no clamp.
+\item \textbf{Out-of-distribution query times.} Training samples $t$ from a
+      logit-normal law with almost no mass at the endpoints, yet a naive
+      integrator evaluates the field at exactly $t\!=\!0,1$. On a manifold this
+      is worse than in flat space: a bad velocity can push the iterate where the
+      retraction is ill-conditioned. I mix uniform $t$ into training and clamp
+      query times.
+\end{itemize}
+
+\subsection{An informative source, and how to calibrate it}
+\label{sec:source}
+
+Following F8, the source becomes a \emph{wrapped Gaussian} posterior centred on
+the regression anchor:
+\begin{equation}\label{eq:posterior}
+q(z_0\mid y)=\Exp_\mu\big(\Proj_\mu\varepsilon\big),\qquad
+\varepsilon\sim\mathcal{N}(0,\sigma^2 I_d).
+\end{equation}
+
+\paragraph{The derivation permits this; only the instantiation fixed the source.}
+The factorisation of the posterior constrains the law at $t\!=\!1$. The
+flow-matching construction that realises it does not constrain the law at
+$t\!=\!0$.
+
+\begin{proposition}[Admissibility of an informative source]
+\label{prop:admissible}
+Let $p_0(\cdot\mid y)$, $p_1(\cdot\mid y)$ be laws on $\mathcal{M}$ and let the
+coupling be $\pi_y = p_0(\cdot\mid y)\otimes p_1(\cdot\mid y)$. Write
+$\gamma_t$ for the geodesic interpolant, $p_t=\mathrm{law}(\gamma_t)$ and
+$u_t(z\mid y)=\E_{\pi_y}[\dot\gamma_t\mid\gamma_t=z]$. Then for all $\theta$,
+\begin{equation}
+\nabla_\theta\,\E_{t,\pi_y}\big\lVert v_\theta(\gamma_t,t)-\dot\gamma_t\big\rVert^2
+=\nabla_\theta\,\E_{t,p_t}\big\lVert v_\theta(z,t)-u_t(z\mid y)\big\rVert^2 .
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+Expand both squares. The terms $\E\lVert v_\theta\rVert^2$ agree because
+$\gamma_t\sim p_t$ by construction; $\E\lVert\dot\gamma_t\rVert^2$ and
+$\E\lVert u_t\rVert^2$ are $\theta$-independent. For the cross terms, condition
+on $\gamma_t$ and apply the tower property:
+$\E\langle v_\theta(\gamma_t),\dot\gamma_t\rangle
+=\E\big[\langle v_\theta(z),u_t(z\mid y)\rangle\big]$.
+The objectives differ by a $\theta$-independent constant.
+\end{proof}
+
+\begin{remark}
+The proof uses only that $\gamma_t$ has law $p_t$ and that $u_t$ is a conditional
+expectation. It never uses $p_0=\Unif(\Sph{d-1})$, and it never uses
+$z_0\perp y$. Since $z_0=\Exp_\mu(\sigma\varepsilon)$ with $\varepsilon$ drawn
+independently, we have $z_0\perp z_1\mid y$: conditionally on $y$ the coupling
+remains an independent product, so none of the machinery required for genuinely
+dependent couplings is invoked. The $t\!=\!1$ marginal, the only quantity the
+posterior factorisation constrains, is unchanged.
+\end{remark}
+
+\noindent Proposition~\ref{prop:admissible} says the change is \emph{permitted}.
+The next says a particular version of it is \emph{obligatory}.
+
+\begin{proposition}[The source must not be deterministic]
+\label{prop:dirac}
+Let $v_\theta(\cdot,t)$ be locally Lipschitz, so the flow map
+$\psi_{0\to1}:\mathcal{M}\to\mathcal{M}$ is a diffeomorphism. If
+$p_0(\cdot\mid y)=\delta_{\mu(y)}$ then $p_1^\theta(\cdot\mid y)=
+\delta_{\psi(\mu(y))}$ for every $\theta$; consequently
+$\KL\big(p_1\,\|\,p_1^\theta\big)=\infty$ whenever $p_1(\cdot\mid y)$ is
+non-atomic, and no choice of $\theta$ improves it.
+\end{proposition}
+
+\begin{proof}
+A diffeomorphism's pushforward preserves absolute continuity and singularity,
+and $\psi_\#\delta_x=\delta_{\psi(x)}$. A point mass is mutually singular with
+every non-atomic measure.
+\end{proof}
+
+\begin{remark}
+Conversely a wrapped Gaussian with $\sigma>0$ has a smooth strictly positive
+density on the compact manifold $\mathcal{M}$; by Moser's theorem any two such
+densities are related by a diffeomorphism, so the hypothesis class is adequate.
+\end{remark}
+
+\noindent
+This is the reason the width must be trainable rather than nominal, and it
+sharpens the framing of the whole project: reconstruction was posed
+probabilistically precisely because the inverse map does not exist. A
+deterministic anchor would collapse the posterior to a point mass and void that
+premise, leaving only the decoder's own sampler, which sits downstream of the
+latent and structurally cannot express uncertainty \emph{about} it. The
+variational source is therefore the faithful arm and the deterministic one is
+the ablation, which is the reverse of how the two appear at first glance.
+
+\paragraph{How much the change is worth, before any experiment.}
+By Proposition~\ref{prop:admissible} the attainable loss floor is the Bayes risk
+$L^\star(t)=\E_{p_t}\!\big[\operatorname{Var}(\dot\gamma_t\mid\gamma_t)\big]$;
+write $R(t)=L^\star(t)/\operatorname{Var}(\dot\gamma_t)$ for the fraction of the
+regression target that \emph{no} network can predict. In the tangent-Gaussian
+model, with $a=1-t$, $b=t$ and $\rho=\sigma/\tau$ the ratio of source width to
+anchor error,
+\begin{equation}
+R(t)=1-\frac{(b-a\rho^2)^2}{(a^2\rho^2+b^2)(1+\rho^2)} .
+\end{equation}
+A uniform draw sits at geodesic distance $\pi/2$ from any fixed $\mu$, so the
+previous source is the member of this same one-parameter family with
+$\rho=(\pi/2)/\theta$; the present one has $\rho=0.15/\theta$.
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+$t$ & $0.10$ & $0.25$ & $0.50$ & $0.75$ & $0.90$ & $\E_t[R]$ \\
+\midrule
+uniform source $(\rho=1.32)$ & $0.448$ & $0.610$ & $0.928$ & $0.946$ & $0.767$ & $\mathbf{0.755}$ \\
+anchored source $(\rho=0.13)$ & $0.683$ & $0.218$ & $0.061$ & $0.028$ & $0.019$ & $\mathbf{0.194}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Monte-Carlo on the true geometry ($d=128$, $N=4\times10^4$, linear predictor,
+which upper-bounds $R$, so the gap is a lower bound) gives $0.988$ against
+$0.098$ at $t=0.5$. Under the previous source roughly $99\%$ of the regression
+target was unpredictable from $(z_t,t)$: the network could only learn a heavily
+averaged field, which is precisely the observed outcome of a $400$M-parameter
+transport losing to a two-layer regression head. I note honestly that at small
+$t$ the anchored source is \emph{worse}, because a concentrated source reveals
+little about the residual early, and that this is an argument for revisiting the
+time sampler rather than an argument against the source.
+
+\paragraph{The width is the only dial, and it trades the two propositions
+against each other.} $\E_t[R]\to0$ as $\sigma\to0$ (perfectly learnable) exactly
+where Proposition~\ref{prop:dirac} bites (posterior collapses); $\E_t[R]$
+increases with $\sigma$ toward the uniform-source regime. The
+Kullback--Leibler floor sets the operating point, which makes its weight a
+principled quantity rather than a tuning knob:
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}lccccccc@{}}
+\toprule
+displacement $\phi$ (rad) & $0$ & $0.05$ & $0.15$ & $0.30$ & $0.60$ & $1.19$ & $\pi/2$ \\
+$\E_t[R]$ & $0$ & $0.065$ & $\mathbf{0.194}$ & $0.371$ & $0.630$ & $0.784$ & $0.755$ \\
+ & collapse & & \emph{used} & & & $\phi=\theta$ & previous \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Every point of the path then carries brain information, and $v\equiv0$ is the
+identity flow. Two subtleties, both high-dimensional in origin:
+
+\begin{itemize}
+\item \textbf{The width must not match the anchor error.} A draw is displaced in
+      a \emph{random} tangent direction while the target sits in one specific
+      direction; for large $d$ these are near-orthogonal and
+      $\cos(z_0,z_1)\approx\cos\phi\,\cos\theta$, with $\phi$ the displacement.
+      At the measured operating point ($\cos\theta=0.37$, $\theta=68.3^\circ$),
+      setting $\phi=\theta$ would drive $\cos(z_0,z_1)$ to $0.126$, worse
+      than the anchor itself. Setting $\phi=0.15$\,rad costs $0.370\to0.366$,
+      i.e.\ nothing measurable, while still giving the field a neighbourhood on
+      which to be defined.
+\item \textbf{Angles, not coordinate variances.} For an isotropic tangent
+      Gaussian $\E\lVert\Proj_\mu\varepsilon\rVert\approx\sigma\sqrt{d-1}$, and
+      on the sphere that norm \emph{is} the distance travelled; hence
+      $\sigma=\phi/\sqrt{d-1}$. A width specified as a raw $\sigma$ silently
+      changes meaning with the token dimension, a factor of
+      $\sqrt{1663}\approx41$ here. Every angular hyper-parameter is therefore
+      expressed in radians and converted internally.
+\end{itemize}
+
+\paragraph{What may carry gradient.} F1's lemma applies directly. If the flow
+loss pushes on the base point $\mu$, the model shortens its own transport by
+degrading the anchor. If nothing in the source carries gradient, the width is
+fixed by its prior and the variational structure is decorative. The correct
+asymmetry is: \emph{base point detached} (it is supervised by its own cosine
+loss), \emph{width trainable}. The flow then pulls $\sigma$ down and a
+Kullback--Leibler term floors it; per tangent dimension,
+\begin{equation}
+\KL=\tfrac12\Big[\tfrac{\sigma^2}{\sigma_p^2}-1+2\log\tfrac{\sigma_p}{\sigma}\Big],
+\qquad
+\frac{\partial\,\KL}{\partial\log\sigma}=\frac{\sigma^2}{\sigma_p^2}-1,
+\end{equation}
+whose unique stationary point is $\sigma=\sigma_p$. The equilibrium between that
+floor and the flow's downward pressure makes the posterior a genuine model of
+anchor uncertainty.
+
+\paragraph{Guidance becomes ill-posed.} Classifier-free guidance contrasts a
+conditional velocity against an unconditional one. When $z_0$ is itself
+brain-derived, the ``unconditional'' branch still starts from a brain-dependent
+point, so the branches do not differ in the way guidance assumes. I therefore
+set the guidance scale to $1$ under an informative source.
+
+\paragraph{Staging.} The preceding analysis assumes a \emph{stationary} pair
+$(p_0,p_1)$. Detaching the base point removes the degenerate gradient of F1, but
+$\mu$ still moves under its own cosine loss, so the source drifts beneath the
+transport. I therefore train the encoder and anchor to convergence, freeze them,
+then train the transport alone against a fixed source. Beyond making
+Proposition~\ref{prop:admissible} apply as stated, this is a substantial economy:
+every subsequent ablation of the transport reuses one frozen first stage, and
+the arms become exactly comparable because the source is bit-identical across
+them. Joint training is retained as an ablation.
+
+\subsection{Endpoint rather than velocity parametrisation}
+\label{sec:param}
+
+This follows from an identity, not an experiment. For the geodesic path,
+\begin{equation}\label{eq:identity}
+u_t=\frac{\Log_{z_t}(z_1)}{1-t},
+\end{equation}
+verified numerically at $d=1664$ to $4\times10^{-8}$--$2\times10^{-6}$, i.e.\
+float32 round-off. The two parametrisations describe the \emph{same} field; only
+the loss geometry differs. Substituting into the velocity mean-squared error,
+\begin{equation}
+\lVert v_\theta-u_t\rVert^2
+=\frac{\lVert\Log_{z_t}(\hat z_1)-\Log_{z_t}(z_1)\rVert^2}{(1-t)^2},
+\end{equation}
+so training on velocity weights \emph{endpoint} error by $1/(1-t)^2$. Two
+consequences, both measured:
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+$t$ & $0.1$ & $0.5$ & $0.9$ & $0.98$ \\
+implicit endpoint weight $1/(1-t)^2$ & $1.2\times$ & $4\times$ & $100\times$ & $2500\times$ \\
+\midrule
+anchor error $\theta$ & $90.0^\circ$ & $68.3^\circ$ & $30.0^\circ$ & $15.0^\circ$ \\
+(cosine loss)\,/\,(velocity loss) & $674\times$ & $738\times$ & $813\times$ & $827\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The first row is backwards: near $t\!=\!1$ recovering $z_1$ from $z_t$ is nearly
+trivial, while near $t\!=\!0$ the inversion is ill-conditioned and the model must
+genuinely use the brain signal, and $t\!=\!0$ is where inference starts. The
+second follows from $\lVert u_t\rVert=\theta$ in \eqref{eq:slerpvel}: since the
+mean-squared error averages over $d$ coordinates, the flow term sits three orders
+of magnitude below its neighbours, and the imbalance \emph{tightens} as the model
+improves.
+
+\paragraph{Resolution.} The network emits a residual toward the endpoint,
+\begin{equation}
+\hat z_1=\frac{z_t+f_\theta(z_t,t,c)}{\lVert z_t+f_\theta(z_t,t,c)\rVert},
+\qquad
+v_\theta=\frac{\Log_{z_t}(\hat z_1)}{1-t},
+\end{equation}
+trained on $1-\cos(\hat z_1,z_1)$, uniform in $t$. The $1/(1-t)^2$ re-weighting
+disappears; the flow term acquires the same natural scale as the anchor loss
+(measured ratio $\approx\!7$ rather than $\approx\!1/740$), making their relative
+weight an interpretable hyper-parameter; and because the output layer is
+zero-initialised, $\hat z_1 = z_t$ at initialisation, so $v\equiv0$ and the
+identity-flow bound of F8 holds \emph{by construction}.
+
+\subsection{Discriminative supervision on the decoder path}
+\label{sec:contrastive}
+
+Following F10, the contrastive loss is additionally applied to the flattened
+$256\times1664$ predicted grid rather than to a pooled projection. Pooling would
+discard precisely the per-position structure the term exists to supervise.
+Contrastive objectives are the natural counterweight to mean-seeking regression
+because they are \emph{relative}: a prediction resembling the dataset average
+scores at chance against in-batch distractors, however good its cosine to its own
+target.
+
+\subsection{Exposure bias in the two-head factorisation}
+
+The patch head sees the true $c_{\mathrm{cls}}$ during training and a sampled
+estimate at inference. Since $c_{\mathrm{cls}}$ nearly determines the image, a
+head given it for free learns to route around the brain tokens. I treat this as
+scheduled sampling and support teacher forcing, a geodesic rotation of the truth
+by a calibrated angle, and true sampled conditioning. The rotation angle is
+calibrated directly from the logged agreement between the sampled and true global
+direction, which is another place where expressing perturbations as angles rather
+than coordinate variances is necessary rather than merely tidy.
+
+% ===========================================================================
+\section{Why PixCorr is not a sound optimisation target}
+\label{sec:pixcorr}
+% ===========================================================================
+
+I report PixCorr because the literature does, but I do not let it drive design.
+Three independent arguments agree.
+
+\paragraph{1. Theory: distortion versus perception.}
+PixCorr is a squared-error criterion, uniquely maximised by the posterior mean
+$\E[x\mid y]$. Under fMRI conditioning that posterior is broad, since the
+measurement does not determine high-frequency content, so $\E[x\mid y]$ is a
+\emph{blur}: not a plausible image, yet the PixCorr optimum. Conversely a model
+sampling correctly from $p(x\mid y)$ incurs roughly twice the posterior mean's
+squared error. This is the perception-distortion
+trade-off~\cite{blau2018perception}: \textbf{a perfect generative model is
+penalised relative to a blur}. Optimising PixCorr selects against the behaviour I
+want, and it is exactly the failure observed four times in F6.
+
+\paragraph{2. Measurement: PixCorr scores the initialisation, not the decoding.}
+Holding the semantic content fixed at ground truth and varying only how much
+low-frequency information the sampler is handed:
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Decoder input (semantics identical throughout)} & \textbf{PixCorr} & \textbf{SSIM} & \textbf{CLIP} \\
+\midrule
+GT tokens, noise initialisation (full 982)  & $0.638$ & $0.249$ & n/a \\
+GT tokens, GT-blur init, strength $1.0$     & $0.730$ & $0.353$ & $\approx1.0$ \\
+GT tokens, GT-blur init, strength $0.7$     & $0.870$ & $0.444$ & $\approx1.0$ \\
+GT tokens, GT-blur init, strength $0.5$     & $0.913$ & $0.478$ & $\approx1.0$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+PixCorr moves $0.638\to0.913$ on initialisation alone. It is therefore largely a
+measure of the sampler's starting point, not of what was decoded from the brain.
+
+\paragraph{3. Operation: the trade-off is a one-parameter frontier with closed-form ends.}
+One checkpoint, full $982$ images, two decode configurations:
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Decode configuration} & \textbf{PixCorr} & \textbf{SSIM} & \textbf{CLIP-2way} \\
+\midrule
+regression point estimate, guidance $1.0$ & $\mathbf{0.164}$ & $\mathbf{0.348}$ & $0.703$ \\
+blended prior sample, guidance $1.0$      & $0.131$ & $0.276$ & $\mathbf{0.738}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The same weights give either the better pixel score or the better semantic
+score, with no retraining; the low-variance point estimate, which is the least
+generative option, wins on PixCorr, exactly as argument~1 predicts.
+
+Because the transport now begins at the anchor, this dial ceases to be an
+ad-hoc blend and becomes a single integer. Averaging $K$ independent source
+draws on the sphere,
+$\hat z_K = \big\lVert K^{-1}\sum_k \psi_{0\to1}(z_0^{(k)})\big\rVert^{-1}
+K^{-1}\sum_k \psi_{0\to1}(z_0^{(k)})$, interpolates between a calibrated
+posterior sample and the posterior mean, with both endpoints fixed in closed
+form by Proposition~\ref{prop:mean}.
+
+\begin{proposition}[Endpoints of the multi-sample frontier]
+\label{prop:mean}
+Fix $y$ and suppose the transport is calibrated, i.e.\
+$\psi_{0\to1}(z_0)\sim p_1(\cdot\mid y)$ with
+$z_1\sim p_1(\cdot\mid y)$ drawn independently. Let
+$m=\E[\,\psi_{0\to1}(z_0)\mid y\,]$ and assume $m\neq0$. Then
+\begin{equation}
+\E\big[\cos(\hat z_1,z_1)\big]=\lVert m\rVert^{2},
+\qquad
+\lim_{K\to\infty}\E\big[\cos(\hat z_K,z_1)\big]=\lVert m\rVert .
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+For $K=1$, independence gives
+$\E\langle\psi(z_0),z_1\rangle=\langle\E\psi(z_0),\E z_1\rangle=\lVert m\rVert^2$.
+For $K\to\infty$ the strong law gives $K^{-1}\sum_k\psi(z_0^{(k)})\to m$ almost
+surely, hence $\hat z_K\to m/\lVert m\rVert$ by continuity of $u\mapsto
+u/\lVert u\rVert$ at $m\neq0$; then
+$\E\langle m/\lVert m\rVert, z_1\rangle=\langle m,m\rangle/\lVert m\rVert
+=\lVert m\rVert$.
+\end{proof}
+
+\noindent
+Since $\lVert m\rVert\le1$, the frontier is monotone: $K=1$ is maximally
+generative and should favour the ranking statistics, while $K\to\infty$ recovers
+the posterior mean and should favour PixCorr. Substituting the measured anchor
+$\lVert m\rVert=0.370$ gives the predicted frontier
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}lccccccc@{}}
+\toprule
+$K$ & $1$ & $2$ & $4$ & $8$ & $16$ & $32$ & $\infty$ \\
+\midrule
+predicted $\E[\cos(\hat z_K,z_1)]$ & $0.137$ & $0.181$ & $0.231$ & $0.277$ & $0.314$ & $0.338$ & $0.370$ \\
+predicted dispersion rel.\ to data & $1.000$ & $0.938$ & $0.841$ & $0.714$ & $0.572$ & $0.436$ & $0$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+These are predictions of the theory, not measurements; the frontier has not yet
+been traced. Its value is that it requires no fitting, since both ends follow
+from $\lVert m\rVert$ alone, so it converts the perception-distortion trade-off
+from an argument about metric validity into a falsifiable curve traced by one
+trained model, and it replaces the blend weight I was previously sweeping.
+
+\paragraph{What I use instead.}
+\begin{itemize}
+\item \textbf{Ranking statistics} (two-way identification, $k$-way retrieval).
+      Writing a predictor as $\hat x = a\,x + b\,\bar m + e$ (signal, shared
+      component, idiosyncratic error), a pointwise criterion is increasing in the
+      shared component $b$ whereas a centred pairwise criterion is invariant to
+      it. Ranking statistics cannot be gamed by predicting the dataset average,
+      which is the specific failure mode of F6.
+\item \textbf{Angular fidelity added over the anchor.} Because the transport now
+      begins at the anchor, the gain of the flow over its own starting point is
+      directly measurable, and isolates the generative component from the
+      regression baseline. It needs no diffusion pass, so I log it on both splits
+      at every evaluation; the train/validation gap then separates underfitting
+      from overfitting per component.
+\item \textbf{Selection on a ranking statistic.} I previously selected
+      checkpoints on a pointwise token cosine and observed it move \emph{opposite}
+      to decoded semantic quality over a hundred epochs of one run. Selection now
+      uses the two-way statistic on the quantity the decoder receives.
+\end{itemize}
+
+\noindent
+This is not an argument that low-level fidelity is unimportant. It is an argument
+that PixCorr is the wrong instrument for it, and that the correct route is
+structural, namely a working low-level pathway supplying the sampler's
+initialisation, rather than tuning a semantic model against a criterion it cannot
+satisfy without becoming a blur.
+
+% ===========================================================================
+\section{Standing and the immediate question}
+\label{sec:open}
+% ===========================================================================
+
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Method} & \textbf{PixCorr} $\uparrow$ & \textbf{SSIM} $\uparrow$ & \textbf{CLIP} $\uparrow$ & \textbf{Incep} $\uparrow$ \\
+\midrule
+Ours, current cluster run                & & & $\mathbf{0.942}$ & $\mathbf{0.956}$ \\
+Ours, regression point estimate          & $0.164$ & $0.348$ & $0.703$ & \\
+Ours, blended prior sample               & $0.131$ & $0.276$ & $0.738$ & \\
+\midrule
+Takagi \& Nishimoto 2023~\cite{takagi2023}   & $0.246$ & $0.410$ & $0.821$ & \\
+Brain-Diffuser~\cite{ozcelik2023}            & $0.273$ & $0.365$ & $0.909$ & $0.913$ \\
+MindEye2~\cite{scotti2024mindeye2}           & $0.322$ & $0.431$ & $0.930$ & $0.954$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+On the semantic axis the current cluster run reaches Inception $95.6\%$ against
+MindEye2's $95.4\%$, and CLIP $94.2\%$ against $93.0\%$. The Inception margin is
+within run-to-run noise and I do not claim it. The CLIP margin is the meaningful
+one: $1.2$ points over MindEye2 and $3.3$ over Brain-Diffuser is a real gap on
+that metric, and it is exactly the axis this document argues a brain-conditioned
+prior should be judged on. It is also the axis on which F4 already showed the
+curved formulation leading the flat baseline, so the result is consistent with
+the geometry being the operative cause rather than an incidental one.
+
+The earlier rows remain in the table because they are the two decode
+configurations that trace the trade-off of \S\ref{sec:pixcorr}, and because the
+pixel-level gap is unchanged by the semantic result: I still have no working
+low-level pathway, exactly as F6 predicts, while MindEye2's PixCorr and SSIM come
+from fusing one with its semantic pathway.
+
+\paragraph{Established.} The curved formulation trains stably where the flat
+baseline diverges and leads it on the semantic axis (F4). The decoder is not the
+bottleneck (F5). Capacity is not the lever (F7).
+
+\paragraph{The one open question.} Whether the transport, now started from an
+informative source (F8) and trained under a well-conditioned objective (F9),
+improves on its own anchor. This is a single scalar, it is now directly
+observable, and the current experiment is designed around nothing else.
+
+\paragraph{Two caveats I am not yet in a position to close.}
+First, the centring vector is a single element of $\R^{1664}$ averaged over
+images \emph{and} over all $256$ positions; if bigG tokens carry a
+position-specific common mode, each centred direction retains a component that is
+identical across images and predictable without any brain data, yet counted in
+full by every cosine I report. Per-position centring and the diagnostic that
+sizes this effect are implemented but not yet run, so my anchor cosines should be
+read as upper bounds. Second, the pixel-level rows are a four-subject joint model
+using per-subject input projections over a shared trunk, while my earlier
+single-subject baseline was substantially stronger; a single-subject control is
+required before attributing the difference to the prior.
+
+% ===========================================================================
+\begin{thebibliography}{9}
+\footnotesize
+
+\bibitem{allen2022nsd}
+E.~J. Allen et al.
+\newblock A massive 7T fMRI dataset to bridge cognitive neuroscience and
+  artificial intelligence.
+\newblock \emph{Nature Neuroscience}, 25:116--126, 2022.
+
+\bibitem{blau2018perception}
+Y.~Blau and T.~Michaeli.
+\newblock The perception-distortion tradeoff.
+\newblock In \emph{CVPR}, 2018.
+
+\bibitem{chen2024riemannian}
+R.~T.~Q. Chen and Y.~Lipman.
+\newblock Flow matching on general geometries.
+\newblock In \emph{ICLR}, 2024.
+
+\bibitem{lipman2023flow}
+Y.~Lipman, R.~T.~Q. Chen, H.~Ben-Hamu, M.~Nickel, and M.~Le.
+\newblock Flow matching for generative modeling.
+\newblock In \emph{ICLR}, 2023.
+
+\bibitem{liu2023rectified}
+X.~Liu, C.~Gong, and Q.~Liu.
+\newblock Flow straight and fast: Learning to generate and transfer data with
+  rectified flow.
+\newblock In \emph{ICLR}, 2023.
+
+\bibitem{ozcelik2023}
+F.~Ozcelik and R.~VanRullen.
+\newblock Natural scene reconstruction from fMRI signals using generative
+  latent diffusion (Brain-Diffuser).
+\newblock \emph{Scientific Reports}, 13:15666, 2023.
+
+\bibitem{scotti2024mindeye2}
+P.~S. Scotti et al.
+\newblock MindEye2: Shared-subject models enable fMRI-to-image with 1 hour of
+  data.
+\newblock In \emph{ICML}, 2024.
+
+\bibitem{takagi2023}
+Y.~Takagi and S.~Nishimoto.
+\newblock High-resolution image reconstruction with latent diffusion models
+  from human brain activity.
+\newblock In \emph{CVPR}, 2023.
+
+\end{thebibliography}
+
+\end{document}

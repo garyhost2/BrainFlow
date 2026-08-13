@@ -37,6 +37,10 @@ def parse_args():
                     help="[lo hi] positions in the unCLIP 'vector' slot to fill with c_cls")
     ap.add_argument("--ll-strength", type=float, default=None,
                     help="override the checkpoint's img2img strength (low-level pathway)")
+    ap.add_argument("--n-samples", type=int, default=1,
+                    help="K in the multi-sample estimator: average K independent "
+                         "transports and renormalise. K=1 is a posterior sample, "
+                         "large K approaches the posterior mean.")
     ap.add_argument("--max-images", type=int, default=982,
                     help="images PER SUBJECT (982 = the full NSD test set)")
     ap.add_argument("--eval-subjects", type=int, nargs="+", default=None,
@@ -133,7 +137,8 @@ def main():
                 continue
             take = min(batch["fmri"].shape[0], args.max_images - got)
             fmri = batch["fmri"][:take].to(device, non_blocking=True)
-            tok, cls_hat = model.predict_tokens(fmri, s, stats)
+            tok, cls_hat = model.predict_tokens(fmri, s, stats,
+                                                n_samples=args.n_samples)
             blur = model.predict_lowlevel(fmri, s)
             lat = model.predict_low_latent(fmri, s)
             bank[s]["pred"].append(decoder.decode(tok, cls_hat, init_image=blur,
@@ -198,6 +203,7 @@ def main():
             mean[k] = float(sum(vals) / len(vals))
     out = {"config": {"cond_source": args.cond_source, "cfg_scale": args.cfg_scale,
                       "steps": args.steps, "solver": args.solver,
+                      "n_samples": args.n_samples,
                       "ll_strength": cfg.ll_strength, "ckpt": args.ckpt},
            "subjects": sorted(per_subject), "per_subject": per_subject, "mean": mean}
     (out_dir / "metrics.json").write_text(json.dumps(out, indent=2))
