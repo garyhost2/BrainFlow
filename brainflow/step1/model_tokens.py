@@ -33,7 +33,7 @@ import torch.nn.functional as F
 from .model import ResMLP, SinusoidalTime
 from .sphere import (random_sphere, project_tangent, exp_map, log_map,
                      slerp, slerp_velocity, polar_encode, polar_decode,
-                     tangent_noise)
+                     tangent_noise_rad)
 
 
 def soft_clip_loss(preds: torch.Tensor, targs: torch.Tensor, temp: float) -> torch.Tensor:
@@ -140,6 +140,37 @@ class TokenStep1Config:
     # Under any anchor source, v == 0 makes the ODE the identity, so the flow
     # recovers the regression baseline exactly -- it can only refine it.
     flow_source: str = "anchor_var"
+    # --- R-XFM: WHAT the velocity field parameterises ---------------------
+    # For geodesic paths the velocity and the endpoint are exactly equivalent,
+    #     u_t = slerp_velocity(z0, z1, t) = Log_{z_t}(z1) / (1 - t),
+    # verified to 4e-8 .. 2e-6 max abs error over t in [0.1, 0.9] at d=1664. The
+    # choice is therefore purely about the LOSS GEOMETRY, and the two differ a lot:
+    #
+    #   "velocity" -- mse(v, u_t). Substituting the identity above,
+    #       ||v - u_t||^2 = ||Log_{z_t}(zhat1) - Log_{z_t}(z1)||^2 / (1 - t)^2,
+    #     i.e. endpoint error implicitly weighted by 1/(1-t)^2: 1.2x at t=0.1,
+    #     100x at t=0.9, 2500x at t=0.98. Capacity is spent where the problem is
+    #     trivial (near the target) and starved at t->0, which is exactly where
+    #     inference STARTS. Additionally ||u_t|| = theta exactly, so as the anchor
+    #     improves the whole term shrinks quadratically: measured 738x smaller than
+    #     `cos` at theta=68.3deg and 827x at theta=15deg.
+    #
+    #   "endpoint" -- the net predicts zhat1 = normalize(z_t + raw) and the loss is
+    #     1 - cos(zhat1, z1), uniform in t. Same ODE, same solver; removes the
+    #     1/(1-t)^2 misweighting, puts the flow term on the same numeric scale as
+    #     `cos`, and -- because `out` is zero-initialised -- gives zhat1 = z_t at
+    #     init, hence v == 0, hence the identity flow. The prior therefore starts
+    #     EXACTLY at the regression anchor by construction rather than by hope.
+    # "auto" resolves to "endpoint" on the sphere and "velocity" under
+    # geometry="euclidean", where the geodesic identity does not apply. Setting
+    # "endpoint" explicitly alongside a non-spherical geometry is an error rather
+    # than a silent downgrade.
+    flow_param: str = "auto"          # auto | endpoint | velocity
+
+    def resolved_flow_param(self) -> str:
+        if self.flow_param != "auto":
+            return self.flow_param
+        return "endpoint" if self.geometry == "sphere" else "velocity"
     # Posterior width, given as the EXPECTED GEODESIC DISPLACEMENT in radians of a
     # draw from its base point mu. Dimension-independent, unlike a per-coordinate
     # sigma: the two are related by sigma = jitter / sqrt(d - 1).
@@ -162,8 +193,13 @@ class TokenStep1Config:
     #   "sampled" -- scheduled sampling: run the CLS prior, no grad (accurate, slow)
     #   "none"    -- do not condition the patch prior on c_cls
     cls_cond_mode: str = "jitter"
-    cls_jitter_kappa: float = 0.02     # ~ (1 - cos(cls_hat, cls_true)) scale; set it
-                                       # from the logged cls_cos_hat_true
+    # Geodesic displacement in RADIANS applied to the true c_cls at train time.
+    # Calibrate from the logged val/cls_cos_hat_true: rad = arccos(cls_cos_hat_true).
+    # (The previous `cls_jitter_kappa=0.02` was a per-coordinate sigma, which on
+    # S^1279 realises 0.02*sqrt(1279) = 0.715 rad = 41 deg -- 36x its nominal value
+    # and comparable to the anchor's own 68 deg error, i.e. the conditioning signal
+    # was being destroyed rather than de-teacher-forced.)
+    cls_jitter_rad: float = 0.30
     cls_ss_prob: float = 0.5           # P(use the sampled estimate) in "sampled" mode
     cls_ss_steps: int = 8              # cheap solver budget for scheduled sampling
 
@@ -177,7 +213,14 @@ class TokenStep1Config:
     lambda_cos: float = 0.5       # per-token angular fidelity
     lambda_radius: float = 1.0    # radius side-model
     lambda_clip: float = 0.033    # SoftCLIP contrastive (blueprint-tuned)
-    lambda_clip_tok: float = 0.0  # token-level SoftCLIP on pooled predicted tokens
+    # Token-level SoftCLIP on the FLATTENED 256x1664 grid -- the only discriminative
+    # signal that touches what the decoder actually consumes. `lambda_clip` above
+    # acts on clip_proj(mean(brain)), a 2.4M head that is NOT on the decoder path,
+    # so without this every one of the 425,984 numbers the decoder eats is
+    # supervised by mean-seeking losses alone. NeuroFlow applies SoftCLIP directly
+    # to its flow endpoint over the flattened grid (neurovae.py:57, preds.flatten(1))
+    # and ablates it at 86.4% -> 0.3% raw retrieval.
+    lambda_clip_tok: float = 0.0
     # Wrapped-Gaussian KL, in nats per tangent dimension. Its only job is to stop
     # sigma collapsing to 0 (which would degenerate the flow into a deterministic
     # residual regressor); it is a floor, not a strong prior.
@@ -215,6 +258,19 @@ class TokenStep1Config:
     # --- geometry / centering -------------------------------------------
     geometry: str = "sphere"      # sphere (paper) | euclidean (ablation A)
     center_tokens: bool = True
+    # How the token mean subtracted before the polar split is pooled.
+    #   "global"       -- ONE R^d vector averaged over images AND all N positions
+    #                     (targets_bigg._accum_stats reshapes (-1, d) first). Every
+    #                     centred direction z_i then retains the offset common to
+    #                     position i across all images, which is content-free but
+    #                     still counted by every cosine in the repo -- so part of
+    #                     the reported anchor cos is a positional prior the flow
+    #                     cannot improve and the ranking metrics discount.
+    #   "per_position" -- one R^d vector PER position (N, d). z_i is then the
+    #                     image-specific deviation at that position, which is the
+    #                     quantity the contrastive/2-way metrics actually reward.
+    # Run scripts/check_centering.py to measure the split before choosing.
+    center_mode: str = "global"   # global | per_position
     subjects: list[int] = field(default_factory=lambda: [1])
 
 
@@ -639,6 +695,16 @@ class ClsFlowPrior(nn.Module):
 class TokenStep1Model(nn.Module):
     def __init__(self, cfg: TokenStep1Config, voxels_per_subject: dict[int, int]):
         super().__init__()
+        if cfg.flow_param not in ("auto", "endpoint", "velocity"):
+            raise ValueError(f"Unknown flow_param: {cfg.flow_param!r}")
+        if cfg.flow_param == "endpoint" and cfg.geometry != "sphere":
+            raise ValueError(
+                "flow_param='endpoint' is defined by the geodesic identity "
+                "u_t = Log_{z_t}(z1)/(1-t) and is therefore sphere-only; "
+                "use geometry='sphere' or flow_param='velocity'.")
+        self.flow_param = cfg.resolved_flow_param()
+        if cfg.center_mode not in ("global", "per_position"):
+            raise ValueError(f"Unknown center_mode: {cfg.center_mode!r}")
         self.cfg = cfg
         self.backbone = TokenBackbone(cfg, voxels_per_subject)
         self.reg_head = TokenRegHead(cfg)
@@ -660,10 +726,25 @@ class TokenStep1Model(nn.Module):
             head_cls = (LatentLowLevelHead if getattr(cfg, "ll_target", "rgb") == "latent"
                         else LowLevelHead)
             self.low_head = head_cls(cfg, voxels_per_subject)
-        self.register_buffer("tgt_mean", torch.zeros(cfg.token_dim))
+        # (d,) for center_mode="global", (N, d) for "per_position". Both broadcast
+        # against (B, N, d) in polar_encode/polar_decode.
+        self.register_buffer(
+            "tgt_mean",
+            torch.zeros(cfg.token_len, cfg.token_dim)
+            if cfg.center_mode == "per_position" else torch.zeros(cfg.token_dim))
 
     def set_target_mean(self, mean):
-        self.tgt_mean.copy_(mean.to(self.tgt_mean.device, self.tgt_mean.dtype))
+        mean = mean.to(self.tgt_mean.device, self.tgt_mean.dtype)
+        if mean.shape != self.tgt_mean.shape:
+            if self.cfg.center_mode == "per_position" and mean.dim() == 1:
+                # A global mean broadcast to every position: legal, just uninformative.
+                mean = mean.unsqueeze(0).expand_as(self.tgt_mean).contiguous()
+            else:
+                raise ValueError(
+                    f"tgt_mean shape {tuple(mean.shape)} does not match "
+                    f"center_mode={self.cfg.center_mode!r} "
+                    f"(expected {tuple(self.tgt_mean.shape)})")
+        self.tgt_mean.copy_(mean)
 
 
     # ---- anchor posterior q(z0 | fMRI) ---------------------------------
@@ -689,22 +770,66 @@ class TokenStep1Model(nn.Module):
             logs = self.logs_head(brain).float().clamp(-12.0, hi)
         return mu, logs, logr
 
-    def sample_anchor(self, mu, logs):
-        """Draw z0 ~ q on the manifold; falls back to mu when deterministic."""
-        if logs is None:
-            return mu
-        eps = torch.randn_like(mu) * logs.exp().unsqueeze(-1)
-        return exp_map(mu, project_tangent(eps, mu))
+    def sample_anchor(self, mu, logs, detach_base: bool = False):
+        """Draw z0 ~ q on the manifold; falls back to mu when deterministic.
 
-    def _flow_source(self, mu, logs, shape, device, dtype):
+        ``detach_base`` detaches the BASE POINT mu while leaving sigma's graph
+        intact. That distinction is the whole variational apparatus:
+
+        * detaching everything (the previous ``z0 = z0.detach()``) leaves the KL as
+          the ONLY gradient into ``logs_head``. Its unique minimiser is
+          sigma = sigma_p -- exactly where :class:`LogSigmaHead` is initialised --
+          so the head's gradient is identically zero at step 0 and stays there.
+          Measured: after 200 AdamW steps log-sigma moved from -3.968687 to
+          [-3.969174, -3.968141], a per-token spread of 4.2e-06. The head was a
+          constant, and ``anchor_var`` was ``anchor_det`` plus fixed jitter.
+        * detaching only mu keeps the intended asymmetry: the flow loss may not
+          shorten its own path by degrading the anchor (mu is supervised by
+          ``loss_cos``), but it CAN choose how wide a neighbourhood of mu it is
+          willing to be defined on. The flow pushes sigma down, the KL floors it,
+          and the equilibrium is the usual variational trade-off.
+        """
+        if logs is None:
+            return mu.detach() if detach_base else mu
+        base = mu.detach() if detach_base else mu
+        eps = torch.randn_like(base) * logs.exp().unsqueeze(-1)
+        return exp_map(base, project_tangent(eps, base))
+
+    def _flow_source(self, mu, logs, shape, device, dtype, detach_base: bool = False):
         src = self.cfg.flow_source
         if src == "noise":
             return random_sphere(shape, device, dtype)
         if src == "anchor_det":
-            return mu
+            return mu.detach() if detach_base else mu
         if src == "anchor_var":
-            return self.sample_anchor(mu, logs)
+            return self.sample_anchor(mu, logs, detach_base=detach_base)
         raise ValueError(f"Unknown flow_source: {src!r}")
+
+    # ---- velocity field: endpoint or velocity parameterisation ----------
+    def _prior_velocity(self, zt, t, brain, cls_emb):
+        """v(z_t, t) on the oblique manifold, tangent at ``zt``.
+
+        Under ``flow_param="endpoint"`` the net emits a residual toward the
+        predicted endpoint and the velocity follows from the exact geodesic
+        identity  u_t = Log_{z_t}(z1) / (1 - t).  ``self.prior.out`` is
+        zero-initialised, so at init zhat1 == z_t, v == 0, and the ODE is the
+        identity map -- the sampler returns the anchor unchanged.
+        """
+        raw = self.prior(zt, t, brain, cls_emb).float()
+        if self.flow_param != "endpoint":
+            return raw
+        z1_hat = F.normalize(zt.float() + raw, dim=-1)
+        # 1 - t is bounded below by 1 - t_max so the division cannot blow up at the
+        # final step; _tq applies the same clamp to the integrator's time grid.
+        one_minus_t = (1.0 - t).clamp_min(1.0 - self.cfg.t_max)
+        while one_minus_t.dim() < zt.dim():
+            one_minus_t = one_minus_t.unsqueeze(-1)
+        return log_map(zt.float(), z1_hat) / one_minus_t
+
+    def _prior_endpoint(self, zt, t, brain, cls_emb):
+        """The predicted endpoint zhat1 itself (endpoint parameterisation only)."""
+        raw = self.prior(zt, t, brain, cls_emb).float()
+        return F.normalize(zt.float() + raw, dim=-1)
 
     def _cls_cond(self, brain, cls_dir):
         """Global-direction conditioning for the patch prior at TRAIN time.
@@ -720,7 +845,8 @@ class TokenStep1Model(nn.Module):
         if mode == "teacher":
             return cls_dir
         if mode == "jitter":
-            return tangent_noise(cls_dir, self.cfg.cls_jitter_kappa)
+            # RADIANS, not a per-coordinate sigma -- see cls_jitter_rad.
+            return tangent_noise_rad(cls_dir, self.cfg.cls_jitter_rad)
         if mode == "sampled":
             if not self.training or torch.rand(()) >= self.cfg.cls_ss_prob:
                 return cls_dir
@@ -913,18 +1039,35 @@ class TokenStep1Model(nn.Module):
             sigma_p = sigma_from_jitter(cfg.anchor_jitter_rad, cfg.token_dim - 1)
             out["kl"] = wrapped_gaussian_kl(logs, sigma_p).mean()
 
-        z0 = self._flow_source(mu, logs, z1.shape, device, z1.dtype)
-        # The anchor is supervised by loss_cos; letting the flow's MSE also push
-        # on mu would let the model shorten the path by degrading the anchor.
-        z0 = z0.detach()
+        # The anchor is supervised by loss_cos; letting the flow's loss also push on
+        # mu would let the model shorten its own path by degrading the anchor. So
+        # the BASE POINT is detached -- but sigma is not, or logs_head receives no
+        # gradient at all and freezes at its initialisation (see sample_anchor).
+        z0 = self._flow_source(mu, logs, z1.shape, device, z1.dtype, detach_base=True)
 
         t = self._sample_t(B, device)
         tb = t[:, None, None]
         zt = slerp(z0, z1, tb)
-        ut = slerp_velocity(z0, z1, tb)
         brain_in, cls_in = self._patch_cond(brain, cls_dir, B, device)
-        v = project_tangent(self.prior(zt, t, brain_in, cls_in).float(), zt)
-        out["flow"] = F.mse_loss(v, ut)
+
+        if self.flow_param == "endpoint":
+            # Predict the endpoint and score it directly: uniform in t, same scale
+            # as `cos`, and zero-init => zhat1 == zt => v == 0 => identity flow.
+            z1_hat = self._prior_endpoint(zt, t, brain_in, cls_in)
+            out["flow"] = 1.0 - F.cosine_similarity(z1_hat, z1, dim=-1).mean()
+        else:
+            ut = slerp_velocity(z0, z1, tb)
+            v = project_tangent(self.prior(zt, t, brain_in, cls_in).float(), zt)
+            out["flow"] = F.mse_loss(v, ut)
+
+        # Discriminative supervision on the decoder path. `clip` above aligns a
+        # pooled 2.4M projection that the decoder never sees; this aligns the
+        # flattened 256x1664 grid it actually consumes, preserving per-position
+        # structure (NeuroFlow flattens before normalising, neurovae.py:57).
+        if cfg.lambda_clip_tok > 0:
+            out["clip_tok"] = soft_clip_loss(
+                F.normalize(mu.flatten(1), dim=-1),
+                F.normalize(z1.flatten(1), dim=-1), cfg.clip_temp)
         return out
 
     def _patch_step_euclidean(self, brain, target_std, cls_dir, B, device):
@@ -961,14 +1104,10 @@ class TokenStep1Model(nn.Module):
         else:
             out = {"clip": soft_clip_loss(b, z, cfg.clip_temp)}
 
-        # The 256x1664 patch tokens are what the decoder consumes, yet the pooled
-        # branch above never touches them. NeuroFlow's ablation puts contrastive
-        # alignment upstream of the flow, not beside it: removing it collapses raw
-        # retrieval 86.4% -> 0.3%. Align the tokens directly as well.
-        if cfg.lambda_clip_tok > 0 and target_std is not None:
-            pt = F.normalize(self.reg_head(brain).float().mean(dim=1), dim=-1)
-            tt = F.normalize(target_std.float().mean(dim=1), dim=-1)
-            out["clip_tok"] = soft_clip_loss(pt, tt, cfg.clip_temp)
+        # NOTE: the token-level SoftCLIP lives in _patch_step_sphere, where mu and
+        # the centred target z1 already exist -- computing it here would re-run
+        # reg_head and would have to mean-pool the sequence, which destroys exactly
+        # the per-position structure the term is meant to supervise.
         return out
 
     # ====================================================================
@@ -1029,9 +1168,9 @@ class TokenStep1Model(nn.Module):
 
         def vel(z, tq):
             t = torch.full((B,), tq, device=device)
-            vc = self.prior(z, t, brain, cls_hat)
+            vc = self._prior_velocity(z, t, brain, cls_hat)
             if cfg_scale != 1.0:
-                vu = self.prior(z, t, null_b, null_c)
+                vu = self._prior_velocity(z, t, null_b, null_c)
                 return vu + cfg_scale * (vc - vu)
             return vc
 
