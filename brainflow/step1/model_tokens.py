@@ -1255,14 +1255,66 @@ class TokenStep1Model(nn.Module):
         }
 
     @torch.no_grad()
+    def _draw_sample(self, brain, mu, logs, n_steps, cfg_scale, solver):
+        cls_k = None
+        if self.cfg.two_head and self.cls_prior is not None:
+            cls_k = self._sample_cls(brain, n_steps, self.cfg.cls_cfg_scale, solver)
+        z0 = (random_sphere(mu.shape, mu.device, mu.dtype)
+              if self.cfg.flow_source == "noise" else self.sample_anchor(mu, logs))
+        z = self._sample_prior_sphere(brain, cls_k, n_steps, cfg_scale, solver, z0=z0)
+        return z, cls_k
+
+    @torch.no_grad()
+    def predict_tokens_frontier(self, fmri, subject, stats, *, ks, n_steps=None,
+                                cfg_scale=None, solver=None):
+        cfg = self.cfg
+        if cfg.geometry != "sphere":
+            raise ValueError("the multi-sample frontier is defined on the sphere only")
+        ks = sorted({int(k) for k in ks if int(k) >= 1})
+        if not ks:
+            raise ValueError("ks must contain at least one positive integer")
+        n_steps = n_steps or cfg.n_steps
+        cfg_scale = cfg.cfg_scale if cfg_scale is None else cfg_scale
+        solver = solver or cfg.solver
+
+        brain = self.backbone(fmri, subject)
+        mu, logs, logr = self.anchor(brain)
+        radius = logr.exp()
+        mean = self.tgt_mean.float()
+
+        z_acc = torch.zeros_like(mu)
+        cls_acc = None
+        out: dict[int, dict] = {}
+        for k in range(1, ks[-1] + 1):
+            z_k, cls_k = self._draw_sample(brain, mu, logs, n_steps, cfg_scale, solver)
+            z_acc = z_acc + z_k
+            if cls_k is not None:
+                cls_acc = cls_k if cls_acc is None else cls_acc + cls_k
+            if k in ks:
+                bar = z_acc / k
+                resultant = bar.norm(dim=-1)
+                out[k] = {
+                    "tokens": polar_decode(F.normalize(bar, dim=-1), radius, mean),
+                    "cls": None if cls_acc is None else F.normalize(cls_acc / k, dim=-1),
+                    "resultant": resultant.mean(dim=-1),
+                }
+        out["anchor"] = {
+            "tokens": polar_decode(mu, radius, mean),
+            "cls": None if cls_acc is None else F.normalize(cls_acc / ks[-1], dim=-1),
+            "resultant": torch.ones(mu.shape[0], device=mu.device),
+        }
+        return out
+
+    @torch.no_grad()
     def predict_tokens(self, fmri, subject, stats, *, n_steps=None, cfg_scale=None,
-                       solver=None, cond_source=None):
+                       solver=None, cond_source=None, n_samples=1):
         """Return (raw_tokens[B,N,d], cls_hat[B,dcls] or None)."""
         cfg = self.cfg
         n_steps = n_steps or cfg.n_steps
         cfg_scale = cfg.cfg_scale if cfg_scale is None else cfg_scale
         solver = solver or cfg.solver
         cond_source = cond_source or cfg.cond_source
+        n_samples = max(1, int(n_samples))
         brain = self.backbone(fmri, subject)
 
         cls_hat = None
@@ -1274,12 +1326,22 @@ class TokenStep1Model(nn.Module):
             if cond_source == "regression":
                 zdir = mu
             elif cond_source == "prior":
-                zdir = self._sample_prior_sphere(brain, cls_hat, n_steps, cfg_scale,
-                                                 solver, z0=self._infer_z0(mu, logs))
+                if n_samples > 1:
+                    z_acc = torch.zeros_like(mu)
+                    cls_acc = None
+                    for _ in range(n_samples):
+                        z_k, cls_k = self._draw_sample(brain, mu, logs, n_steps,
+                                                       cfg_scale, solver)
+                        z_acc = z_acc + z_k
+                        if cls_k is not None:
+                            cls_acc = cls_k if cls_acc is None else cls_acc + cls_k
+                    zdir = F.normalize(z_acc / n_samples, dim=-1)
+                    if cls_acc is not None:
+                        cls_hat = F.normalize(cls_acc / n_samples, dim=-1)
+                else:
+                    zdir = self._sample_prior_sphere(brain, cls_hat, n_steps, cfg_scale,
+                                                     solver, z0=self._infer_z0(mu, logs))
             elif cond_source == "blend":
-                # Legacy: only meaningful for flow_source="noise", where the prior
-                # and the anchor are competing estimates. With an anchor source the
-                # flow already starts at the anchor, so blending is a no-op at best.
                 sp = self._sample_prior_sphere(brain, cls_hat, n_steps, cfg_scale, solver)
                 zdir = F.normalize(cfg.blend_w * sp + (1 - cfg.blend_w) * mu, dim=-1)
             else:
