@@ -39,7 +39,7 @@ if [ ! -f "${PRIOR}" ]; then
     exit 1
 fi
 
-SMOKE="outputs/step1c_smoke_latent/smoke.json"
+SMOKE="${SMOKE:-outputs/step1c_smoke_latent/smoke_latent.json}"
 if [ ! -f "${SMOKE}" ]; then
     echo "======================================================================"
     echo " REFUSING TO RUN: the latent smoke gate has not been recorded."
