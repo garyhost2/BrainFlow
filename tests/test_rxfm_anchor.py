@@ -70,13 +70,82 @@ def test_anchor_sample_stays_on_manifold():
 
 
 def test_logsigma_head_initialises_at_the_prior():
-    """A fresh sigma head must not inject a degenerate or huge perturbation."""
+    """A fresh sigma head must not inject a degenerate or huge perturbation.
+
+    NOTE: initialising AT the KL's minimiser is only safe because the flow loss
+    also reaches this head -- see test_logsigma_head_is_trained_by_the_flow. On
+    its own this property is what froze the head: dKL/dlogs = sigma^2/sigma_p^2 - 1
+    is exactly 0 here, so the KL alone can never move it.
+    """
     cfg = tiny_cfg(flow_source="anchor_var", anchor_jitter_rad=0.15)
     m = make(cfg)
     brain = m.backbone(batch(cfg)["fmri"], 1)
     _, logs, _ = m.anchor(brain)
     want = math.log(sigma_from_jitter(0.15, cfg.token_dim - 1))
     assert torch.allclose(logs, torch.full_like(logs, want), atol=1e-4)
+
+
+@pytest.mark.parametrize("param", ["endpoint", "velocity"])
+def test_logsigma_head_is_trained_by_the_flow(param):
+    """The flow loss must reach logs_head, or the posterior is decorative.
+
+    Regression test for the defect this branch fixes. ``z0 = z0.detach()`` left
+    ``wrapped_gaussian_kl`` as the only gradient into the head, and its unique
+    minimiser is the head's own initialisation, so every gradient was identically
+    zero: 200 AdamW steps moved log-sigma by 5e-4 and left a per-token spread of
+    4e-06. ``anchor_var`` was then just ``anchor_det`` plus fixed jitter.
+    """
+    cfg = tiny_cfg(flow_source="anchor_var", flow_param=param, lambda_kl=0.0)
+    m = make(cfg)
+    b = batch(cfg)
+    out = m.training_step(b["fmri"], 1, b["raw"], target_raw=b["raw"],
+                          target_cls=b["cls"], keep_term_graph=True)
+    params = list(m.logs_head.parameters())
+    g = torch.autograd.grad(out["flow"], params, retain_graph=True, allow_unused=True)
+    norm = math.sqrt(sum(float(x.float().pow(2).sum()) for x in g if x is not None))
+    assert norm > 0.0, "flow loss does not reach logs_head: the posterior is frozen"
+
+
+def test_logsigma_head_actually_moves_under_training():
+    """End-to-end: sigma must acquire per-token structure, not stay constant."""
+    cfg = tiny_cfg(flow_source="anchor_var", anchor_jitter_rad=0.15, lambda_kl=0.1)
+    m = make(cfg)
+    b = batch(cfg)
+    _, logs0, _ = m.anchor(m.backbone(b["fmri"], 1))
+    opt = torch.optim.AdamW(m.parameters(), lr=1e-3)
+    for _ in range(60):
+        opt.zero_grad(set_to_none=True)
+        m.training_step(b["fmri"], 1, b["raw"], target_raw=b["raw"],
+                        target_cls=b["cls"])["loss"].backward()
+        opt.step()
+    _, logs1, _ = m.anchor(m.backbone(b["fmri"], 1))
+    assert float((logs1 - logs0).abs().max()) > 1e-3, "log-sigma never moved"
+    assert float(logs1.std()) > 1e-4, "sigma stayed constant across tokens"
+
+
+def test_anchor_base_is_detached_so_the_flow_cannot_degrade_the_anchor():
+    """Sigma is trainable through the source; the base point mu is not.
+
+    The asymmetry is the point: the flow may choose how wide a neighbourhood it is
+    defined on, but it must not shorten its own path by moving the anchor, which
+    is supervised by loss_cos.
+    """
+    cfg = tiny_cfg(flow_source="anchor_var", lambda_kl=0.0, lambda_cos=0.0,
+                   lambda_clip=0.0, lambda_radius=0.0, lambda_rcfm=0.0)
+    m = make(cfg)
+    b = batch(cfg)
+    out = m.training_step(b["fmri"], 1, b["raw"], target_raw=b["raw"],
+                          target_cls=b["cls"], keep_term_graph=True)
+    reg_params = list(m.reg_head.parameters())
+    g = torch.autograd.grad(out["flow"], reg_params, retain_graph=True,
+                            allow_unused=True)
+    # reg_head still receives gradient via the DiT's cross-attention on `brain`,
+    # but NOT via z0 -- so zero the backbone path by checking the queries, which
+    # only feed the anchor.
+    gq = torch.autograd.grad(out["flow"], [m.reg_head.queries], retain_graph=True,
+                             allow_unused=True)[0]
+    assert gq is None or float(gq.abs().max()) == 0.0, \
+        "the flow loss reaches the anchor's own parameters through z0"
 
 
 @pytest.mark.parametrize("d", [64, 512, 1664])
@@ -97,21 +166,63 @@ def test_jitter_is_dimension_independent(d):
 def test_default_jitter_preserves_the_anchor_signal():
     """cos(z0, z1) ~ cos(jitter) * cos(theta): the draw must not undo the anchor.
 
-    Calibrating the jitter to the anchor error itself (theta = 68 deg at the
-    measured cos 0.37) would take cos(z0, z1) from 0.370 to 0.126 -- the source
-    would then be worse than the point it was built from. The default keeps the
-    loss under 2% relative.
+    Measured on real draws, not on the closed form -- the previous version of this
+    test asserted ``cos(j)*cos(t)/cos(t) == cos(j)``, which is an identity and
+    could not fail.
     """
-    d = 1664
+    d, N = 1664, 4
     theta = math.acos(0.37)
-    for jit, floor in ((0.15, 0.98), (1.19, 0.50)):
-        cos_z0_z1 = math.cos(jit) * math.cos(theta)
-        ratio = cos_z0_z1 / math.cos(theta)
-        assert ratio == pytest.approx(math.cos(jit), rel=1e-6)
+    torch.manual_seed(0)
+    mu = F.normalize(torch.randn(256, N, d), dim=-1)
+    g = F.normalize(torch.randn(256, N, d), dim=-1)
+    g = F.normalize(g - (g * mu).sum(-1, keepdim=True) * mu, dim=-1)
+    z1 = math.cos(theta) * mu + math.sin(theta) * g       # exactly theta from mu
+
+    cfg = tiny_cfg(flow_source="anchor_var", token_dim=d, token_len=N)
+    m = make(cfg)
+    for jit, floor in ((0.15, 0.97), (1.19, 0.55)):
+        logs = torch.full((256, N), math.log(sigma_from_jitter(jit, d - 1)))
+        z0 = m.sample_anchor(mu, logs)
+        ratio = float(F.cosine_similarity(z0, z1, dim=-1).mean()) / math.cos(theta)
+        assert ratio == pytest.approx(math.cos(jit), rel=0.05), \
+            "cos(z0,z1) should collapse to cos(jitter)*cos(theta)"
         if jit == 0.15:
             assert ratio > floor, "default jitter must be nearly free"
         else:
             assert ratio < floor, "theta-sized jitter destroys the anchor"
+
+
+@pytest.mark.parametrize("d", [512, 1280, 1664])
+def test_cls_jitter_is_in_radians_not_per_coordinate_sigma(d):
+    """The CLS knob must be an ANGLE, like anchor_jitter_rad.
+
+    ``tangent_noise(z, 0.02)`` on S^1279 displaces by 0.02*sqrt(1279) = 0.72 rad
+    (41 deg), not 0.02 -- and it scales with d, so the same config means different
+    things at different widths. That is the defect this parameterisation fixes.
+    """
+    from brainflow.step1.sphere import tangent_noise, tangent_noise_rad
+    torch.manual_seed(0)
+    z = F.normalize(torch.randn(2048, d), dim=-1)
+    rad = 0.30
+    got = float(F.cosine_similarity(z, tangent_noise_rad(z, rad), dim=-1)
+                .clamp(-1, 1).arccos().mean())
+    assert got == pytest.approx(rad, rel=0.10)
+
+    # and the raw primitive really does have the dimension-dependence claimed
+    raw = float(F.cosine_similarity(z, tangent_noise(z, 0.02), dim=-1)
+                .clamp(-1, 1).arccos().mean())
+    assert raw == pytest.approx(0.02 * math.sqrt(d - 1), rel=0.10)
+
+
+def test_cls_cond_jitter_uses_the_radian_knob():
+    """End-to-end: cls_jitter_rad must land at the requested angle."""
+    cfg = tiny_cfg(cls_dim=1280, cls_cond_mode="jitter", cls_jitter_rad=0.30)
+    m = make(cfg)
+    torch.manual_seed(0)
+    cls_dir = F.normalize(torch.randn(512, cfg.cls_dim), dim=-1)
+    got = m._cls_cond(None, cls_dir)
+    ang = float(F.cosine_similarity(cls_dir, got, dim=-1).clamp(-1, 1).arccos().mean())
+    assert ang == pytest.approx(0.30, rel=0.10)
 
 
 def test_sigma_is_capped_at_a_quarter_turn():

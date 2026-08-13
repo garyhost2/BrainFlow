@@ -219,6 +219,51 @@ def test_manifest_is_written_and_reloadable(tmp_path):
     assert blob["voxels_per_subject"]["1"] == 128
 
 
+def test_config_hash_is_stable_across_processes(tmp_path):
+    """paper_report.py groups ablation rows by config_hash, so it must be a real
+    digest. Python's builtin hash() randomises str hashing per interpreter
+    (PYTHONHASHSEED), which gave the SAME config three different hashes across
+    three processes -- every run became its own group of one.
+    """
+    import subprocess
+    import sys
+    src = (
+        "import json, hashlib;"
+        "payload={'a':1,'b':'sphere','c':[1,2]};"
+        "print(hashlib.blake2b(json.dumps(payload, sort_keys=True, default=str)"
+        ".encode(), digest_size=8).hexdigest())"
+    )
+    got = {subprocess.run([sys.executable, "-c", src], capture_output=True,
+                          text=True, check=True).stdout.strip() for _ in range(3)}
+    assert len(got) == 1, f"hash differs across processes: {got}"
+
+    cfg = tiny_cfg(flow_source="anchor_var")
+    m = make(cfg)
+
+    class A:
+        pass
+    a = A(); a.lr = 3e-4; a.subjects = [1]
+    h1 = json.loads(write_manifest(tmp_path / "r1", args=a, cfg=cfg, model=m,
+                                   voxels=VOX).read_text())["config_hash"]
+    h2 = json.loads(write_manifest(tmp_path / "r2", args=a, cfg=cfg, model=m,
+                                   voxels=VOX).read_text())["config_hash"]
+    assert h1 == h2
+    cfg2 = tiny_cfg(flow_source="anchor_det")
+    h3 = json.loads(write_manifest(tmp_path / "r3", args=a, cfg=cfg2, model=make(cfg2),
+                                   voxels=VOX).read_text())["config_hash"]
+    assert h1 != h3, "different configs must not collide"
+
+
+def test_diagnostics_expose_a_flow_aware_selection_metric():
+    """best.pt selects on val/two_way, so latent_diagnostics must provide it."""
+    cfg = tiny_cfg(flow_source="anchor_var")
+    m = make(cfg)
+    d = latent_diagnostics(m, loader(cfg), torch.device("cpu"), n_steps=2,
+                           max_batches=2, prefix="val/")
+    assert "val/two_way" in d
+    assert 0.0 <= d["val/two_way"] <= 1.0
+
+
 def test_param_report_covers_every_submodule():
     cfg = tiny_cfg(flow_source="anchor_var")
     r = param_report(make(cfg))
