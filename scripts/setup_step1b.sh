@@ -28,10 +28,15 @@ fi
 echo "▶ Installing Step-1b deps (sgm / bigG / decoder)…"
 pip install --upgrade pip
 pip install \
-  "numpy<2" "setuptools<81" scipy \
+  "numpy<2" "setuptools<81" scipy h5py \
   "open_clip_torch==2.24.0" "kornia==0.7.1" "omegaconf==2.3.0" \
   "pytorch-lightning==2.0.1" "transformers==4.40.2" "diffusers==0.27.2" \
   "torchmetrics>=1.3" einops ftfy regex "huggingface_hub==0.23.4" safetensors
+# h5py is what scripts/check_offset.py reads the raw NSD hdf5 with. It is in
+# requirements.txt but was missing from this list, so every env built by this
+# script could train (step1 reads the tensor cache, not hdf5) yet failed gate 0
+# on `ModuleNotFoundError: h5py` -- the one step gate1_rxfm.sbatch refuses to
+# start without. It is a leaf dependency; nothing here pins against it.
 # Pins that bit on Panther: torch 2.1.0 needs numpy<2 (ABI); pytorch-lightning
 # 2.0.1 needs pkg_resources, removed from setuptools>=81. transformers/diffusers
 # are PINNED (not >=): a fresh install otherwise pulls 2026-era wheels that assume
