@@ -273,6 +273,27 @@ class TokenStep1Config:
     center_mode: str = "global"   # global | per_position
     subjects: list[int] = field(default_factory=lambda: [1])
 
+    # --- cross-subject encoder -------------------------------------------
+    # False -- one full nn.Linear(V_s, enc_hidden) per subject (the original
+    #          ModuleDict). Nothing at the input stage is shared, so a second
+    #          subject adds ~V*enc_hidden fresh parameters and contributes to the
+    #          trunk only. This is what every multi-subject run before this flag
+    #          actually trained.
+    # True  -- ONE nn.Linear(max_vox, enc_hidden) seen by every subject, plus a
+    #          rank-r residual LoRA + bias per subject (SubjectResidualAdapter,
+    #          ported from models.py:BrainEncoder). Per-subject cost drops from
+    #          V*h (~30M at V=15k, h=2048) to 2*h*r + h (~67k at r=16), and the
+    #          shared map receives gradient from every subject.
+    #
+    # Caveat worth stating: NSD voxel index j is a DIFFERENT cortical location in
+    # each subject, so the shared projection is not anatomically aligned -- it has
+    # to learn a map that works under an arbitrary per-subject permutation, and
+    # the rank-r adapter is what absorbs the mismatch. If shared loses to
+    # per-subject on the same data, insufficient adapter capacity is the first
+    # thing to test (raise subject_rank), functional alignment the second.
+    shared_encoder: bool = True
+    subject_rank: int = 16        # LoRA rank of the per-subject residual
+
 
 # --------------------------------------------------------------------------
 #  Attention primitives
@@ -317,13 +338,59 @@ class CrossAttn(nn.Module):
 # --------------------------------------------------------------------------
 #  Brain encoder  E_phi : R^{V_s} -> R^{64 x 1024}
 # --------------------------------------------------------------------------
+class SubjectResidualAdapter(nn.Module):
+    """Per-subject rank-r residual on the shared hidden vector (LoRA + bias).
+
+    Ported from :class:`brainflow.models.SubjectResidualAdapter`. Zero-initialised
+    on all three tensors, so at step 0 the adapter is exactly the identity and the
+    model is the pure shared encoder -- adding a subject cannot perturb the others
+    until gradients say it should.
+    """
+
+    def __init__(self, n_subjects: int, hidden_dim: int, rank: int):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.rank = max(1, int(rank))
+        self.down = nn.Embedding(n_subjects, hidden_dim * self.rank)
+        self.up = nn.Embedding(n_subjects, self.rank * hidden_dim)
+        self.bias = nn.Embedding(n_subjects, hidden_dim)
+        nn.init.zeros_(self.down.weight)
+        nn.init.zeros_(self.up.weight)
+        nn.init.zeros_(self.bias.weight)
+
+    def forward(self, h: torch.Tensor, subject_idx: torch.Tensor) -> torch.Tensor:
+        down = self.down(subject_idx).view(-1, self.hidden_dim, self.rank)
+        up = self.up(subject_idx).view(-1, self.rank, self.hidden_dim)
+        delta = torch.bmm(torch.bmm(h.unsqueeze(1), down), up).squeeze(1)
+        return h + delta + self.bias(subject_idx)
+
+
 class TokenBackbone(nn.Module):
     def __init__(self, cfg: TokenStep1Config, voxels_per_subject: dict[int, int]):
         super().__init__()
         self.cfg = cfg
         h = cfg.enc_hidden
-        self.input_proj = nn.ModuleDict({
-            str(s): nn.Linear(v, h) for s, v in voxels_per_subject.items()})
+        self.subject_ids = sorted(int(s) for s in voxels_per_subject)
+        self.voxels_per_subject = {int(s): int(v) for s, v in voxels_per_subject.items()}
+        self.max_vox = max(self.voxels_per_subject.values())
+        self.shared_encoder = bool(getattr(cfg, "shared_encoder", False))
+
+        if self.shared_encoder:
+            # One projection for everyone; subject identity enters as a low-rank
+            # residual in hidden space rather than as its own voxel matrix.
+            self.input_proj = nn.Linear(self.max_vox, h)
+            self.subject_adapter = SubjectResidualAdapter(
+                n_subjects=len(self.subject_ids), hidden_dim=h,
+                rank=int(getattr(cfg, "subject_rank", 16)))
+            lookup = torch.full((max(self.subject_ids) + 1,), -1, dtype=torch.long)
+            for i, sid in enumerate(self.subject_ids):
+                lookup[sid] = i
+            self.register_buffer("subject_lookup", lookup, persistent=False)
+        else:
+            self.input_proj = nn.ModuleDict({
+                str(s): nn.Linear(v, h) for s, v in self.voxels_per_subject.items()})
+            self.subject_adapter = None
+
         self.stem = nn.Sequential(nn.LayerNorm(h), nn.GELU(), nn.Dropout(cfg.enc_drop))
         self.blocks = nn.ModuleList([ResMLP(h, 4, cfg.enc_drop) for _ in range(cfg.enc_blocks)])
         self.to_brain = nn.Sequential(
@@ -332,8 +399,39 @@ class TokenBackbone(nn.Module):
             nn.LayerNorm(cfg.brain_dim),
         )
 
-    def forward(self, fmri, subject: int):
-        x = self.input_proj[str(int(subject))](fmri)
+    def _subject_indices(self, subject, batch_size: int, device) -> torch.Tensor:
+        """Adapter row index per sample. Accepts a scalar (the loader's current
+        per-subject batches) or a per-sample tensor (mixed batches)."""
+        if torch.is_tensor(subject):
+            sub = subject.to(device=device, dtype=torch.long).reshape(-1)
+        else:
+            sub = torch.as_tensor([int(subject)], device=device, dtype=torch.long)
+        if sub.numel() == 1 and batch_size != 1:
+            sub = sub.expand(batch_size)
+        if sub.numel() != batch_size:
+            raise ValueError(f"expected {batch_size} subject ids, got {sub.numel()}")
+        if int(sub.max()) >= self.subject_lookup.numel() or int(sub.min()) < 0:
+            raise KeyError(f"unknown subject id(s): {sub.unique().tolist()}")
+        idx = self.subject_lookup[sub]
+        if bool((idx < 0).any()):
+            raise KeyError(f"unknown subject id(s): {sub.unique().tolist()}")
+        return idx
+
+    def forward(self, fmri, subject):
+        if self.shared_encoder:
+            # Right-pad to max_vox so every subject enters the same matrix. The
+            # padded columns are zero, so they contribute nothing to the product
+            # and receive no gradient for that subject.
+            if fmri.shape[-1] > self.max_vox:
+                raise ValueError(
+                    f"fMRI width {fmri.shape[-1]} exceeds max_vox {self.max_vox}")
+            if fmri.shape[-1] < self.max_vox:
+                fmri = F.pad(fmri, (0, self.max_vox - fmri.shape[-1]))
+            x = self.input_proj(fmri)
+            x = self.subject_adapter(
+                x, self._subject_indices(subject, fmri.shape[0], fmri.device))
+        else:
+            x = self.input_proj[str(int(subject))](fmri)
         x = self.stem(x)
         for b in self.blocks:
             x = b(x)

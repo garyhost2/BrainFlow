@@ -315,7 +315,9 @@ def test_training_step_with_mixco_trains_and_differs_from_clean():
     assert torch.isfinite(mixed["loss"]) and mixed["loss"].requires_grad
     assert not torch.allclose(mixed["clip"], clean["clip"])   # contrastive changed
     mixed["loss"].backward()
-    assert model.backbone.input_proj["1"].weight.grad is not None
+    bb = model.backbone
+    proj = bb.input_proj if bb.shared_encoder else bb.input_proj["1"]
+    assert proj.weight.grad is not None
 
 
 def test_mixco_off_by_default():
