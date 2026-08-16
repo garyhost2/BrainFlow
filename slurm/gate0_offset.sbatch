@@ -31,12 +31,15 @@ set -euo pipefail
 
 module load slurm 2>/dev/null || true
 
-VENV="${VENV:-$HOME/envs/me2}"
-if [ -f "${VENV}/bin/activate" ]; then
-    source "${VENV}/bin/activate"
-elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
-    source "$HOME/anaconda3/etc/profile.d/conda.sh"; conda activate "${ENV_NAME:-me2}"
-fi
+# Must be the SAME env as gate1_rxfm.sbatch, which this job gates. That is the
+# `brainflow` conda env, not the older `me2` venv the step1b-era scripts use:
+# me2 was built by setup_step1b.sh, which installs only what the step1 training
+# path needs, and the step1 path reads the tensor cache rather than raw NSD. So
+# check_offset -- which does read raw NSD, through h5py and webdataset -- cannot
+# run there, while every training job is unaffected.
+ENV_NAME="${ENV_NAME:-brainflow}"
+[ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ] && source "$HOME/anaconda3/etc/profile.d/conda.sh"
+conda activate "${ENV_NAME}"
 
 REPO_DIR="${REPO_DIR:-$HOME/BrainFlow}"; cd "${REPO_DIR}"
 [ -f "${REPO_DIR}/.env" ] && { set -a; source "${REPO_DIR}/.env"; set +a; }
