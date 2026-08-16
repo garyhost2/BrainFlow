@@ -114,9 +114,18 @@ esac
 
 SUBJECTS="${SUBJECTS:-1}"
 EPOCHS="${EPOCHS:-40}"
-OUT="outputs/gate1_${NAME}"
+
+# The subject set is part of the run identity, not a detail: a multi-subject arm
+# must not land on top of the single-subject one it is meant to be compared with.
+SUBJ_TAG="s$(echo ${SUBJECTS} | tr -s ' ' '-')"
+OUT="${OUT:-outputs/gate1_${NAME}_${SUBJ_TAG}}"
+if [ -e "${OUT}" ] && [ -z "${OVERWRITE:-}" ]; then
+    echo "REFUSING: ${OUT} already exists. Set OVERWRITE=1 or pass OUT=<dir>."
+    exit 1
+fi
 
 echo "── arm ${ARM_ID}: ${NAME} → ${OUT}"
+echo "   subjects: ${SUBJECTS}   epochs: ${EPOCHS}"
 echo "   ${EXTRA}"
 
 srun python -m scripts.train_step1b \

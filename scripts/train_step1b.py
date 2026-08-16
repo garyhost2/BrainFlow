@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 from pathlib import Path
 
 import torch
@@ -37,6 +38,16 @@ def parse_args():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--enc-hidden", type=int, default=2048,
                     help="backbone width; 4096 matches MindEye2 capacity")
+    ap.add_argument("--shared-encoder", dest="shared_encoder",
+                    action="store_true", default=True,
+                    help="one input projection for all subjects + a per-subject "
+                         "rank-r residual (default). Cross-subject transfer at the "
+                         "input stage; without it a second subject only feeds the trunk.")
+    ap.add_argument("--per-subject-encoder", dest="shared_encoder",
+                    action="store_false",
+                    help="legacy: a full nn.Linear(V_s, enc_hidden) per subject")
+    ap.add_argument("--subject-rank", type=int, default=16,
+                    help="LoRA rank of the per-subject residual (--shared-encoder)")
     ap.add_argument("--lambda-clip", type=float, default=0.033,
                     help="SoftCLIP contrastive weight (0 disables)")
     ap.add_argument("--clip-temp", type=float, default=0.006)
@@ -203,6 +214,66 @@ def per_position_mean(targets, subjects, token_len, token_dim, chunk=512):
     return (total / count).float()
 
 
+def _migrate_input_proj(model, state, label):
+    """Rewrite a per-subject ``input_proj`` ModuleDict into the shared layout.
+
+    Old checkpoints hold ``backbone.input_proj.<sid>.weight`` of shape
+    (h, V_sid); the shared encoder wants one ``backbone.input_proj.weight`` of
+    shape (h, max_vox). The key NAME differs, so ``strict=False`` would drop it
+    without a word and the warm start would silently begin from a random input
+    layer -- the one stage that matters most for a prior we are trying to reuse.
+
+    Only one subject's matrix can seed a shared one. Preference order:
+
+    1. the WIDEST subject that is also in this run -- column j then refers to the
+       same voxel in the checkpoint and in the data we are about to feed, so the
+       seeded weights are meaningful and not merely a warm shape;
+    2. otherwise the widest subject in the checkpoint -- voxel correspondence is
+       lost, but a trained projection is still a better starting point than noise.
+
+    Mirrors :func:`brainflow.models.migrate_input_proj`, which does the same for
+    the v5 ``brain_enc.`` prefix. Kept separate so ``step1`` does not take a
+    dependency on the legacy module for forty lines of key rewriting.
+    """
+    bb = getattr(model, "backbone", None)
+    if bb is None or not getattr(bb, "shared_encoder", False):
+        return state
+    if "backbone.input_proj.weight" in state:
+        return state                                    # already shared
+    old = {}
+    for k, v in state.items():
+        m = re.fullmatch(r"backbone\.input_proj\.(\d+)\.(weight|bias)", k)
+        if m:
+            old.setdefault(int(m.group(1)), {})[m.group(2)] = v
+    if not old:
+        return state
+    usable = sorted((s for s in old if "weight" in old[s]),
+                    key=lambda s: old[s]["weight"].shape[-1], reverse=True)
+    state = {k: v for k, v in state.items()
+             if not re.fullmatch(r"backbone\.input_proj\.\d+\.(weight|bias)", k)}
+    in_run = [s for s in usable if s in bb.voxels_per_subject]
+    sid = in_run[0] if in_run else usable[0]
+    if not in_run:
+        print(f"  [{label}] input_proj: checkpoint subjects {usable} are not in "
+              f"this run ({sorted(bb.voxels_per_subject)}); seeding from {sid} "
+              f"anyway, voxel correspondence is lost")
+    w = model.state_dict()["backbone.input_proj.weight"].clone()
+    src = old[sid]["weight"]
+    n = min(src.shape[-1], w.shape[-1])
+    if src.shape[0] != w.shape[0]:
+        print(f"  [{label}] input_proj: enc_hidden {src.shape[0]} != {w.shape[0]}; "
+              f"shared layer starts fresh")
+        return state
+    w[:, :n] = src[:, :n].to(w.dtype)
+    state["backbone.input_proj.weight"] = w
+    if "bias" in old[sid]:
+        state["backbone.input_proj.bias"] = old[sid]["bias"]
+    extra = "" if len(usable) == 1 else f" (discarded subjects {[s for s in usable if s != sid]})"
+    print(f"  [{label}] input_proj: seeded shared layer from subject {sid}, "
+          f"{n}/{w.shape[-1]} columns{extra}")
+    return state
+
+
 def _load_shape_safe(model, state, label):
     """load_state_dict(strict=False) that also drops SHAPE-mismatched entries.
 
@@ -269,6 +340,8 @@ def main():
               f"--flow-source {args.flow_source}")
 
     cfg = TokenStep1Config(subjects=args.subjects, enc_hidden=args.enc_hidden,
+                           shared_encoder=args.shared_encoder,
+                           subject_rank=args.subject_rank,
                            lambda_clip=args.lambda_clip, clip_temp=args.clip_temp,
                            geometry=args.geometry, uniform_t_prob=args.uniform_t_prob,
                            lambda_radius=args.lambda_radius, two_head=args.two_head,
@@ -299,7 +372,8 @@ def main():
         model.low_head.set_latent_stats(lat_stats["mean"], lat_stats["std"])
     if args.init_from:
         ck = torch.load(args.init_from, map_location="cpu")
-        res = _load_shape_safe(model, ck["model"], "init-from")
+        state = _migrate_input_proj(model, ck["model"], "init-from")
+        res = _load_shape_safe(model, state, "init-from")
         print(f"✓ warm-start from {args.init_from}: {len(res.missing_keys)} fresh params "
               f"(e.g. low_head), {len(res.unexpected_keys)} unexpected")
 
