@@ -15,6 +15,8 @@ from huggingface_hub import hf_hub_download
 from tqdm.auto import tqdm
 
 from .config import Config
+from .tensor_cache import (BEHAV_TO_BETAS_OFFSET,  # noqa: F401
+                            assert_tensor_cache_alignment, tensor_cache_meta)
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
 _CACHE_FORMAT_V2 = "v2_imagenet_norm"
@@ -129,7 +131,7 @@ def load_subject(subject: int, coco_h5: Path, cfg: Config) -> dict:
     with h5py.File(beta_path, "r", rdcc_nbytes=256 * 1024 * 1024) as f:
         key = list(f.keys())[0]
         n_tot, n_vox = f[key].shape
-        idx0 = np.clip(all_trial - 1, 0, n_tot - 1)
+        idx0 = np.clip(all_trial + BEHAV_TO_BETAS_OFFSET, 0, n_tot - 1)
         u, inv = np.unique(idx0, return_inverse=True)
         fmri = f[key][u][inv]
 
@@ -188,6 +190,7 @@ def build_or_load_tensors(cfg: Config) -> dict:
         if is_main():
             print(f"✓ Loading tensor cache: {cache}")
         out = torch.load(cache, map_location="cpu")
+        assert_tensor_cache_alignment(cache, out)
         if is_dist(): dist.barrier()
         return out
 
@@ -197,7 +200,8 @@ def build_or_load_tensors(cfg: Config) -> dict:
 
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     coco = dl_hf("coco_images_224_float16.hdf5", cfg.data_dir, cfg.hf_repo)
-    out = {"voxels": {}, "fmri_stats": {}}
+    out = {"voxels": {}, "fmri_stats": {},
+           "_meta": tensor_cache_meta(_git_sha())}
     for subj in tqdm(cfg.subjects, desc="Loading subjects"):
         d = load_subject(subj, coco, cfg)
         out[f"fmri_train_{subj}"] = d["fmri_train"]

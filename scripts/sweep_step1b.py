@@ -19,6 +19,7 @@ from pathlib import Path
 
 import torch
 
+from brainflow.tensor_cache import assert_tensor_cache_alignment
 from brainflow.step1.model_tokens import TokenStep1Config, TokenStep1Model
 from brainflow.step1.targets import TargetStats
 from brainflow.step1.targets_bigg import build_or_load_bigg_targets
@@ -144,7 +145,7 @@ def main():
     data_dir = Path(args.data_dir); hf_cache = data_dir / "hf_cache"
 
     model, cfg, stats, subjects, voxels = _load_model(args.ckpt, device)
-    tensors = torch.load(data_dir / args.tensor_cache, map_location="cpu")
+    tensors = assert_tensor_cache_alignment(data_dir / args.tensor_cache, torch.load(data_dir / args.tensor_cache, map_location="cpu"))
     targets = build_or_load_bigg_targets(
         tensors, subjects, args.target_dir, device, args.mindeye_src, hf_cache=hf_cache)
     bundle = build_step1_loaders(tensors, targets, subjects, batch_size=32, num_workers=8)
