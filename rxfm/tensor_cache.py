@@ -18,7 +18,13 @@ BEHAV_TO_BETAS_OFFSET = 0
 # The old cache carried no version stamp at all, so an UNSTAMPED cache is by
 # definition the misaligned one. That is why the check is equality against this
 # string rather than a >= comparison.
-TENSOR_CACHE_FORMAT = "tensors_v3_offset0"
+TENSOR_CACHE_FORMAT = "tensors_v4_offset0_fullsplit"
+
+# NSD shows each image about three times. max_train/max_test capped TRIALS while
+# being set to IMAGE counts (8859 / 982), so the test split repeat-averaged down
+# to 552 unique images and training saw roughly a third of the available trials.
+NSD_TEST_IMAGES = 982
+NSD_REPEATS_PER_IMAGE = 3
 
 
 def tensor_cache_meta(git_sha: str = "unknown") -> dict:
@@ -28,7 +34,7 @@ def tensor_cache_meta(git_sha: str = "unknown") -> dict:
 
 
 def assert_tensor_cache_alignment(cache, payload: dict) -> dict:
-    """Refuse a tensor cache built before the trial offset was corrected.
+    """Refuse a tensor cache built before the offset and split were corrected.
 
     Every entry point must call this: train_step1b and the eval/sweep/smoke
     scripts load the cache with a bare ``torch.load`` rather than through
@@ -38,10 +44,12 @@ def assert_tensor_cache_alignment(cache, payload: dict) -> dict:
     got = meta.get("format") if isinstance(meta, dict) else None
     if got != TENSOR_CACHE_FORMAT:
         raise RuntimeError(
-            f"{cache} was built with behav->betas offset -1 "
-            f"(_meta.format={got!r}, expected {TENSOR_CACHE_FORMAT!r}). Its fMRI "
-            f"is paired with the PREVIOUS trial's image: subject-1 top-1 retrieval "
-            f"0.007 against 0.131 at the correct offset, chance 0.0005. Rebuild it "
+            f"{cache} predates the current split contract "
+            f"(_meta.format={got!r}, expected {TENSOR_CACHE_FORMAT!r}). Caches built "
+            f"before this stamp are wrong in one of two ways: offset -1 paired each "
+            f"image with the PREVIOUS trial's fMRI (subject-1 top-1 retrieval 0.007 "
+            f"against 0.131), and the trial caps truncated the test split to 552 "
+            f"unique images and training to a third of its trials. Rebuild it "
             f"(force_rebuild=true). The bigG target caches derive from images only "
             f"and stay valid."
         )

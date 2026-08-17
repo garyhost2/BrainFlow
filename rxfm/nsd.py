@@ -15,8 +15,9 @@ from huggingface_hub import hf_hub_download
 from tqdm.auto import tqdm
 
 from .config import Config
-from .tensor_cache import (BEHAV_TO_BETAS_OFFSET,  # noqa: F401
-                            assert_tensor_cache_alignment, tensor_cache_meta)
+from .tensor_cache import (BEHAV_TO_BETAS_OFFSET, NSD_REPEATS_PER_IMAGE,  # noqa: F401
+                            NSD_TEST_IMAGES, assert_tensor_cache_alignment,
+                            tensor_cache_meta)
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
 _CACHE_FORMAT_V2 = "v2_imagenet_norm"
@@ -120,9 +121,15 @@ def load_subject(subject: int, coco_h5: Path, cfg: Config) -> dict:
             if "behav.npy" in sample:
                 behav[split].append(np.load(io.BytesIO(sample["behav.npy"])))
 
-    tr = np.concatenate(behav["train"])[:cfg.max_train]
-    te = (np.concatenate(behav["test"])[:cfg.max_test]
-          if behav["test"] else tr[-cfg.max_test:])
+    tr = np.concatenate(behav["train"])
+    if cfg.max_train is not None:
+        tr = tr[:cfg.max_train]
+    if behav["test"]:
+        te = np.concatenate(behav["test"])
+        if cfg.max_test is not None:
+            te = te[:cfg.max_test]
+    else:
+        te = tr[-(cfg.max_test or NSD_TEST_IMAGES * NSD_REPEATS_PER_IMAGE):]
     all_trial = np.concatenate([tr[:, 5].astype(int), te[:, 5].astype(int)])
     all_coco = np.concatenate([tr[:, 0].astype(int), te[:, 0].astype(int)])
     n_tr = len(tr)
@@ -169,6 +176,13 @@ def load_subject(subject: int, coco_h5: Path, cfg: Config) -> dict:
     imgs_test = torch.stack(avg_img_rows)
     n_after = len(fmri_test)
     print(f"  subj{subject:02d}: test trials averaged {n_before} → {n_after} unique images")
+    # Subjects 3/4/6/8 stopped short of 40 sessions and legitimately miss some of
+    # the shared 1000, so this warns rather than raises -- but a subject far below
+    # 982 with a full session count means the trial cap is truncating again.
+    if n_after != NSD_TEST_IMAGES:
+        print(f"  [warn] subj{subject:02d}: {n_after} unique test images, expected "
+              f"{NSD_TEST_IMAGES}. Foil pools and 2-way metrics are set by this "
+              f"number, so it is not comparable to a published 982-image row.")
 
     fmri_mu = fmri_train.mean(0)
     fmri_std = fmri_train.std(0).clamp(1e-6)

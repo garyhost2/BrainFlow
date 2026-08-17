@@ -19,8 +19,14 @@ class Config:
     latent_cache: str = "all_subjects_latents_v2.pt"
     subjects: List[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6, 7, 8])
     img_size: int = 256
-    max_train: int = 8859
-    max_test: int = 982
+    # These cap TRIALS, not images, and 8859/982 are image counts -- NSD shows
+    # each image ~3 times. 982 test trials repeat-average to 552 unique images,
+    # so the "full 982-image eval" scored 552 with a 552-image foil pool; 8859
+    # train trials is about a third of the ~27k a subject actually has. None
+    # means take every trial, which is the protocol. Set an int only to shrink a
+    # smoke run.
+    max_train: int | None = None
+    max_test: int | None = None
     download_threads: int = 4
     force_rebuild: bool = False
 

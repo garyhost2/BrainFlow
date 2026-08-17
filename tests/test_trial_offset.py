@@ -23,7 +23,7 @@ def test_offset_is_zero():
 
 
 def test_unstamped_cache_is_refused():
-    with pytest.raises(RuntimeError, match="offset -1"):
+    with pytest.raises(RuntimeError, match="predates the current split contract"):
         assert_tensor_cache_alignment("cache.pt", {"voxels": {}, "fmri_train_1": None})
 
 
@@ -74,3 +74,25 @@ def test_every_cache_reader_goes_through_the_guard():
                 if "assert_tensor_cache_alignment" not in line:
                     offenders.append(f"{p.name}: {line.strip()}")
     assert not offenders, "unguarded tensor-cache loads:\n" + "\n".join(offenders)
+
+
+def test_splits_are_not_capped_by_default():
+    # 8859 and 982 are IMAGE counts; the caps they were assigned to slice TRIALS,
+    # and NSD shows each image ~3 times. The old defaults gave a 552-image test
+    # split and about a third of the training trials.
+    from brainflow.config import Config
+    cfg = Config()
+    assert cfg.max_train is None
+    assert cfg.max_test is None
+
+
+def test_nsd_split_constants():
+    from brainflow.tensor_cache import NSD_TEST_IMAGES, NSD_REPEATS_PER_IMAGE
+    assert NSD_TEST_IMAGES == 982
+    assert NSD_REPEATS_PER_IMAGE == 3
+
+
+def test_a_v3_cache_is_now_refused_too():
+    # v3 fixed the offset but still carried the 552-image test split.
+    with pytest.raises(RuntimeError, match="552"):
+        assert_tensor_cache_alignment("c.pt", {"_meta": {"format": "tensors_v3_offset0"}})
