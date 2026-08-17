@@ -77,20 +77,23 @@ class SubjectSampler(Sampler):
             if self.shuffle:
                 idx = idx[torch.randperm(n, generator=g)]
             full = (n // self.bs) * self.bs
-            if full == 0:
-                if not self.drop_last:
-                    batches.append(idx.tolist())
-                continue
-            idx = idx[:full]
             for s in range(0, full, self.bs):
                 batches.append(idx[s:s + self.bs].tolist())
+            # drop_last=False must keep the ragged tail, not just the degenerate
+            # n < bs case. With n=982 and bs=32 the tail is 22 images, so every
+            # eval scored 960 of 982 -- and __len__ agreed with the truncation,
+            # so nothing ever warned.
+            if not self.drop_last and full < n:
+                batches.append(idx[full:].tolist())
         if self.shuffle:
             order = torch.randperm(len(batches), generator=g).tolist()
             batches = [batches[i] for i in order]
         yield from batches
 
     def __len__(self):
-        return sum(L // self.bs for L in self.lengths)
+        if self.drop_last:
+            return sum(L // self.bs for L in self.lengths)
+        return sum(-(-L // self.bs) for L in self.lengths)
 
 @dataclass
 class LoaderBundle:
