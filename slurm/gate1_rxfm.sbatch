@@ -35,8 +35,8 @@
 #SBATCH -J bf_gate1
 #SBATCH -o logs/gate1_%A_%a.out
 #SBATCH -e logs/gate1_%A_%a.err
-#SBATCH -p gpu-all
-#SBATCH --gres=gpu:a100_80GB:1
+#SBATCH -p gpu-A100
+#SBATCH --gres=gpu:A100_80GB:1
 #SBATCH -c 8
 #SBATCH --mem=96G
 #SBATCH -t 12:00:00
