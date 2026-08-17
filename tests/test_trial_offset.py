@@ -23,7 +23,7 @@ def test_offset_is_zero():
 
 
 def test_unstamped_cache_is_refused():
-    with pytest.raises(RuntimeError, match="offset -1"):
+    with pytest.raises(RuntimeError, match="predates the current split contract"):
         assert_tensor_cache_alignment("cache.pt", {"voxels": {}, "fmri_train_1": None})
 
 

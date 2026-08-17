@@ -34,7 +34,7 @@ def tensor_cache_meta(git_sha: str = "unknown") -> dict:
 
 
 def assert_tensor_cache_alignment(cache, payload: dict) -> dict:
-    """Refuse a tensor cache built before the trial offset was corrected.
+    """Refuse a tensor cache built before the offset and split were corrected.
 
     Every entry point must call this: train_step1b and the eval/sweep/smoke
     scripts load the cache with a bare ``torch.load`` rather than through
@@ -44,7 +44,7 @@ def assert_tensor_cache_alignment(cache, payload: dict) -> dict:
     got = meta.get("format") if isinstance(meta, dict) else None
     if got != TENSOR_CACHE_FORMAT:
         raise RuntimeError(
-            f"{cache} was built with behav->betas offset -1 "
+            f"{cache} predates the current split contract "
             f"(_meta.format={got!r}, expected {TENSOR_CACHE_FORMAT!r}). Caches built "
             f"before this stamp are wrong in one of two ways: offset -1 paired each "
             f"image with the PREVIOUS trial's fMRI (subject-1 top-1 retrieval 0.007 "
