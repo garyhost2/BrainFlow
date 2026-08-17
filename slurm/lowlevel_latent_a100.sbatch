@@ -3,6 +3,8 @@
 #SBATCH -o logs/ll_latent_%j.out
 #SBATCH -e logs/ll_latent_%j.err
 #SBATCH -p gpu-A100
+#SBATCH --account=a100_intern
+#SBATCH --qos=a100_intern
 #SBATCH --gres=gpu:A100_80GB:1
 #SBATCH -c 8
 #SBATCH --mem=96G
