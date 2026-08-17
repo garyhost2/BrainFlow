@@ -1,30 +1,3 @@
-"""Offline blurry-latent target: the low-level pathway's regression target.
-
-Four attempts at the low-level head regressed *RGB* (a blurry image), and the
-decoder then re-encoded that RGB through the VAE to get its img2img init. Every
-one failed -- the first three underfit to the per-image mean colour, the fourth
-(L1 @ 64^2, run 347830) fit the train set and overfit, with val ``blur_mse``
-rising monotonically while PixCorr stayed flat.
-
-This module supplies the alternative target: the **VAE latent of the blurred
-image**, ``E(blur(GT))`` in R^{4 x 96 x 96}, which is what the decoder actually
-consumes. Predicting it directly
-
-  * removes a lossy round-trip (head -> sigmoid RGB -> VAE encode -> latent);
-  * puts the loss in the space the diffusion model is trained on, where the VAE
-    has already discarded the high-frequency detail fMRI cannot predict, instead
-    of in pixel space where that unpredictable detail dominates the L1.
-
-Latents are cached per subject exactly like the bigG targets -- the VAE never
-runs during training. Storage is ~74 KB per image (fp16), i.e. ~2 GB per subject
-for 27k train trials, on top of the ~23 GB bigG cache.
-
-Channel statistics are accumulated on the TRAIN split only and used to
-standardise the regression target; ``encode_first_stage`` already applies the
-model's ``scale_factor``, so the stored latents are in the same space the
-sampler expects for ``init_latent``.
-"""
-
 from __future__ import annotations
 
 import gc
@@ -42,7 +15,6 @@ def _subj_file(cache_dir: Path, subj: int, ll_size: int) -> Path:
 
 @torch.no_grad()
 def _encode_split(decoder, imgs, ll_size: int, bs: int = 8) -> torch.Tensor:
-    """Blur -> VAE-encode a stack of images, in chunks (768^2 encodes are heavy)."""
     out = []
     for i in tqdm(range(0, len(imgs), bs), desc=f"blur{ll_size}->latent", leave=False):
         z = decoder.encode_blurry(imgs[i:i + bs], ll_size=ll_size)
@@ -51,7 +23,6 @@ def _encode_split(decoder, imgs, ll_size: int, bs: int = 8) -> torch.Tensor:
 
 
 def _accum_stats(lat_fp16, chunk: int = 512):
-    """Per-channel mean/std over the train split (N,4,96,96) in float64."""
     cnt = 0
     s = torch.zeros(LATENT_C, dtype=torch.float64)
     sq = torch.zeros(LATENT_C, dtype=torch.float64)
@@ -65,11 +36,6 @@ def _accum_stats(lat_fp16, chunk: int = 512):
 
 def build_or_load_latent_targets(tensors, subjects, cache_dir, decoder,
                                  ll_size: int = 64, force_rebuild: bool = False):
-    """Return ``{lat_train_{s}, lat_test_{s}, _lat_stats}``; build any missing cache.
-
-    ``decoder`` is an :class:`SDXLUnCLIPDecoder` -- required only when a cache is
-    missing. Pass ``None`` to load-or-fail without holding the VAE in memory.
-    """
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     out = {}

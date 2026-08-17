@@ -11,21 +11,6 @@
 #SBATCH --mem=200G
 #SBATCH -t 3-00:00:00
 
-# ONE ARM of the paper's controlled experiment, end to end:
-#   stage 1  train
-#   stage 2  full per-subject eval with all 8 NSD metrics + 300-way retrieval
-#   stage 3  operating-point sweep (the PixCorr <-> CLIP trade) with grids
-#
-# Every arm must differ in EXACTLY ONE factor, so everything except GEOMETRY /
-# ARM_EXTRA / SEED is fixed here rather than passed in. Launch the pair:
-#
-#   ARM=sphere GEOMETRY=sphere sbatch slurm/paper_arm.sbatch
-#   ARM=euclid GEOMETRY=euclidean sbatch slurm/paper_arm.sbatch
-#
-# then aggregate both with:  python -m scripts.report
-#
-# Other knobs: SUBJECTS, SEED, EPOCHS, EVAL_SUBJECTS, ARM_EXTRA, SELECT.
-
 set -euo pipefail
 
 module load slurm 2>/dev/null || true
@@ -52,13 +37,11 @@ UNCLIP_CKPT="${UNCLIP_CKPT:-third_party/unclip6_epoch0_step110000.ckpt}"
 DATA_DIR="${DATA_DIR:-./mindeyev2_cache}"
 TARGET_DIR="${TARGET_DIR:-${DATA_DIR}}"
 
-# ---- the controlled factor -------------------------------------------------
 GEOMETRY="${GEOMETRY:-sphere}"
 ARM="${ARM:-${GEOMETRY}}"
 SEED="${SEED:-0}"
 ARM_EXTRA="${ARM_EXTRA:-}"
 
-# ---- held fixed across arms (do NOT vary these per arm) --------------------
 SUBJECTS="${SUBJECTS:-1 2 5 7}"
 EPOCHS="${EPOCHS:-150}"
 BATCH="${BATCH:-48}"
@@ -67,7 +50,6 @@ ENC_HIDDEN="${ENC_HIDDEN:-2048}"
 VAL_FRAC="${VAL_FRAC:-0.1}"
 EVAL_N="${EVAL_N:-64}"
 
-# ---- reporting -------------------------------------------------------------
 OUT="${OUT:-outputs/paper_${ARM}_s${SEED}}"
 EVAL_SUBJECTS="${EVAL_SUBJECTS:-1}"     # per-subject eval is ~1.2 h EACH
 FULL_EVAL_N="${FULL_EVAL_N:-982}"

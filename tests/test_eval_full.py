@@ -1,9 +1,3 @@
-"""Tests for the eval_full harness.
-
-Runs evaluate_full on tiny random CPU tensors — no GPU, dataset, or checkpoint
-required.  Only PixCorr and SSIM are exercised (all network-dependent metrics
-are skipped).
-"""
 from __future__ import annotations
 import os
 import sys
@@ -40,17 +34,15 @@ class TestEvaluateFullOffline:
         result = evaluate_full(pred, target, device="cpu", skip=_SKIP)
         for name, val in result.items():
             assert isinstance(val, float), f"{name} is not a float"
-            assert val == val, f"{name} is NaN"  # NaN != NaN
+            assert val == val, f"{name} is NaN"
             assert abs(val) < 1e9, f"{name}={val} suspiciously large"
 
     def test_pixcorr_identical_images(self):
-        """PixCorr should be ~1.0 when pred == target."""
         x = torch.rand(4, 3, 64, 64)
         result = evaluate_full(x, x.clone(), device="cpu", skip=_SKIP)
         assert result["PixCorr"] > 0.99
 
     def test_ssim_identical_images(self):
-        """SSIM should be ~1.0 when pred == target."""
         x = torch.rand(4, 3, 64, 64)
         result = evaluate_full(x, x.clone(), device="cpu", skip=_SKIP)
         assert result["SSIM"] > 0.99
@@ -70,7 +62,6 @@ class TestEvaluateFullOffline:
 
 
 class TestSelfTestScript:
-    """End-to-end test of the --self-test CLI path."""
 
     def test_self_test_exits_zero(self):
         import subprocess
@@ -78,8 +69,6 @@ class TestSelfTestScript:
             [sys.executable, "-m", "scripts.eval_full", "--self-test"],
             capture_output=True, text=True,
             cwd=str(Path(__file__).resolve().parent.parent),
-            # The script prints non-ASCII; a cp1252 console (Windows) would raise
-            # UnicodeEncodeError on the print, not on anything being measured.
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
         assert result.returncode == 0, (
@@ -92,8 +81,6 @@ class TestSelfTestScript:
             [sys.executable, "-m", "scripts.eval_full", "--self-test"],
             capture_output=True, text=True,
             cwd=str(Path(__file__).resolve().parent.parent),
-            # The script prints non-ASCII; a cp1252 console (Windows) would raise
-            # UnicodeEncodeError on the print, not on anything being measured.
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
         assert "PixCorr" in result.stdout
@@ -138,7 +125,6 @@ class TestEvaluateFullTwoWayKeys:
 
 
 class TestCorrelationDistance:
-    """EffNet-B / SwAV are DISTANCES in the NSD tables: lower = better."""
 
     def test_identical_features_are_zero(self):
         x = torch.randn(16, 64)
@@ -157,7 +143,6 @@ class TestCorrelationDistance:
         assert correlation_distance(close, target) < correlation_distance(far, target)
 
     def test_evaluate_full_reports_effnet_as_distance(self, monkeypatch):
-        """A perfect reconstruction must give EffNet-B ~0, not ~1."""
         def _pair(pred, target, device):
             x = torch.randn(pred.shape[0], 32)
             return x, x.clone()
@@ -180,7 +165,6 @@ class TestSSIMGrayscale:
         assert ssim_grayscale(torch.rand(4, 3, 64, 64), torch.rand(4, 3, 64, 64)) < 0.2
 
     def test_valid_window_not_zero_padded(self):
-        """A uniform image pair scores 1.0; zero-padded borders would drag it down."""
         x = torch.full((2, 3, 32, 32), 0.7)
         assert ssim_grayscale(x, x.clone()) == pytest.approx(1.0, abs=1e-4)
 
@@ -196,11 +180,10 @@ class TestRetrieval:
         torch.manual_seed(0)
         r = retrieval_metrics(torch.randn(300, 128), torch.randn(300, 128),
                               batch_size=300)
-        assert r["retrieval_fwd"] < 0.05          # chance = 1/300
+        assert r["retrieval_fwd"] < 0.05
         assert r["retrieval_bwd"] < 0.05
 
     def test_drops_short_trailing_pool(self):
-        """982 images at pool=300 must score 3 pools of 300, not 3 + a soft 82."""
         emb = torch.randn(982, 64)
         r = retrieval_metrics(emb, emb.clone(), batch_size=300)
         assert r["retrieval_pools"] == 3 and r["retrieval_pool"] == 300
@@ -218,7 +201,7 @@ class TestComparisonTable:
         table = format_comparison(metrics)
         assert "**ours**" in table and "MindEye2" in table
         assert "0.164" in table
-        assert "--" in table          # AlexNet columns are absent -> placeholder
+        assert "--" in table
 
 
 if __name__ == "__main__":

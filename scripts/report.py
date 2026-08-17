@@ -1,22 +1,3 @@
-"""Collect every scored run under outputs/ into the paper's tables.
-
-Walks ``outputs/**/metrics.json`` (from ``eval_step1b``) and ``outputs/**/sweep.json``
-(from ``sweep_step1b``) and emits:
-
-  1. **the leaderboard table** -- our best row per run next to the published NSD
-     numbers, in the units the tables actually use (AlexNet/Inception/CLIP are
-     2-way accuracies, EffNet-B/SwAV are correlation distances, lower better);
-  2. **the ablation table** -- runs paired by whatever differs in their name, so
-     sphere-vs-euclidean and mixco-vs-baseline read off directly;
-  3. **the operating-point curve** -- every (cond_source, cfg_scale, blend_w)
-     config of a sweep, which is the PixCorr<->CLIP trade the paper has to be
-     honest about, since no single point is good at both ends.
-
-Runs entirely on files already on disk -- no GPU, no model, no decoder.
-
-    python -m scripts.report --root outputs --out outputs/paper
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -26,14 +7,11 @@ from pathlib import Path
 
 from rxfm.metrics import NSD_REFERENCE, LOWER_IS_BETTER
 
-# The report is UTF-8 (arrows mark metric direction). Don't let a cp1252 console
-# turn a finished report into a traceback -- the file is written either way.
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except (AttributeError, ValueError):
     pass
 
-# The columns the NSD tables report, in their order.
 COLS = ["PixCorr", "SSIM", "AlexNet(2)_2way", "AlexNet(5)_2way",
         "Inception_2way", "CLIP_2way", "EffNet-B", "SwAV"]
 EXTRA = ["retrieval_fwd", "retrieval_bwd"]
@@ -64,14 +42,12 @@ def _table(rows, cols, first_col="run"):
 
 
 def load_runs(root: Path):
-    """Return ``{run_name: {"headline": metrics, "source": path, "rows": [...]}}``."""
     runs = {}
     for mf in sorted(root.rglob("metrics.json")):
         try:
             blob = json.loads(mf.read_text())
         except (json.JSONDecodeError, OSError):
             continue
-        # eval_step1b writes {"mean": ..., "per_subject": ...}; older files were flat.
         m = blob.get("mean", blob)
         if "PixCorr" not in m:
             continue
@@ -104,7 +80,6 @@ def main():
     if not runs:
         raise SystemExit(f"no metrics.json / sweep.json with a PixCorr under {root}/")
 
-    # Headline per run: the eval's mean row, else the sweep's best row by --rank-by.
     best = {}
     for name, r in runs.items():
         cand = r.get("headline")
@@ -127,7 +102,6 @@ def main():
     lines += ["### retrieval (300-way, on the predicted embedding)", "",
               _table([(f"**{n}**", d) for n, d in ranked], EXTRA), ""]
 
-    # Gap to the strongest published baseline, per metric, for the best run.
     if ranked:
         top_name, top = ranked[0]
         me2 = NSD_REFERENCE["MindEye2 (1 subj, 40h)"]
@@ -146,8 +120,6 @@ def main():
                          f"{me2[c]:.3f} | {gap:+.3f} |")
         lines.append("")
 
-    # Ablation: runs sharing a prefix differ by exactly one factor most of the time,
-    # so print them adjacent rather than guessing the pairing.
     lines += ["## 3. All runs (ablation view)", "",
               _table([(n, d) for n, d in sorted(best.items())], COLS), ""]
 
@@ -165,7 +137,6 @@ def main():
             tbl.append((label, x))
         lines += [_table(tbl, COLS + EXTRA, first_col="config"), ""]
 
-    # Per-subject spread, when a run scored more than one.
     multi = {n: r for n, r in runs.items() if len(r.get("per_subject", {})) > 1}
     if multi:
         lines += ["## 5. Per-subject", ""]

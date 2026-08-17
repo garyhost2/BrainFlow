@@ -1,9 +1,3 @@
-"""Blurry-latent target cache -> loader -> training step, offline.
-
-No GPU, no VAE, no dataset: the cache blob is fabricated in the exact format
-:func:`build_or_load_latent_targets` writes, so a silent break in the format or
-the loader wiring is caught here rather than on the cluster an hour into a job.
-"""
 from __future__ import annotations
 
 import sys
@@ -82,11 +76,6 @@ class TestLatentCache:
             build_or_load_latent_targets(tensors, [1], cache_dir, decoder=None)
 
     def test_blur_levels_do_not_collide(self, cache_dir):
-        """A cache blurred at 64 must not be picked up for a 128 run.
-
-        Each blur level gets its own filename, so the 128 request simply finds
-        nothing -- it must not silently reuse the 64 blob.
-        """
         _write_cache(cache_dir, ll_size=64)
         tensors, _ = _fake_data()
         with pytest.raises(FileNotFoundError):
@@ -96,11 +85,10 @@ class TestLatentCache:
                                             ll_size=64)["_lat_stats"]["ll_size"] == 64
 
     def test_contradictory_inner_ll_size_is_refused(self, cache_dir):
-        """Defends against a hand-copied/renamed cache whose contents disagree."""
         _write_cache(cache_dir, ll_size=64)
         fp = _subj_file(cache_dir, 1, 64)
         blob = torch.load(str(fp), map_location="cpu")
-        blob["ll_size"] = 128                      # filename says 64, contents say 128
+        blob["ll_size"] = 128
         torch.save(blob, fp)
         tensors, _ = _fake_data()
         with pytest.raises(ValueError, match="ll_size"):
@@ -121,7 +109,6 @@ class TestLoaderWiring:
             assert batch["lat"].shape[1:] == (4, 96, 96)
 
     def test_no_lat_key_when_cache_absent(self):
-        """Every existing rgb/prior-only run must keep working untouched."""
         tensors, targets = _fake_data()
         bundle = build_step1_loaders(tensors, targets, [1], batch_size=4, num_workers=0)
         assert "lat" not in next(iter(bundle.train))
@@ -139,12 +126,6 @@ class TestTrainingStep:
         assert abs(z.mean().item()) < 0.2
 
     def test_untrained_l1_sits_at_the_predict_the_mean_line(self, cache_dir):
-        """The head is zero-init, so `low` starts at E|N(0,1)| = 0.798.
-
-        That makes the logged number self-calibrating: below ~0.798 the head has
-        learned something, at 0.798 it is predicting the channel mean. The RGB
-        runs needed an external reference (blur_mse ~0.07) to see this.
-        """
         _write_cache(cache_dir)
         tensors, targets = _fake_data()
         targets |= build_or_load_latent_targets(tensors, [1], cache_dir, decoder=None)

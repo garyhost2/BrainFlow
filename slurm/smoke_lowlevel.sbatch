@@ -11,11 +11,6 @@
 #SBATCH --mem=120G
 #SBATCH -t 00:40:00
 
-# Calibrate the low-level img2img strength: decode GT tokens + GT-blurry init across
-# strengths and report PixCorr/SSIM/CLIP. Tells you the best --ll-strength + confirms
-# the img2img code path works on the real engine.
-# Usage:  SUBJECT=1 N=16 sbatch slurm/smoke_lowlevel.sbatch
-
 set -euo pipefail
 
 module load slurm 2>/dev/null || true

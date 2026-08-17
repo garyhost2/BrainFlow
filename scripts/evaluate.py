@@ -78,8 +78,6 @@ def main():
     subjects = ckpt["subjects"]; voxels = ckpt["voxels"]
 
     model = TokenStep1Model(cfg, voxels)
-    # Non-strict: a prior-only checkpoint (trained before the low head) lacks
-    # low_head.* weights -> drop the untrained head so decode is token-only.
     res = model.load_state_dict(ckpt["model"], strict=False)
     if any("low_head" in k for k in res.missing_keys):
         model.low_head = None
@@ -118,11 +116,6 @@ def main():
     print(f"▶ scoring subjects {want} separately, ≤{args.max_images} images each "
           f"(~1.2 h per subject at 982). Checkpoint covers {subjects}.")
 
-    # Collect per subject. Scoring subjects separately is not just cosmetic: 2-way
-    # identification and retrieval draw their foils from the scored set, so pooling
-    # subjects would put the SAME image (seen by someone else) in the foil pool and
-    # deflate both. It is also the only way the numbers line up with the
-    # single-subject rows in the published tables.
     bank: dict[int, dict[str, list]] = {s: {"pred": [], "gt": [], "tp": [], "tg": []}
                                         for s in want}
     with torch.no_grad():
@@ -147,14 +140,10 @@ def main():
                                                   strength=cfg.ll_strength))
             bank[s]["gt"].append(batch["image"][:take])
             if args.retrieval:
-                # Retrieval runs on the predicted embedding, not on pixels. Park it
-                # on CPU in fp16: 982 x 256 x 1664 is ~0.8 GB per side in fp16.
                 bank[s]["tp"].append(tok.detach().to("cpu", torch.float16))
                 bank[s]["tg"].append(batch["emb"][:take].to("cpu", torch.float16))
 
     def _score(pred, gt, tp, tg):
-        # Legacy keys keep the pre-2026-08 definitions so every historical run
-        # stays comparable; the unprefixed keys are the NSD-convention ones.
         m = {"n": int(pred.shape[0]),
              "legacy_PixCorr": pixcorr(pred, gt), "legacy_SSIM": ssim(pred, gt)}
         m.update({f"legacy_{k}": v for k, v in clip_metric.score(pred, gt).items()})
@@ -192,9 +181,6 @@ def main():
     if not per_subject:
         raise SystemExit("no subject produced any images")
 
-    # Mean over subjects, which is how the published tables aggregate. Averaged
-    # only over subjects that actually reported a key (SwAV can be skipped if the
-    # torch.hub download fails), so one missing metric cannot silently bias it.
     keys = [k for k, v in next(iter(per_subject.values())).items()
             if isinstance(v, (int, float))]
     mean = {}

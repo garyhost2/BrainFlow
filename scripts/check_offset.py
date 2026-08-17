@@ -1,32 +1,3 @@
-"""Gate 0: decide the behav->betas trial offset from the data itself.
-
-``rxfm/data.py`` indexes the betas HDF5 with ``all_trial - 1`` while indexing
-the COCO image HDF5 with ``all_coco`` unshifted. MindEye2's ``dataset_creation``
-notebook defines behav column 5 as::
-
-    "global_trial": (int(behav.iloc[jj]['SESSION']) - 1) * 750 + jj      # 5
-
-``jj`` is a positional ``.iloc`` index and ``SESSION - 1`` zeroes the session
-offset, so column 5 is 0-based and MindEye2 consumes it unshifted
-(``voxels[...][behav[:, 0, 5].long()]``). That implies our ``-1`` pairs the fMRI
-of trial *t-1* with the image of trial *t*.
-
-Rather than argue from source, this script measures it. For each candidate offset
-we fit a ridge from voxels to the frozen bigG CLS embedding on a train split and
-score top-1 retrieval on a held-out split. The correct pairing must win, and by a
-wide margin -- a one-trial shift destroys the tightly stimulus-locked component of
-the signal while leaving slow global state partly intact, so the *gap* is the
-evidence, not the absolute number.
-
-Runs on CPU in a few minutes and needs no training. It is wired into
-``tests/test_trial_offset.py`` so a regression cannot land silently.
-
-Usage::
-
-    python -m scripts.check_offset --subject 1
-    python -m scripts.check_offset --subject 1 --offsets 0 -1 --alpha 1e4
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -38,7 +9,6 @@ import numpy as np
 import torch
 import webdataset as wds
 
-# Chance top-1 within a pool of `n_eval` candidates; anything near this is noise.
 _MIN_SHARDS_TRAIN = 64
 _MIN_SHARDS_TEST = 8
 
@@ -61,7 +31,6 @@ def parse_args():
 
 
 def load_behav(data_dir: Path, subject: int) -> np.ndarray:
-    """Concatenated behav rows for the TRAIN shards of one subject."""
     s = f"0{subject}"
     rows = []
     for i in range(_MIN_SHARDS_TRAIN):
@@ -77,7 +46,6 @@ def load_behav(data_dir: Path, subject: int) -> np.ndarray:
 
 
 def ridge_fit(X: np.ndarray, Y: np.ndarray, alpha: float) -> np.ndarray:
-    """Closed-form ridge in whichever space is smaller (dual when n < d)."""
     n, d = X.shape
     if n >= d:
         A = X.T @ X + alpha * np.eye(d, dtype=X.dtype)
@@ -88,23 +56,15 @@ def ridge_fit(X: np.ndarray, Y: np.ndarray, alpha: float) -> np.ndarray:
 
 def score_offset(betas_path: Path, coco_cls: torch.Tensor, behav: np.ndarray,
                  target_idx: np.ndarray, offset: int, args) -> dict:
-    """Fit voxels -> bigG CLS under one offset, report held-out cos and top-1."""
     trial = behav[:, 5].astype(int)
 
     with h5py.File(betas_path, "r", rdcc_nbytes=256 * 1024 * 1024) as f:
         key = list(f.keys())[0]
         n_tot, _ = f[key].shape
         idx = np.clip(trial + offset, 0, n_tot - 1)
-        # Read the unique rows once, then expand -- h5py cannot fancy-index dups.
         u, inv = np.unique(idx, return_inverse=True)
         X = f[key][u][inv].astype(np.float32)
 
-    # ``coco_cls`` is cls_train, which targets_bigg builds from imgs_train -- one
-    # row PER TRIAL, already image-aligned. It must therefore be indexed by ROW.
-    # Indexing it with behav[:, 0] (the 73k COCO id, range 0..72999) against an
-    # array of length n ~ 25k clipped roughly two thirds of all trials onto the
-    # same final row, giving both offsets a near-chance score and making the test
-    # structurally unable to decide anything.
     Y = coco_cls[target_idx].float().numpy()
 
     n = len(X)
@@ -113,7 +73,6 @@ def score_offset(betas_path: Path, coco_cls: torch.Tensor, behav: np.ndarray,
     Xtr, Ytr = X[:n_train], Y[:n_train]
     Xte, Yte = X[-n_eval:], Y[-n_eval:]
 
-    # Standardise voxels on TRAIN statistics only.
     mu = Xtr.mean(0, keepdims=True)
     sd = Xtr.std(0, keepdims=True).clip(1e-6)
     Xtr = (Xtr - mu) / sd
@@ -139,9 +98,6 @@ def main():
     if not betas.exists():
         raise SystemExit(f"missing {betas}; run the data prep first")
 
-    # bigG CLS per 73k COCO id. Reuse the step1b target cache when present so this
-    # stays a CPU job; otherwise fall back to the raw image hdf5 is NOT attempted
-    # (that would need the embedder and a GPU).
     cache = Path(args.target_dir) / f"step1b_bigg_s{args.subject}.pt"
     if not cache.exists():
         raise SystemExit(
@@ -150,12 +106,10 @@ def main():
     blob = torch.load(str(cache), map_location="cpu", mmap=True)
 
     behav = load_behav(data_dir, args.subject)
-    # The cache is ordered like the train split, so align lengths defensively.
     cls_train = blob["cls_train"]
     n = min(len(behav), len(cls_train))
     behav = behav[:n]
 
-    # Index CLS by row (already image-aligned in the cache) rather than by COCO id.
     coco_cls = cls_train[:n]
     behav_idx = np.arange(n)
 
@@ -188,8 +142,6 @@ def main():
     if best["offset"] != -1:
         print("\n   rxfm/data.py:132 currently uses `all_trial - 1`. "
               f"This says it should be `all_trial + {best['offset']}`.")
-    # Machine-readable verdict: train_arms.sbatch greps for this line, so an
-    # inconclusive run can no longer unblock the ablation just by existing.
     print(f"\nGATE0: verdict={'CONCLUSIVE' if conclusive else 'INCONCLUSIVE'} "
           f"offset={best['offset']:+d} top1={best['top1']:.4f} "
           f"chance={best['chance']:.4f}")

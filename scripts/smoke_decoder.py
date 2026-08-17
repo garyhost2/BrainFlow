@@ -41,15 +41,12 @@ def main():
                                 cls_vector_slot=tuple(args.cls_vector_slot))
 
     print("▶ Decoding from GT tokens (unclip6 conditions on the 256x1664 crossattn)…")
-    recon = decoder.decode(tokens, cls)   # cls injected only if the decoder has a slot
+    recon = decoder.decode(tokens, cls)
 
     gt = (imgs.float() / 255.0).clamp(0, 1)
     if gt.shape[-1] != recon.shape[-1]:
         gt = torch.nn.functional.interpolate(gt, recon.shape[-1], mode="bilinear", align_corners=False)
 
-    # DECODER CEILING: PixCorr/SSIM with PERFECT (ground-truth) tokens. This is the
-    # best the current pure-unCLIP decoder can reach; the gap from here to ~1.0 is the
-    # structural headroom only a low-level / img2img init pathway can unlock.
     pc, ss = pixcorr(recon, gt), ssim(recon, gt)
     print(f"▶ Decoder ceiling (GROUND-TRUTH tokens): PixCorr={pc:.4f}  SSIM={ss:.4f}")
     print(f"  Full-run eval was PixCorr=0.077 SSIM=0.207 — compare to this ceiling.")

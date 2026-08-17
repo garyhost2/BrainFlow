@@ -11,10 +11,6 @@
 #SBATCH --mem=120G
 #SBATCH -t 06:00:00
 
-# Sampling-calibration sweep on a trained checkpoint: finds the PixCorr-optimal
-# and CLIP-optimal (cond_source, cfg_scale) without retraining.
-# Usage:  CKPT=outputs/step1c_sphere/last.pt sbatch slurm/sweep.sbatch
-
 set -euo pipefail
 
 module load slurm 2>/dev/null || true
@@ -41,16 +37,9 @@ CKPT="${CKPT:-outputs/step1c_sphere/last.pt}"
 DATA_DIR="${DATA_DIR:-./mindeyev2_cache}"
 TARGET_DIR="${TARGET_DIR:-${DATA_DIR}}"
 N_IMAGES="${N_IMAGES:-200}"
-# Widen the grid without editing code, e.g.:
-#   COND_SOURCES="regression blend prior" CFG_SCALES="1.0 1.5 2.0 3.0" N_IMAGES=982 ...
 COND_SOURCES="${COND_SOURCES:-regression prior}"
 CFG_SCALES="${CFG_SCALES:-1.0 3.0}"
-# blend_w was hardcoded at 0.5 until 2026-08 and never swept; it is the direct
-# PixCorr <-> CLIP dial (1.0 = pure prior, 0.0 = pure regression).
 BLEND_WS="${BLEND_WS:-0.5}"
-# Budget: ~1.2 h per config at N_IMAGES=982 against the 6 h wall limit -> <=4 configs.
-# OUT_DIR defaults next to the checkpoint; set it to keep two sweeps of the same
-# run from overwriting each other.
 OUT_DIR="${OUT_DIR:-$(dirname "${CKPT}")/sweep}"
 
 python -u -m scripts.sweep \

@@ -1,24 +1,3 @@
-"""Diagnostics that answer "is the architecture working?" without a decode pass.
-
-The expensive NSD table (``metrics_full.evaluate_full``) needs a diffusion pass per
-image, so it can only run every few evals. Everything here is latent-space only and
-costs seconds, which means it can run at *every* eval on *both* the train and val
-splits -- and the train/val gap per signal is what tells you whether a plateau is
-underfitting or overfitting.
-
-The load-bearing number is :func:`flow_delta_cos`.
-
-    delta_cos = cos(z_T, z1) - cos(z_0, z1)
-
-The flow transports an anchor ``z_0`` onto the target manifold. ``delta_cos`` is
-the angular fidelity it *adds* over its own starting point. If it is <= 0 the flow
-is dead weight regardless of what the decoded metrics say, and no amount of
-decode-side sweeping will fix that. Under the legacy ``flow_source="noise"`` the
-anchor is a uniform sample on S^{d-1}, so ``cos(z_0, z1) ~ 0`` and ``delta_cos``
-degenerates to ``flow_cos`` -- which is exactly why the regression baseline could
-quietly beat the prior without anything in the logs saying so.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -33,23 +12,12 @@ import torch
 import torch.nn.functional as F
 
 
-# ---------------------------------------------------------------------------
-#  Latent-space diagnostics
-# ---------------------------------------------------------------------------
 def _cos(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Mean cosine over the token axis, per batch element."""
     return F.cosine_similarity(a.float(), b.float(), dim=-1).mean(dim=-1)
 
 
 @torch.no_grad()
 def effective_rank(x: torch.Tensor, energy: float = 0.99, max_rows: int = 512) -> float:
-    """Singular directions holding ``energy`` of the centred variance.
-
-    Detects *dimensional* collapse: predictions that vary along only a handful of
-    directions. It does NOT detect mean collapse -- centring a constant-plus-noise
-    batch leaves isotropic noise, which is full rank. Use :func:`dispersion` for
-    that, and log both.
-    """
     f = x.float().flatten(1)
     if f.shape[0] > max_rows:
         f = f[:max_rows]
@@ -67,16 +35,6 @@ def effective_rank(x: torch.Tensor, energy: float = 0.99, max_rows: int = 512) -
 
 @torch.no_grad()
 def dispersion(x: torch.Tensor, max_rows: int = 512) -> float:
-    """RMS deviation from the batch mean, relative to the RMS norm. In [0, 1].
-
-    This is the collapse that has actually bitten this project: four low-level
-    heads plateaued at "predict the mean colour", which scores a respectable
-    per-sample cosine (every target is close to the dataset mean) while carrying
-    no per-image information at all. Effective rank misses it; this does not.
-
-    ~1.0 means predictions are as spread out as their own magnitude allows;
-    values approaching 0 mean every input maps to the same output.
-    """
     f = x.float().flatten(1)
     if f.shape[0] > max_rows:
         f = f[:max_rows]
@@ -90,11 +48,6 @@ def dispersion(x: torch.Tensor, max_rows: int = 512) -> float:
 def latent_diagnostics(model, loader, device, *, n_steps: int = 20,
                        solver: str = "heun", max_batches: int | None = None,
                        prefix: str = "") -> dict[str, float]:
-    """Anchor / flow / retrieval / collapse diagnostics on one loader.
-
-    Returns a flat dict of floats, prefixed with ``prefix`` (e.g. ``"val/"``), so
-    the caller can log train and val side by side and diff them.
-    """
     core = model.module if hasattr(model, "module") else model
     was_training = core.training
     core.eval()
@@ -128,7 +81,6 @@ def latent_diagnostics(model, loader, device, *, n_steps: int = 20,
             sig_mean.append(float(s.mean())); sig_min.append(float(s.min()))
             sig_max.append(float(s.max()))
 
-        # Retrieval is computed on the *flow output* (the thing the decoder eats).
         pred_pool.append(diag["z_flow"].flatten(1).half().cpu())
         targ_pool.append(F.normalize(tgt, dim=-1).flatten(1).half().cpu())
         seen += fmri.shape[0]
@@ -143,7 +95,6 @@ def latent_diagnostics(model, loader, device, *, n_steps: int = 20,
         "anchor_cos": float(a.mean()),
         "anchor_theta_deg": float(torch.rad2deg(a.clamp(-1, 1).arccos()).mean()),
         "flow_cos": float(f_.mean()),
-        # THE metric: what the flow adds over its own starting point.
         "delta_cos": float((f_ - a).mean()),
         "delta_cos_win_rate": float((f_ > a).float().mean()),
     }
@@ -165,10 +116,6 @@ def latent_diagnostics(model, loader, device, *, n_steps: int = 20,
     out["retr_fwd_300"] = r["retrieval_fwd"]
     out["retr_bwd_300"] = r["retrieval_bwd"]
     out["retr_pools"] = float(r["retrieval_pools"])
-    # Two-way identification on the flow output. This is a PAIRWISE ranking
-    # statistic, the same family as the deployed CLIP-2way / Inception-2way, and
-    # unlike `sel_cos` it is computed on what the decoder receives (z_flow) rather
-    # than on the anchor. Diffusion-free, so it can drive checkpoint selection.
     out["two_way"] = two_way_identification(P.float(), T.float())
     out["eff_rank"] = effective_rank(P)
     out["dispersion"] = dispersion(P)
@@ -178,11 +125,6 @@ def latent_diagnostics(model, loader, device, *, n_steps: int = 20,
 
 
 def train_val_gap(train_d: dict, val_d: dict) -> dict[str, float]:
-    """``gap/<k> = train - val`` for every key both splits share.
-
-    Run 347831 overfit from the first eval and the only visible symptom was a
-    single falling scalar. Per-signal gaps say *which* head is memorising.
-    """
     out = {}
     for k, v in train_d.items():
         base = k.split("/", 1)[-1]
@@ -192,9 +134,6 @@ def train_val_gap(train_d: dict, val_d: dict) -> dict[str, float]:
     return out
 
 
-# ---------------------------------------------------------------------------
-#  Per-term gradient norms
-# ---------------------------------------------------------------------------
 @torch.no_grad()
 def _global_norm(grads) -> float:
     tot = 0.0
@@ -205,27 +144,6 @@ def _global_norm(grads) -> float:
 
 
 def grad_norms(terms: dict[str, torch.Tensor], params) -> dict[str, float]:
-    """Gradient norm each loss term contributes, measured not guessed.
-
-    Loss *weights* are uninterpretable when the terms have different natural
-    scales. Concretely, in the sphere branch ``loss_reg = mse(reg_dir, z1)`` and
-    ``loss_cos = 1 - cos(reg_dir, z1)`` are the same objective: for unit vectors
-    ``||a-b||^2 = 2 - 2<a,b>`` and ``F.mse_loss`` also averages over the trailing
-    axis, so ``loss_reg = loss_cos * 2/d = loss_cos / 832`` at d=1664. A lambda
-    sweep over ``lambda_reg`` therefore measures nothing. This function makes that
-    class of mistake impossible to miss.
-
-    Costs one backward pass per term, so call it every N steps, not every step.
-
-    Requires ``training_step(..., keep_term_graph=True)``: terms are detached on
-    the hot path and a detached term reports nothing.
-
-    ``retain_graph=True`` on *every* probe, including the last, so the caller can
-    still run ``loss.backward()`` afterwards. Freeing on the final term would make
-    the training step raise "backward through the graph a second time" on exactly
-    the steps where the probe fires. ``torch.autograd.grad`` does not accumulate
-    into ``.grad``, so no ``zero_grad`` is needed around this call.
-    """
     params = [p for p in params if p.requires_grad]
     out = {}
     items = [(k, v) for k, v in terms.items()
@@ -236,9 +154,6 @@ def grad_norms(terms: dict[str, torch.Tensor], params) -> dict[str, float]:
     return out
 
 
-# ---------------------------------------------------------------------------
-#  Run manifest
-# ---------------------------------------------------------------------------
 def _git_sha() -> str:
     try:
         return subprocess.check_output(
@@ -256,7 +171,6 @@ def _git_dirty() -> bool:
 
 
 def param_report(model) -> dict[str, float]:
-    """Trainable parameter count per top-level submodule, in millions."""
     core = model.module if hasattr(model, "module") else model
     out, seen = {}, set()
     for name, mod in core.named_children():
@@ -270,11 +184,6 @@ def param_report(model) -> dict[str, float]:
 
 def write_manifest(out_dir: Path, *, args, cfg, model, voxels: dict,
                    extra: dict | None = None) -> Path:
-    """Everything needed to reproduce and to key an ablation row on.
-
-    ``paper_report.py`` groups runs by ``config_hash``; a run without a manifest
-    cannot be placed in the ablation table.
-    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg_d = asdict(cfg) if is_dataclass(cfg) else dict(cfg)
@@ -290,10 +199,6 @@ def write_manifest(out_dir: Path, *, args, cfg, model, voxels: dict,
         "torch": torch.__version__,
         "gpu": (torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"),
     }
-    # blake2b, NOT the builtin hash(): PYTHONHASHSEED randomises str hashing per
-    # process, so two runs of the SAME config produced different config_hash values
-    # (measured: 338608003484 / 701515998413 / 248274948484 for one config across
-    # three interpreters) and paper_report.py could never group an ablation row.
     payload["config_hash"] = hashlib.blake2b(
         json.dumps(payload["config"], sort_keys=True, default=str).encode(),
         digest_size=8).hexdigest()

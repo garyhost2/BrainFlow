@@ -1,9 +1,3 @@
-"""The aggregator that produces the paper's tables, exercised on fixtures.
-
-This is the script whose output would go into a submission, so the things worth
-pinning are the ones a reader could be misled by: metric direction, which row
-is called best, and per-subject vs pooled aggregation.
-"""
 from __future__ import annotations
 
 import json
@@ -76,7 +70,6 @@ class TestPaperReport:
         assert "Best run by PixCorr" in md
 
     def test_gap_is_negative_when_worse_in_both_directions(self, tree):
-        """EffNet-B is lower-better; being worse there must still read negative."""
         md, _ = _run(tree)
         gap = md.split("## 2. Gap to MindEye2")[1].split("## ")[0]
         for line in gap.splitlines():

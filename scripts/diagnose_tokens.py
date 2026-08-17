@@ -1,23 +1,3 @@
-"""Adjudicate the oblique-manifold bet on REAL bigG tokens (Baggag's objection).
-
-The sphere thesis rests on two empirical claims the paper makes about the *patch*
-tokens (which are NOT natively normalized -- they live in flat R^1664):
-
-  (1) after centering by the train mean mu, the per-token radius r_i = ||x_i - mu||
-      is nearly constant (paper: sd(R)/E[R] ~ 1/sqrt(2d) ~ 1.7%), so peeling it
-      into a light per-token side-head loses ~nothing;
-  (2) the directions z_i = (x_i - mu)/r_i are well-spread on the sphere
-      (cos(z_i, z_j) ~ 0, sd ~ 1/sqrt(d)), so geodesic transport is well-conditioned.
-
-If (1) fails -- radius spread is large AND not explained by token position -- then
-peeling the radius ADDS an error source the joint Euclidean head (ECFM) avoids, and
-Baggag is right to prefer ECFM. This script measures both, read-only, on the cached
-``step1b_bigg_s{N}.pt`` tokens. No GPU, no rebuild.
-
-Run (login node):
-    python -m scripts.diagnose_tokens --target-dir ./mindeyev2_cache --subject 1
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -35,7 +15,7 @@ def _load(target_dir: Path, subject: int):
         raise FileNotFoundError(f"{fp} not found. Build targets first (train/eval/smoke).")
     blob = torch.load(str(fp), map_location="cpu", mmap=True)
     a = blob["accum"]
-    mu = (a["sum"].double() / int(a["count"])).float()          # train-only mean (centering)
+    mu = (a["sum"].double() / int(a["count"])).float()
     return blob, mu
 
 
@@ -43,28 +23,24 @@ def _sample(emb, n_images, seed=0):
     g = torch.Generator().manual_seed(seed)
     N = emb.shape[0]
     idx = torch.randperm(N, generator=g)[:min(n_images, N)]
-    return emb[idx].float()                                      # (n, 256, 1664)
+    return emb[idx].float()
 
 
 def _radius_stats(x, mu):
-    """Centered & uncentered radius distribution + position variance decomposition."""
     n, T, d = x.shape
     cen = x - mu
-    r = cen.norm(dim=-1)                                         # (n, T) centered radii
-    r_un = x.norm(dim=-1)                                        # (n, T) uncentered radii
+    r = cen.norm(dim=-1)
+    r_un = x.norm(dim=-1)
 
     flat = r.reshape(-1)
     rel = (flat.std() / flat.mean()).item()
     rel_un = (r_un.std() / r_un.mean()).item()
 
-    # variance decomposition: how much of var(r) is explained by token POSITION
-    # (a per-token head trivially captures positional scale; residual is the hard part)
-    per_pos_mean = r.mean(dim=0)                                 # (T,) mean radius per position
-    between = ((per_pos_mean - flat.mean()) ** 2).mean().item()  # between-position var
+    per_pos_mean = r.mean(dim=0)
+    between = ((per_pos_mean - flat.mean()) ** 2).mean().item()
     total = flat.var(unbiased=False).item()
-    frac_pos = between / max(total, 1e-12)                       # in [0,1]
+    frac_pos = between / max(total, 1e-12)
 
-    # residual relative spread AFTER removing the per-position mean (what the head must still model)
     resid = (r - per_pos_mean[None, :])
     rel_resid = (resid.std() / flat.mean()).item()
     return {
@@ -75,7 +51,6 @@ def _radius_stats(x, mu):
 
 
 def _angle_stats(x, mu, n_pairs=200_000, seed=0):
-    """cos(z_i, z_j) for random within-image token pairs: centered vs uncentered."""
     g = torch.Generator().manual_seed(seed)
     n, T, d = x.shape
     cen = torch.nn.functional.normalize(x - mu, dim=-1)

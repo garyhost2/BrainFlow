@@ -1,12 +1,3 @@
-"""R-XFM: the anchor posterior, the flow source, and the identity-flow bound.
-
-The property that makes this change safe to spend cluster time on is the last
-test here: with ``v == 0`` the ODE is the identity, so a flow started at the
-regression anchor reproduces the anchor exactly. The prior can therefore only
-refine ``cond_source="regression"``, never lose to it -- which is what the
-step1c geometry did (blend PixCorr 0.131 < regression 0.164).
-"""
-
 from __future__ import annotations
 
 import math
@@ -24,7 +15,6 @@ VOX = {1: 128, 2: 96}
 
 
 def tiny_cfg(**kw) -> TokenStep1Config:
-    """A model small enough to run on CPU but structurally identical."""
     base = dict(
         token_len=8, token_dim=32, cls_dim=16, brain_dim=32, n_brain_tokens=4,
         enc_hidden=64, enc_blocks=1, reg_depth=1, reg_heads=2, radius_depth=1,
@@ -52,9 +42,6 @@ def batch(cfg, B=6, subject=1):
     }
 
 
-# ---------------------------------------------------------------------------
-#  Anchor posterior
-# ---------------------------------------------------------------------------
 def test_anchor_sample_stays_on_manifold():
     cfg = tiny_cfg(flow_source="anchor_var")
     m = make(cfg)
@@ -70,13 +57,6 @@ def test_anchor_sample_stays_on_manifold():
 
 
 def test_logsigma_head_initialises_at_the_prior():
-    """A fresh sigma head must not inject a degenerate or huge perturbation.
-
-    NOTE: initialising AT the KL's minimiser is only safe because the flow loss
-    also reaches this head -- see test_logsigma_head_is_trained_by_the_flow. On
-    its own this property is what froze the head: dKL/dlogs = sigma^2/sigma_p^2 - 1
-    is exactly 0 here, so the KL alone can never move it.
-    """
     cfg = tiny_cfg(flow_source="anchor_var", anchor_jitter_rad=0.15)
     m = make(cfg)
     brain = m.backbone(batch(cfg)["fmri"], 1)
@@ -87,14 +67,6 @@ def test_logsigma_head_initialises_at_the_prior():
 
 @pytest.mark.parametrize("param", ["endpoint", "velocity"])
 def test_logsigma_head_is_trained_by_the_flow(param):
-    """The flow loss must reach logs_head, or the posterior is decorative.
-
-    Regression test for the defect this branch fixes. ``z0 = z0.detach()`` left
-    ``wrapped_gaussian_kl`` as the only gradient into the head, and its unique
-    minimiser is the head's own initialisation, so every gradient was identically
-    zero: 200 AdamW steps moved log-sigma by 5e-4 and left a per-token spread of
-    4e-06. ``anchor_var`` was then just ``anchor_det`` plus fixed jitter.
-    """
     cfg = tiny_cfg(flow_source="anchor_var", flow_param=param, lambda_kl=0.0)
     m = make(cfg)
     b = batch(cfg)
@@ -107,7 +79,6 @@ def test_logsigma_head_is_trained_by_the_flow(param):
 
 
 def test_logsigma_head_actually_moves_under_training():
-    """End-to-end: sigma must acquire per-token structure, not stay constant."""
     cfg = tiny_cfg(flow_source="anchor_var", anchor_jitter_rad=0.15, lambda_kl=0.1)
     m = make(cfg)
     b = batch(cfg)
@@ -124,12 +95,6 @@ def test_logsigma_head_actually_moves_under_training():
 
 
 def test_anchor_base_is_detached_so_the_flow_cannot_degrade_the_anchor():
-    """Sigma is trainable through the source; the base point mu is not.
-
-    The asymmetry is the point: the flow may choose how wide a neighbourhood it is
-    defined on, but it must not shorten its own path by moving the anchor, which
-    is supervised by loss_cos.
-    """
     cfg = tiny_cfg(flow_source="anchor_var", lambda_kl=0.0, lambda_cos=0.0,
                    lambda_clip=0.0, lambda_radius=0.0, lambda_rcfm=0.0)
     m = make(cfg)
@@ -139,9 +104,6 @@ def test_anchor_base_is_detached_so_the_flow_cannot_degrade_the_anchor():
     reg_params = list(m.reg_head.parameters())
     g = torch.autograd.grad(out["flow"], reg_params, retain_graph=True,
                             allow_unused=True)
-    # reg_head still receives gradient via the DiT's cross-attention on `brain`,
-    # but NOT via z0 -- so zero the backbone path by checking the queries, which
-    # only feed the anchor.
     gq = torch.autograd.grad(out["flow"], [m.reg_head.queries], retain_graph=True,
                              allow_unused=True)[0]
     assert gq is None or float(gq.abs().max()) == 0.0, \
@@ -150,9 +112,6 @@ def test_anchor_base_is_detached_so_the_flow_cannot_degrade_the_anchor():
 
 @pytest.mark.parametrize("d", [64, 512, 1664])
 def test_jitter_is_dimension_independent(d):
-    """The knob is a geodesic angle, so the realised displacement must not
-    depend on the token width -- a per-coordinate sigma would not have this
-    property and would silently blow up at d=1664."""
     jit = 0.20
     cfg = tiny_cfg(flow_source="anchor_var", token_dim=d, anchor_jitter_rad=jit)
     m = make(cfg)
@@ -164,19 +123,13 @@ def test_jitter_is_dimension_independent(d):
 
 
 def test_default_jitter_preserves_the_anchor_signal():
-    """cos(z0, z1) ~ cos(jitter) * cos(theta): the draw must not undo the anchor.
-
-    Measured on real draws, not on the closed form -- the previous version of this
-    test asserted ``cos(j)*cos(t)/cos(t) == cos(j)``, which is an identity and
-    could not fail.
-    """
     d, N = 1664, 4
     theta = math.acos(0.37)
     torch.manual_seed(0)
     mu = F.normalize(torch.randn(256, N, d), dim=-1)
     g = F.normalize(torch.randn(256, N, d), dim=-1)
     g = F.normalize(g - (g * mu).sum(-1, keepdim=True) * mu, dim=-1)
-    z1 = math.cos(theta) * mu + math.sin(theta) * g       # exactly theta from mu
+    z1 = math.cos(theta) * mu + math.sin(theta) * g
 
     cfg = tiny_cfg(flow_source="anchor_var", token_dim=d, token_len=N)
     m = make(cfg)
@@ -194,12 +147,6 @@ def test_default_jitter_preserves_the_anchor_signal():
 
 @pytest.mark.parametrize("d", [512, 1280, 1664])
 def test_cls_jitter_is_in_radians_not_per_coordinate_sigma(d):
-    """The CLS knob must be an ANGLE, like anchor_jitter_rad.
-
-    ``tangent_noise(z, 0.02)`` on S^1279 displaces by 0.02*sqrt(1279) = 0.72 rad
-    (41 deg), not 0.02 -- and it scales with d, so the same config means different
-    things at different widths. That is the defect this parameterisation fixes.
-    """
     from rxfm.sphere import tangent_noise, tangent_noise_rad
     torch.manual_seed(0)
     z = F.normalize(torch.randn(2048, d), dim=-1)
@@ -208,14 +155,12 @@ def test_cls_jitter_is_in_radians_not_per_coordinate_sigma(d):
                 .clamp(-1, 1).arccos().mean())
     assert got == pytest.approx(rad, rel=0.10)
 
-    # and the raw primitive really does have the dimension-dependence claimed
     raw = float(F.cosine_similarity(z, tangent_noise(z, 0.02), dim=-1)
                 .clamp(-1, 1).arccos().mean())
     assert raw == pytest.approx(0.02 * math.sqrt(d - 1), rel=0.10)
 
 
 def test_cls_cond_jitter_uses_the_radian_knob():
-    """End-to-end: cls_jitter_rad must land at the requested angle."""
     cfg = tiny_cfg(cls_dim=1280, cls_cond_mode="jitter", cls_jitter_rad=0.30)
     m = make(cfg)
     torch.manual_seed(0)
@@ -226,10 +171,9 @@ def test_cls_cond_jitter_uses_the_radian_knob():
 
 
 def test_sigma_is_capped_at_a_quarter_turn():
-    """A learned sigma must not be able to erase the anchor it is centred on."""
     cfg = tiny_cfg(flow_source="anchor_var")
     m = make(cfg)
-    with torch.no_grad():                       # force the head hard positive
+    with torch.no_grad():
         m.logs_head.out[-1].bias.fill_(50.0)
     brain = m.backbone(batch(cfg)["fmri"], 1)
     _, logs, _ = m.anchor(brain)
@@ -239,7 +183,6 @@ def test_sigma_is_capped_at_a_quarter_turn():
 
 
 def test_deterministic_source_has_no_sigma_head():
-    """Checkpoint compatibility: non-variational arms keep the step1c state_dict."""
     for src in ("noise", "anchor_det"):
         m = make(tiny_cfg(flow_source=src))
         assert m.logs_head is None
@@ -261,15 +204,7 @@ def test_kl_matches_the_closed_form_gaussian():
     assert got == pytest.approx(want, rel=1e-6)
 
 
-# ---------------------------------------------------------------------------
-#  Flow source
-# ---------------------------------------------------------------------------
 def test_noise_source_is_uninformative_and_anchor_source_is_not():
-    """The whole argument for the change, as an assertion.
-
-    On a d-sphere two random unit vectors are near-orthogonal, so the legacy
-    source starts ~90 deg from the target regardless of the fMRI.
-    """
     cfg = tiny_cfg(flow_source="anchor_var", token_dim=512)
     m = make(cfg)
     b = batch(cfg)
@@ -281,9 +216,7 @@ def test_noise_source_is_uninformative_and_anchor_source_is_not():
     truly_noise = make(tiny_cfg(flow_source="noise", token_dim=512))
     zn = truly_noise._flow_source(mu, None, z1.shape, z1.device, z1.dtype)
 
-    # Legacy source: uninformative, ~90 deg from the target whatever the fMRI.
     assert abs(float(F.cosine_similarity(zn, z1, dim=-1).mean())) < 0.15
-    # Anchor source: inside a small geodesic ball around mu.
     angle = float(F.cosine_similarity(drawn, mu, dim=-1).detach().clamp(-1, 1).arccos().mean())
     assert angle == pytest.approx(cfg.anchor_jitter_rad, rel=0.2)
 
@@ -301,13 +234,9 @@ def test_anchor_var_draw_is_stochastic_but_centred():
                                      dim=-1).mean()) > 0.99
 
 
-# ---------------------------------------------------------------------------
-#  The identity-flow bound  (the reason this is a safe experiment)
-# ---------------------------------------------------------------------------
 def test_zero_velocity_reproduces_the_anchor_exactly():
     cfg = tiny_cfg(flow_source="anchor_det", two_head=False, cfg_scale=1.0)
     m = make(cfg).eval()
-    # The prior's output layer is zero-initialised, so v == 0 out of the box.
     b = batch(cfg)
     brain = m.backbone(b["fmri"], 1)
     mu, logs, _ = m.anchor(brain)
@@ -317,7 +246,6 @@ def test_zero_velocity_reproduces_the_anchor_exactly():
 
 
 def test_prior_cond_source_matches_regression_at_init():
-    """`prior` >= `regression` by construction at initialisation."""
     cfg = tiny_cfg(flow_source="anchor_det", two_head=False, cfg_scale=1.0)
     m = make(cfg).eval()
     b = batch(cfg)
@@ -326,9 +254,6 @@ def test_prior_cond_source_matches_regression_at_init():
     assert torch.allclose(reg, pri, atol=1e-4)
 
 
-# ---------------------------------------------------------------------------
-#  Geodesic consistency of the interpolant used by the loss
-# ---------------------------------------------------------------------------
 def test_slerp_velocity_is_the_derivative_of_slerp():
     torch.manual_seed(0)
     z0 = F.normalize(torch.randn(4, 64).double(), dim=-1)
@@ -351,9 +276,6 @@ def test_slerp_velocity_is_tangent_and_has_norm_theta():
     assert torch.allclose(ut.norm(dim=-1), theta, atol=1e-8)
 
 
-# ---------------------------------------------------------------------------
-#  Training step wiring
-# ---------------------------------------------------------------------------
 @pytest.mark.parametrize("src", ["noise", "anchor_det", "anchor_var"])
 def test_training_step_runs_and_backprops(src):
     cfg = tiny_cfg(flow_source=src, lambda_clip_tok=0.1)
@@ -370,14 +292,12 @@ def test_training_step_runs_and_backprops(src):
 
 
 def test_lambda_reg_is_excluded_by_default():
-    """`reg` and `cos` are the same objective; reg must not silently double-count."""
     cfg = tiny_cfg(flow_source="anchor_det")
     assert cfg.lambda_reg == 0.0
     m = make(cfg)
     b = batch(cfg)
     out = m.training_step(b["fmri"], 1, target_std=b["raw"], target_raw=b["raw"],
                           target_cls=b["cls"])
-    # Documented identity: mse(a,b) == (2/d) * (1 - cos(a,b)) for unit vectors.
     assert float(out["reg"]) == pytest.approx(
         float(out["cos"]) * 2.0 / cfg.token_dim, rel=1e-4)
 

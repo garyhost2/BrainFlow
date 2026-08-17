@@ -15,7 +15,7 @@ from huggingface_hub import hf_hub_download
 from tqdm.auto import tqdm
 
 from .config import Config
-from .tensor_cache import (BEHAV_TO_BETAS_OFFSET, NSD_REPEATS_PER_IMAGE,  # noqa: F401
+from .tensor_cache import (BEHAV_TO_BETAS_OFFSET, NSD_REPEATS_PER_IMAGE,
                             NSD_TEST_IMAGES, assert_tensor_cache_alignment,
                             tensor_cache_meta)
 
@@ -176,9 +176,6 @@ def load_subject(subject: int, coco_h5: Path, cfg: Config) -> dict:
     imgs_test = torch.stack(avg_img_rows)
     n_after = len(fmri_test)
     print(f"  subj{subject:02d}: test trials averaged {n_before} → {n_after} unique images")
-    # Subjects 3/4/6/8 stopped short of 40 sessions and legitimately miss some of
-    # the shared 1000, so this warns rather than raises -- but a subject far below
-    # 982 with a full session count means the trial cap is truncating again.
     if n_after != NSD_TEST_IMAGES:
         print(f"  [warn] subj{subject:02d}: {n_after} unique test images, expected "
               f"{NSD_TEST_IMAGES}. Foil pools and 2-way metrics are set by this "

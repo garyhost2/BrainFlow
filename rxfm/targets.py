@@ -1,20 +1,3 @@
-"""Offline bigG target extraction: the *structured* (CLS + patch) target.
-
-Each image is passed once through the frozen OpenCLIP ViT-bigG/14 embedder in
-token-output mode (``output_tokens=True, only_tokens=False``), yielding both
-objects of the structured factorisation (paper Stage 2a):
-
-  * the pooled, projected **class embedding** ``c_cls`` in R^{1280} -- the global
-    direction fed to the unCLIP decoder's pooled slot and the SoftCLIP anchor;
-  * the **penultimate patch-token sequence** ``X`` in R^{256 x 1664} -- the
-    cross-attention context the patch prior transports on the oblique manifold.
-
-The per-channel token mean/std (``TargetStats``) are accumulated on the *training
-split only* (no test leakage); they standardise the Euclidean baseline and centre
-the polar decomposition (``mu`` = the token mean). The CLS directions need no
-statistics -- they are unit-normalised at use.
-"""
-
 from __future__ import annotations
 
 import gc
@@ -48,7 +31,7 @@ def _load_embedder(device, mindeye_src: Path):
     from generative_models.sgm.modules.encoders.modules import FrozenOpenCLIPImageEmbedder
     emb = FrozenOpenCLIPImageEmbedder(
         arch="ViT-bigG-14", version="laion2b_s39b_b160k",
-        output_tokens=True, only_tokens=False,   # <- keep BOTH cls and tokens
+        output_tokens=True, only_tokens=False,
     )
     emb = emb.eval().to(device)
     for p in emb.parameters():
@@ -57,11 +40,6 @@ def _load_embedder(device, mindeye_src: Path):
 
 
 def _split_outputs(out):
-    """Return (cls[B,1280], tokens[B,256,1664]) from the embedder output.
-
-    sgm returns ``(pooled, tokens)`` when ``output_tokens=True``; we identify the
-    members by rank rather than position so the order cannot silently flip.
-    """
     if not isinstance(out, (tuple, list)) or len(out) < 2:
         raise RuntimeError(
             "bigG embedder must return (pooled, tokens); construct it with "
@@ -117,7 +95,6 @@ def build_or_load_bigg_targets(tensors, subjects, cache_dir, device, mindeye_src
         fp = _subj_file(cache_dir, s)
         have = fp.exists() and not force_rebuild
         if have:
-            # A pre-existing token-only cache lacks the CLS; trigger a rebuild.
             keys = torch.load(str(fp), map_location="cpu", mmap=True).keys()
             have = "cls_train" in keys
         if not have:

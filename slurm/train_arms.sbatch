@@ -1,37 +1,4 @@
 #!/bin/bash -l
-# ─────────────────────────────────────────────────────────────────────────────
-# Gate 1 — does R-XFM beat the anchor it starts from?
-#
-#   sbatch --array=0-3 slurm/train_arms.sbatch
-#
-# Four arms on subject 1, pilot length. The question is single and cheap:
-# does the flow ADD anything over its own starting point?
-#
-#   A0  noise        legacy step1c. z0 ~ Uniform(S^1663): ~90 deg from every
-#                    target, carries no fMRI information. Velocity param + CFG,
-#                    i.e. the exact configuration step1c ran.
-#   A1  anchor_det   z0 = the regression anchor mu, velocity parameterisation.
-#                    Isolates the SOURCE change from the PARAMETERISATION change.
-#   A2  anchor_var   A1 + the variational source (learned per-token sigma, KL
-#                    floor) + endpoint parameterisation.
-#   A3  anchor_var   A2 + the rest of tier 1: token-level SoftCLIP on the
-#                    flattened 256x1664 grid, cls conditioning de-teacher-forced
-#                    in radians, per-position centring.
-#
-# A1 vs A2 is the only pair that isolates flow_param, so do not read A0->A3 as a
-# single ladder.
-#
-# PASS: val/delta_cos > 0.03 for A2 or A3, AND decoded PixCorr >= the
-#       regression baseline (0.164 on the full 982).
-# FAIL: fall back to A1 -- still bounded below by regression, because v == 0 is
-#       the identity flow. If A1 is also flat, the DiT is under-trained rather
-#       than the paradigm being wrong: cut prior_depth and raise lambda_flow
-#       before touching anything else.
-#
-# Watch `Dcos=` in the per-epoch line. It is signed. Negative means the prior is
-# actively hurting, which is what step1c was doing unlogged. `2way=` is the
-# checkpoint-selection signal and is computed on the flow output, not the anchor.
-# ─────────────────────────────────────────────────────────────────────────────
 #SBATCH -J bf_gate1
 #SBATCH -o logs/gate1_%A_%a.out
 #SBATCH -e logs/gate1_%A_%a.err
@@ -62,8 +29,6 @@ mkdir -p logs outputs
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# ── Preflight: Gate 0 must have been answered ────────────────────────────────
-# Every ablation below is uninterpretable if the fMRI<->image pairing is shifted.
 if [ ! -f "outputs/gate0_offset.txt" ]; then
     echo "═══════════════════════════════════════════════════════════════════"
     echo " REFUSING TO RUN: Gate 0 has not been recorded."
@@ -80,9 +45,6 @@ if [ ! -f "outputs/gate0_offset.txt" ]; then
     exit 1
 fi
 echo "── Gate 0 on record ──"; cat outputs/gate0_offset.txt
-# Existence is not a verdict: the script emits a machine-readable GATE0: line and
-# can legitimately conclude INCONCLUSIVE (both offsets near chance). Refuse those
-# too, or every arm below measures a pairing nobody actually established.
 if ! grep -q "GATE0: verdict=CONCLUSIVE" outputs/gate0_offset.txt; then
     echo "═══════════════════════════════════════════════════════════════════"
     echo " REFUSING TO RUN: Gate 0 exists but did not reach a verdict."
@@ -93,9 +55,6 @@ if ! grep -q "GATE0: verdict=CONCLUSIVE" outputs/gate0_offset.txt; then
     echo "═══════════════════════════════════════════════════════════════════"
     exit 1
 fi
-# A verdict is not agreement. On 2026-08-17 gate 0 returned CONCLUSIVE offset=+0
-# while the code still used all_trial-1, and five jobs launched onto a pairing
-# with 0.007 top-1 retrieval against 0.131 at the right offset. Compare the two.
 GATE0_OFFSET="$(grep -o 'GATE0:.*offset=[+-][0-9]*' outputs/gate0_offset.txt \
                 | grep -o 'offset=[+-][0-9]*' | cut -d= -f2 | head -1)"
 CODE_OFFSET="$(python -c 'from rxfm.tensor_cache import BEHAV_TO_BETAS_OFFSET as o; print(f"{o:+d}")')"
@@ -109,7 +68,6 @@ if [ "${GATE0_OFFSET}" != "${CODE_OFFSET}" ]; then
 fi
 echo "── Gate 0 offset ${GATE0_OFFSET} matches the code ──"
 
-# ── Arms ─────────────────────────────────────────────────────────────────────
 ARM_ID="${SLURM_ARRAY_TASK_ID:-3}"
 case "${ARM_ID}" in
   0) NAME="A0_noise"
@@ -132,8 +90,6 @@ esac
 SUBJECTS="${SUBJECTS:-1}"
 EPOCHS="${EPOCHS:-40}"
 
-# The subject set is part of the run identity, not a detail: a multi-subject arm
-# must not land on top of the single-subject one it is meant to be compared with.
 SUBJ_TAG="s$(echo ${SUBJECTS} | tr -s ' ' '-')"
 OUT="${OUT:-outputs/gate1_${NAME}_${SUBJ_TAG}}"
 if [ -e "${OUT}" ] && [ -z "${OVERWRITE:-}" ]; then
@@ -145,9 +101,6 @@ echo "── arm ${ARM_ID}: ${NAME} → ${OUT}"
 echo "   subjects: ${SUBJECTS}   epochs: ${EPOCHS}"
 echo "   ${EXTRA}"
 
-# Remote tracking, opt-in: WANDB_PROJECT=<name> sbatch ... . The run name carries
-# the arm and the subject set, because those are what distinguish two rows in the
-# ablation table. Nothing is sent unless WANDB_PROJECT is set.
 WANDB_ARGS=""
 if [ -n "${WANDB_PROJECT:-}" ]; then
     WANDB_ARGS="--wandb-project ${WANDB_PROJECT} --wandb-name ${NAME}_${SUBJ_TAG}"
@@ -173,10 +126,6 @@ srun python -m scripts.train \
     ${TRAIN_EXTRA:-}
 
 echo "── done $(date). delta_cos trace:"
-# NOTE: the heredoc delimiter is QUOTED, so the shell does not expand anything
-# inside it -- "${OUT}" would arrive at Python as six literal characters and the
-# trace silently reported "no diagnostics.jsonl" for every arm. Pass it through
-# the environment instead.
 OUT="${OUT}" python - <<'PY'
 import json, os, pathlib
 p = pathlib.Path(os.environ["OUT"]) / "diagnostics.jsonl"

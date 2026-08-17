@@ -1,5 +1,3 @@
-"""Diagnostics must be correct *and* cheap, since they run at every eval."""
-
 from __future__ import annotations
 
 import json
@@ -58,7 +56,6 @@ def make(cfg):
     return m
 
 
-# ---------------------------------------------------------------------------
 def test_latent_diagnostics_reports_the_full_key_set():
     cfg = tiny_cfg(flow_source="anchor_var")
     d = latent_diagnostics(make(cfg).eval(), loader(cfg), torch.device("cpu"),
@@ -71,8 +68,6 @@ def test_latent_diagnostics_reports_the_full_key_set():
 
 
 def test_delta_cos_is_zero_for_an_untrained_identity_flow():
-    """The prior's out-layer is zero-init, so the flow is the identity and it
-    adds exactly nothing -- delta_cos must report 0, not a flattering number."""
     cfg = tiny_cfg(flow_source="anchor_det", cfg_scale=1.0)
     d = latent_diagnostics(make(cfg).eval(), loader(cfg), torch.device("cpu"),
                            n_steps=4, solver="euler", prefix="val/")
@@ -81,21 +76,12 @@ def test_delta_cos_is_zero_for_an_untrained_identity_flow():
 
 
 def test_delta_cos_is_signed_and_detects_a_harmful_flow():
-    """A flow that moves away from the target must produce delta_cos < 0.
-
-    This is the whole point of the metric: step1c's blend config was measurably
-    worse than its own regression anchor and nothing in the logs said so.
-
-    The anchor is made *good* first (targets set to the anchor's own output, so
-    anchor_cos == 1) -- otherwise a random flow has nothing to destroy and
-    delta_cos sits at 0 for the wrong reason.
-    """
     cfg = tiny_cfg(flow_source="anchor_det", cfg_scale=1.0)
     m = make(cfg).eval()
     ds = _DS(cfg)
     with torch.no_grad():
         mu, _, _ = m.anchor(m.backbone(ds.f, 1))
-        ds.e = mu.clone() * 2.0                 # perfect anchor: cos(mu, z1) == 1
+        ds.e = mu.clone() * 2.0
     dl = DataLoader(ds, batch_size=8, collate_fn=_collate)
 
     base = latent_diagnostics(m, dl, torch.device("cpu"), n_steps=8,
@@ -103,7 +89,7 @@ def test_delta_cos_is_signed_and_detects_a_harmful_flow():
     assert base["val/anchor_cos"] == pytest.approx(1.0, abs=1e-4)
     assert base["val/delta_cos"] == pytest.approx(0.0, abs=1e-5)
 
-    with torch.no_grad():                       # random, non-zero velocity field
+    with torch.no_grad():
         for p_ in m.prior.out.parameters():
             p_.copy_(torch.randn_like(p_) * 0.5)
     d = latent_diagnostics(m, dl, torch.device("cpu"), n_steps=8,
@@ -131,25 +117,19 @@ def test_diagnostics_restore_training_mode():
 def test_effective_rank_detects_dimensional_collapse():
     n, d = 64, 32
     assert effective_rank(torch.randn(n, d)) > d // 2
-    # Genuinely low-rank: all rows live in a 2-D subspace.
     basis = torch.randn(2, d)
     low_rank = torch.randn(n, 2) @ basis
     assert effective_rank(low_rank) <= 2
 
 
 def test_dispersion_detects_mean_collapse():
-    """The failure mode four low-level heads actually hit.
-
-    Centring makes constant-plus-noise look full rank, so effective_rank is blind
-    to it -- which is exactly why both are logged.
-    """
     n, d = 64, 32
     spread = torch.randn(n, d)
     collapsed = torch.randn(1, d).repeat(n, 1) * 10.0 + torch.randn(n, d) * 1e-3
 
     assert dispersion(spread) == pytest.approx(1.0, abs=0.15)
     assert dispersion(collapsed) < 0.01
-    assert effective_rank(collapsed) > d // 2      # documents the blind spot
+    assert effective_rank(collapsed) > d // 2
 
 
 def test_train_val_gap_pairs_matching_keys():
@@ -161,10 +141,7 @@ def test_train_val_gap_pairs_matching_keys():
     assert "gap/only" not in g
 
 
-# ---------------------------------------------------------------------------
 def test_grad_norms_expose_the_reg_cos_scale_identity():
-    """`reg` and `cos` are the same objective; their gradient norms must differ
-    by the documented factor 2/d, which is what makes lambda_reg meaningless."""
     cfg = tiny_cfg(flow_source="anchor_det")
     m = make(cfg)
     torch.manual_seed(0)
@@ -188,11 +165,10 @@ def test_grad_norms_leave_no_stale_graph():
                           target_cls=torch.randn(4, cfg.cls_dim),
                           keep_term_graph=True)
     grad_norms({k: v for k, v in out.items() if k != "loss"}, m.parameters())
-    out["loss"].backward()          # must still work after the probes
+    out["loss"].backward()
 
 
 def test_terms_are_detached_by_default():
-    """The probe is opt-in; the hot path must not retain the term graphs."""
     cfg = tiny_cfg(flow_source="anchor_var")
     m = make(cfg)
     raw = F.normalize(torch.randn(4, cfg.token_len, cfg.token_dim), dim=-1)
@@ -202,7 +178,6 @@ def test_terms_are_detached_by_default():
     assert out["loss"].requires_grad
 
 
-# ---------------------------------------------------------------------------
 def test_manifest_is_written_and_reloadable(tmp_path):
     cfg = tiny_cfg(flow_source="anchor_var")
     m = make(cfg)
@@ -220,11 +195,6 @@ def test_manifest_is_written_and_reloadable(tmp_path):
 
 
 def test_config_hash_is_stable_across_processes(tmp_path):
-    """paper_report.py groups ablation rows by config_hash, so it must be a real
-    digest. Python's builtin hash() randomises str hashing per interpreter
-    (PYTHONHASHSEED), which gave the SAME config three different hashes across
-    three processes -- every run became its own group of one.
-    """
     import subprocess
     import sys
     src = (
@@ -255,7 +225,6 @@ def test_config_hash_is_stable_across_processes(tmp_path):
 
 
 def test_diagnostics_expose_a_flow_aware_selection_metric():
-    """best.pt selects on val/two_way, so latent_diagnostics must provide it."""
     cfg = tiny_cfg(flow_source="anchor_var")
     m = make(cfg)
     d = latent_diagnostics(m, loader(cfg), torch.device("cpu"), n_steps=2,

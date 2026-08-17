@@ -11,14 +11,6 @@
 #SBATCH --mem=120G
 #SBATCH -t 06:00:00
 
-# Precompute the blurry-latent low-level target, once, per subject.
-# ~2 GB per subject on disk; roughly 28k VAE encodes at 768^2 per subject, so
-# budget ~10-15 min/subject. Run this BEFORE any --ll-target latent training job
-# (the training job refuses to build the cache itself).
-#
-# Usage:  SUBJECTS="1 2 3 4 5 6 7 8" sbatch slurm/build_latent_targets.sbatch
-# Split it if the wall limit is tight:  SUBJECTS="1 2 3 4" sbatch ...
-
 set -euo pipefail
 
 module load slurm 2>/dev/null || true

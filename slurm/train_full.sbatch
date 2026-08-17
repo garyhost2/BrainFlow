@@ -63,8 +63,6 @@ if [ "${FREE_GB}" -lt "$(( NEED_GB + 20 ))" ]; then
 fi
 
 echo "════════════════ STAGE 1/2: TRAIN ════════════════"
-# TRAIN_EXTRA lets you launch the ablation arm, e.g.
-#   TRAIN_EXTRA="--geometry euclidean --no-two-head" OUT=outputs/step1c_ecfm sbatch ...
 python -m scripts.train \
     --data-dir "${DATA_DIR}" \
     --target-dir "${TARGET_DIR}" \
@@ -76,10 +74,6 @@ python -m scripts.train \
     --out "${OUT}" ${TRAIN_EXTRA:-}
 
 echo "════════════════ STAGE 2/2: FULL EVAL ════════════════"
-# Both candidates are now selected on the leakage-free VAL split, but on
-# DIFFERENT signals, and they disagree: best.pt maximises token cosine (peaks
-# early, favours PixCorr), best_clip2way.pt maximises decoded CLIP-2way (peaks
-# late). SELECT picks which one stage 2 reports; EVAL_CKPT overrides outright.
 SELECT="${SELECT:-clip}"
 case "${SELECT}" in
     clip) CAND="${OUT}/best_clip2way.pt ${OUT}/best.pt ${OUT}/last.pt" ;;

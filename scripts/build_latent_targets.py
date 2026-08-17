@@ -1,17 +1,3 @@
-"""Precompute the blurry-latent low-level target, once, per subject.
-
-The low head's target is ``E(blur(GT))`` -- the VAE latent the sampler starts
-from. Encoding it on the fly would mean a 768^2 VAE pass per batch per epoch,
-so it is cached to disk like the bigG targets: ~74 KB per image in fp16, about
-2 GB per subject for 27k train trials.
-
-Needs the A100 + the vendored sgm (it loads the real decoder). Run this BEFORE
-any ``--ll-target latent`` training job; the training job deliberately refuses
-to build the cache itself.
-
-    python -m scripts.build_latent_targets --subjects 1 2 3 4 5 6 7 8 --ll-size 64
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -52,7 +38,6 @@ def main():
         print("✓ every requested cache already exists; nothing to do.")
         return
 
-    # ~2 GB per subject at 27k train trials; refuse rather than fill a 96%-full NFS.
     need_gb = 2.2 * len(todo)
     free_gb = shutil.disk_usage(target_dir).free / 1e9
     print(f"── disk preflight: to-build={len(todo)} subject(s) ≈{need_gb:.1f}G, "

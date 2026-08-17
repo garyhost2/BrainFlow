@@ -1,26 +1,3 @@
-"""Gate the VAE-latent low-level pathway BEFORE spending a 150-epoch run on it.
-
-Decodes GROUND-TRUTH bigG tokens with three different img2img inits, swept over
-strength:
-
-  A. ``rgb``    -- GT-blurry RGB, VAE-encoded by the decoder (the old pathway;
-                   run 331952 measured PixCorr 0.913 / SSIM 0.478 at strength 0.5).
-  B. ``latent`` -- the SAME blur, but handed to the sampler as a latent directly.
-                   Must land on top of A. If it does not, the new code path is
-                   wrong and no amount of training will fix it.
-  C. ``mean``   -- the per-channel MEAN latent, i.e. what a head that has
-                   collapsed to the average predicts.
-
-C is the arm the earlier smokes never had, and it is the one that decides
-whether this is worth doing. Four low heads have now collapsed toward the mean;
-if the mean latent ALONE already lifts PixCorr substantially, then the img2img
-gain is mostly "any smooth init" rather than decoded brain signal, and a
-PixCorr number obtained this way would not mean what it appears to mean. The
-honest quantity to look at is the gap B - C, not B itself.
-
-    python -m scripts.smoke_latent --subject 1 --n 16
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -77,7 +54,6 @@ def main():
 
     blurry = F.interpolate(gt, args.ll_size, mode="bilinear", align_corners=False).clamp(0, 1)
     lat = decoder.encode_blurry(gt, ll_size=args.ll_size).float().cpu()
-    # The collapsed-head arm: every image gets the SAME per-channel mean latent.
     lat_mean = lat.mean(dim=(0, 2, 3)).view(1, -1, 1, 1).expand_as(lat).contiguous()
     print(f"  latent {tuple(lat.shape)} | per-channel mean={lat.mean(dim=(0,2,3)).tolist()}")
     print(f"  per-channel std={lat.std(dim=(0,2,3)).tolist()}")

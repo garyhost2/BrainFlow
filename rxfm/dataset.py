@@ -14,8 +14,8 @@ class Step1Dataset(Dataset):
         self.fmri = ((fmri.float() - fmri_mu) / fmri_std)
 
         self.emb = target_emb
-        self.cls = cls_emb            # optional pooled bigG CLS direction
-        self.lat = lat                # optional blurry-image VAE latent target
+        self.cls = cls_emb
+        self.lat = lat
         self.images = images
         self.subject_id = int(subject_id)
         self.augment = augment
@@ -79,10 +79,6 @@ class SubjectSampler(Sampler):
             full = (n // self.bs) * self.bs
             for s in range(0, full, self.bs):
                 batches.append(idx[s:s + self.bs].tolist())
-            # drop_last=False must keep the ragged tail, not just the degenerate
-            # n < bs case. With n=982 and bs=32 the tail is 22 images, so every
-            # eval scored 960 of 982 -- and __len__ agreed with the truncation,
-            # so nothing ever warned.
             if not self.drop_last and full < n:
                 batches.append(idx[full:].tolist())
         if self.shuffle:
@@ -98,10 +94,10 @@ class SubjectSampler(Sampler):
 @dataclass
 class LoaderBundle:
     train: DataLoader
-    eval: DataLoader          # held-out TEST split (report only)
+    eval: DataLoader
     voxels: dict
     train_sampler: SubjectSampler
-    val: Optional[DataLoader] = None   # carved from train, for honest selection
+    val: Optional[DataLoader] = None
 
 def _loader(dataset, sampler, num_workers):
     return DataLoader(dataset, batch_sampler=sampler, num_workers=num_workers,
@@ -112,12 +108,6 @@ def build_step1_loaders(tensors: dict, targets: dict, subjects: list[int],
                         batch_size: int, num_workers: int = 8,
                         fmri_noise_std: float = 0.0, val_frac: float = 0.0,
                         seed: int = 0) -> LoaderBundle:
-    """Build train / val / test loaders.
-
-    ``val_frac`` carves a per-subject validation split out of TRAIN (deterministic,
-    augmentation off) for leakage-free checkpoint selection; the TEST split is then
-    used for reporting only. ``val_frac=0`` disables it (no validation loader).
-    """
     fmri_stats = tensors.get("fmri_stats", {})
     voxels = tensors.get("voxels", {})
     train_sets, val_sets, eval_sets = [], [], []

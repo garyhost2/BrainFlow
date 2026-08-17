@@ -11,10 +11,6 @@
 #SBATCH --mem=120G
 #SBATCH -t 00:20:00
 
-# CPU-only token diagnostic (radius spread + direction concentration on real bigG
-# tokens). Runs through SLURM because the login node has no usable RAM/CPU budget.
-# Usage:  SUBJECT=1 sbatch slurm/diagnose_tokens.sbatch
-
 set -euo pipefail
 
 module load slurm 2>/dev/null || true
@@ -37,7 +33,6 @@ SUBJECT="${SUBJECT:-1}"
 SPLIT="${SPLIT:-test}"
 N_IMAGES="${N_IMAGES:-400}"
 
-# unbuffered so the verdict shows up even if the job is requeued
 python -u -m scripts.diagnose_tokens \
     --target-dir "${TARGET_DIR}" \
     --subject "${SUBJECT}" \

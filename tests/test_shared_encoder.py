@@ -1,12 +1,3 @@
-"""Cross-subject encoder: one shared input projection + per-subject LoRA.
-
-The property that motivates the change is parameter scaling. Under the legacy
-per-subject ModuleDict, subject k costs a full nn.Linear(V_k, enc_hidden) and
-shares nothing at the input stage; under the shared encoder it costs
-2*h*r + h. These tests pin that, plus the invariants that make the swap safe:
-the adapter is the identity at initialisation, padded columns take no gradient,
-and an old checkpoint migrates instead of silently starting fresh.
-"""
 import re
 
 import pytest
@@ -14,7 +5,6 @@ import torch
 
 from rxfm.model import TokenStep1Config, TokenBackbone
 
-# Real NSD voxel counts, so the parameter arithmetic below is the true one.
 VOX = {1: 15724, 2: 14278, 5: 13039, 7: 12682}
 
 
@@ -47,16 +37,13 @@ def test_extra_subject_is_cheap_shared_and_expensive_per_subject():
     per_1, per_4 = _nparams(_backbone(False, one)), _nparams(_backbone(False))
     shr_1, shr_4 = _nparams(_backbone(True, one)), _nparams(_backbone(True))
 
-    # Legacy: three more subjects buy three more voxel matrices.
     assert per_4 - per_1 == sum(VOX[s] for s in (2, 5, 7)) * 256 + 3 * 256
 
-    # Shared: three more subjects buy three LoRA rows (2*h*r + h each).
     assert shr_4 - shr_1 == 3 * (2 * 256 * 16 + 256)
     assert (shr_4 - shr_1) < (per_4 - per_1) / 100
 
 
 def test_adapter_is_identity_at_init():
-    """Zero-init means adding a subject cannot perturb the others at step 0."""
     bb = _backbone(True).eval()
     x = torch.randn(4, bb.max_vox)
     with torch.no_grad():
@@ -73,7 +60,6 @@ def test_scalar_and_tensor_subject_agree():
 
 
 def test_mixed_subject_batch_matches_per_row_forward():
-    """A batch spanning subjects must equal each row run on its own."""
     bb = _backbone(True).eval()
     ids = [1, 5, 7]
     xb = torch.zeros(len(ids), bb.max_vox)
@@ -105,9 +91,6 @@ def test_too_wide_input_raises():
         bb(torch.randn(2, bb.max_vox + 1), 1)
 
 
-# --------------------------------------------------------------------------
-#  Checkpoint migration
-# --------------------------------------------------------------------------
 class _Holder(torch.nn.Module):
     def __init__(self, backbone):
         super().__init__()
@@ -134,7 +117,6 @@ def test_migration_seeds_shared_layer_from_checkpoint():
 
     missing, unexpected = model.load_state_dict(mig, strict=False)
     assert not unexpected
-    # Only the three zero-init adapter tensors should be fresh.
     assert set(missing) == {
         "backbone.subject_adapter.down.weight",
         "backbone.subject_adapter.up.weight",
@@ -143,12 +125,10 @@ def test_migration_seeds_shared_layer_from_checkpoint():
 
 
 def test_migration_prefers_widest_subject_present_in_run():
-    """Voxel index j only means the same thing for the same subject, so an
-    in-run subject beats a wider out-of-run one."""
     from scripts.train import _migrate_input_proj
 
-    old = _old_state({1: VOX[1], 7: VOX[7]})          # 1 is wider than 7
-    model = _Holder(_backbone(True, {7: VOX[7]}))     # but only 7 is in the run
+    old = _old_state({1: VOX[1], 7: VOX[7]})
+    model = _Holder(_backbone(True, {7: VOX[7]}))
     mig = _migrate_input_proj(model, dict(old), "test")
     assert torch.equal(mig["backbone.input_proj.weight"][:, :VOX[7]],
                        old["backbone.input_proj.7.weight"])

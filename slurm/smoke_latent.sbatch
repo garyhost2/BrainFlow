@@ -11,15 +11,6 @@
 #SBATCH --mem=120G
 #SBATCH -t 01:00:00
 
-# GATE the VAE-latent low-level pathway before committing a 150-epoch run to it.
-# Decodes GT tokens with three img2img inits (GT-blurry RGB / the same blur as a
-# latent / the MEAN latent) across strengths. Read the two gate lines at the end:
-#   * latent must match rgb   -> the new code path is correct
-#   * latent minus mean       -> how much PixCorr is really attributable to
-#                                predicting the layout, rather than to any smooth init
-# Short job -- backfills ahead of the 3-day queue.
-# Usage:  SUBJECT=1 N=16 sbatch slurm/smoke_latent.sbatch
-
 set -euo pipefail
 
 module load slurm 2>/dev/null || true

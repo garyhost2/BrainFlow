@@ -1,12 +1,3 @@
-"""The eval sampler must score every held-out image, not a round number of them.
-
-Every metric reported before this test existed was computed on 960 of the 982
-NSD test images: `drop_last=False` was honoured only when a subject had fewer
-items than one batch, so the ragged tail was truncated. `__len__` agreed with
-the truncation, so no DataLoader warning ever fired. A smaller scored set also
-means a smaller foil pool, which makes the 2-way metrics easier -- the bug
-inflated the headline numbers rather than merely shrinking them.
-"""
 import pytest
 
 from rxfm.dataset import SubjectSampler
@@ -17,7 +8,6 @@ def _batches(sampler):
 
 
 def test_tail_is_kept_for_the_nsd_test_split():
-    # The case that actually shipped: one subject, 982 images, batch size 32.
     sampler = SubjectSampler([982], batch_size=32, shuffle=False, drop_last=False)
     batches = _batches(sampler)
     covered = [i for b in batches for i in b]
@@ -43,7 +33,6 @@ def test_len_matches_what_iter_yields(lengths, batch_size, drop_last):
 
 
 def test_batches_never_mix_subjects():
-    # The whole point of this sampler: a batch feeds one subject's encoder.
     lengths = [982, 800]
     sampler = SubjectSampler(lengths, batch_size=32, shuffle=True, drop_last=False)
     for b in _batches(sampler):

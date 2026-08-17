@@ -1,14 +1,3 @@
-"""The behav->betas trial offset, and the guard that stops a stale cache loading.
-
-scripts/check_offset measured the pairing on subject 1 rather than arguing it
-from source: top-1 retrieval 0.1305 at offset +0 against 0.0070 at -1, chance
-0.0005. The repo indexed betas with `all_trial - 1` while indexing images
-unshifted, so every image was paired with the previous trial's fMRI and 19/20 of
-the stimulus-locked signal was destroyed.
-
-The cache that shipped carried no `_meta` at all, so an unstamped cache IS the
-misaligned one. These tests pin both halves: the constant, and the refusal.
-"""
 import pytest
 
 from rxfm.tensor_cache import (BEHAV_TO_BETAS_OFFSET, TENSOR_CACHE_FORMAT,
@@ -17,8 +6,6 @@ from rxfm.tensor_cache import (BEHAV_TO_BETAS_OFFSET, TENSOR_CACHE_FORMAT,
 
 
 def test_offset_is_zero():
-    # MindEye2 defines behav column 5 as a 0-based global_trial and consumes it
-    # unshifted; check_offset confirms it empirically. Anything else is the bug.
     assert BEHAV_TO_BETAS_OFFSET == 0
 
 
@@ -50,7 +37,6 @@ def test_meta_records_the_offset_that_built_it():
 
 
 def test_the_refusal_message_tells_you_what_to_do():
-    # A guard that fires without saying "rebuild" costs someone an afternoon.
     with pytest.raises(RuntimeError) as e:
         assert_tensor_cache_alignment("all_subjects_tensors.pt", {})
     msg = str(e.value)
@@ -60,8 +46,6 @@ def test_the_refusal_message_tells_you_what_to_do():
 
 
 def test_every_cache_reader_goes_through_the_guard():
-    # train_step1b loads the cache with a bare torch.load rather than through
-    # build_or_load_tensors, so a guard in the builder alone protects nothing.
     import pathlib
     root = pathlib.Path(__file__).resolve().parent.parent
     offenders = []
@@ -77,22 +61,18 @@ def test_every_cache_reader_goes_through_the_guard():
 
 
 def test_splits_are_not_capped_by_default():
-    # 8859 and 982 are IMAGE counts; the caps they were assigned to slice TRIALS,
-    # and NSD shows each image ~3 times. The old defaults gave a 552-image test
-    # split and about a third of the training trials.
-    from brainflow.config import Config
+    from rxfm.config import Config
     cfg = Config()
     assert cfg.max_train is None
     assert cfg.max_test is None
 
 
 def test_nsd_split_constants():
-    from brainflow.tensor_cache import NSD_TEST_IMAGES, NSD_REPEATS_PER_IMAGE
+    from rxfm.tensor_cache import NSD_TEST_IMAGES, NSD_REPEATS_PER_IMAGE
     assert NSD_TEST_IMAGES == 982
     assert NSD_REPEATS_PER_IMAGE == 3
 
 
 def test_a_v3_cache_is_now_refused_too():
-    # v3 fixed the offset but still carried the 552-image test split.
     with pytest.raises(RuntimeError, match="552"):
         assert_tensor_cache_alignment("c.pt", {"_meta": {"format": "tensors_v3_offset0"}})

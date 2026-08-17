@@ -1,24 +1,3 @@
-"""Frozen MindEye2 ``unclip6`` SDXL-unCLIP decoder with structured conditioning.
-
-The decoder exposes two conditioning slots (paper Stage 5):
-
-  * ``crossattn`` -- the reassembled raw patch tokens X in R^{256 x 1664};
-  * ``vector``    -- the pooled image-embedding slot, into which we route the
-    predicted global direction ``c_cls`` (concatenated with the size/crop
-    micro-conditioning).
-
-Routing ``c_cls`` into the pooled slot -- instead of the content-free
-``vector_suffix`` obtained from a dummy image -- is the paper's "Change 5": it
-supplies the global semantic conditioning the unCLIP model was trained on, which
-the patch tokens alone do not provide.
-
-The exact byte layout of ``vector`` is defined by the vendored sgm conditioner
-(available only on the cluster). We therefore expose ``cls_vector_slot`` so the
-1280-d pooled embedding can be placed correctly; the default ``(0, 1280)`` writes
-it to the leading positions, which is the SDXL-unCLIP convention (pooled image
-embedding first, then the size/crop Fourier features).
-"""
-
 from __future__ import annotations
 
 import sys
@@ -29,14 +8,6 @@ import torch.nn.functional as F
 
 
 def quiet_benign_warnings():
-    """Silence the known-benign vendored-sgm log spam so a big run's .err stays
-    readable (these do NOT affect correctness or A100 speed):
-      * sgm's 'softmax-xformers not available -> native attention' (our SDPA is
-        already the flash kernel on A100; the message itself says it's fine on torch>=2.0);
-      * torch.utils.checkpoint use_reentrant / 'no inputs require grad' notes emitted
-        by the frozen decoder's gradient-checkpointing during no-grad inference.
-    Real errors (sgm ERROR level, other warnings) still surface.
-    """
     import warnings
     import logging
     warnings.filterwarnings("ignore", message=".*use_reentrant.*")
@@ -52,7 +23,7 @@ class SDXLUnCLIPDecoder:
         self.num_steps = num_steps
         self.out_size = out_size
         self.cls_slot = tuple(cls_vector_slot)
-        self.img2img_cfg = img2img_cfg          # CFG scale for the manual img2img loop
+        self.img2img_cfg = img2img_cfg
         mindeye_src = Path(mindeye_src)
         gm = mindeye_src / "generative_models"
         for p in (str(mindeye_src), str(gm)):
@@ -101,9 +72,6 @@ class SDXLUnCLIPDecoder:
         self.vector_suffix = out["vector"].to(device)
         V = self.vector_suffix.shape[-1]
         lo, hi = self.cls_slot
-        # MindEye2's unclip6 carries ALL image semantics in the 256x1664 crossattn
-        # tokens; its `vector` is size/crop micro-conditioning ONLY (no pooled-image
-        # slot). Only inject c_cls if the requested slot actually fits the vector.
         self.cls_in_vector = self.cls_slot is not None and hi <= V
         if self.cls_in_vector:
             print(f"✓ SDXL-unCLIP ready. vector {tuple(self.vector_suffix.shape)} "
@@ -114,19 +82,16 @@ class SDXLUnCLIPDecoder:
                   f"256x1664 crossattn tokens; c_cls is NOT routed to the decoder.")
 
     def _vector(self, cls_emb_row):
-        """Build the ``vector`` slot; inject c_cls only if this decoder has a slot."""
         vec = self.vector_suffix.clone()
         if cls_emb_row is not None and self.cls_in_vector:
             lo, hi = self.cls_slot
             vec[:, lo:hi] = cls_emb_row.to(vec.device, vec.dtype).reshape(1, hi - lo)
         return vec
 
-    #: Spatial shape of the img2img latent (768 / 8 with the SDXL VAE's 4 channels).
     LATENT_SHAPE = (4, 96, 96)
 
     @torch.no_grad()
     def _encode_init(self, img):
-        """Blurry RGB [0,1] (B,3,h,w) -> scaled VAE latent (B,4,96,96) for img2img."""
         x = F.interpolate(img.to(self.device).float(), 768, mode="bilinear",
                           align_corners=False).clamp(0, 1)
         with torch.cuda.amp.autocast(dtype=torch.float16), self.engine.ema_scope():
@@ -134,12 +99,6 @@ class SDXLUnCLIPDecoder:
 
     @torch.no_grad()
     def encode_blurry(self, img, ll_size: int | None = None):
-        """Public: RGB [0,1] -> the img2img latent, optionally blurring first.
-
-        ``ll_size`` downsamples before the encode, which is exactly the blur the
-        low-level head is asked to predict. Used to precompute the latent target
-        cache so training never has to run the VAE.
-        """
         x = img.to(self.device).float()
         if x.dtype == torch.uint8:
             x = x / 255.0
@@ -169,7 +128,6 @@ class SDXLUnCLIPDecoder:
                 return eng.denoiser(eng.model, xx, ss, cc)
 
             if init_latent is None or strength >= 1.0:
-                # ---- token-only path (pure noise), unchanged ----
                 z = torch.randn(num_samples, 4, 96, 96, device=device)
                 noise = torch.randn_like(z)
                 if self.offset_noise_level > 0.0:
@@ -178,7 +136,6 @@ class SDXLUnCLIPDecoder:
                 noised_z = (z + noise * append_dims(sigmas[0], z.ndim)) / torch.sqrt(1.0 + sigmas[0] ** 2)
                 samples_z = eng.sampler(denoiser, noised_z, cond=c, uc=uc)
             else:
-                # ---- img2img: start from the blurry latent at a reduced sigma ----
                 z0 = init_latent.repeat(num_samples, 1, 1, 1).to(device).float()
                 N = len(sigmas) - 1
                 n_steps = max(1, int(round(strength * N)))
@@ -189,8 +146,8 @@ class SDXLUnCLIPDecoder:
                     ss = s.repeat(num_samples)
                     dc = denoiser(x_cur, ss, c)
                     du = denoiser(x_cur, ss, uc)
-                    denoised = du + self.img2img_cfg * (dc - du)        # manual CFG
-                    d = (x_cur - denoised) / append_dims(s, x_cur.ndim)  # EDM Euler
+                    denoised = du + self.img2img_cfg * (dc - du)
+                    d = (x_cur - denoised) / append_dims(s, x_cur.ndim)
                     x_cur = x_cur + d * append_dims(s_next - s, x_cur.ndim)
                 samples_z = x_cur
 
@@ -202,25 +159,6 @@ class SDXLUnCLIPDecoder:
     def decode(self, tokens_raw: torch.Tensor, cls_emb: torch.Tensor | None = None,
                init_image: torch.Tensor | None = None, strength: float = 1.0,
                init_latent: torch.Tensor | None = None) -> torch.Tensor:
-        """Decode raw patch tokens, optionally with CLS in the pooled slot and a
-        blurry init for img2img (low-level pathway).
-
-        ``tokens_raw``:  (B, 256, 1664) reassembled raw tokens.
-        ``cls_emb``:     (B, 1280) predicted global directions, or None.
-        ``init_image``:  (B, 3, h, w) blurry layout in [0,1]; None => pure-noise decode.
-        ``init_latent``: (B, 4, 96, 96) img2img latent, used INSTEAD of ``init_image``
-                         when given. This is the path for a head that predicts the
-                         latent directly -- it skips the RGB round-trip, so the
-                         head's output is never squeezed through a sigmoid and
-                         re-encoded by the VAE.
-        ``strength``:    img2img strength in (0,1]; lower = preserve more layout.
-        """
-        # Encode the blurry init PER-IMAGE inside the loop rather than as one
-        # batched VAE.encode over the whole eval batch. At 768x768 the batched
-        # encode allocates ~9 GiB of activations and OOMs when this decoder is
-        # co-resident with the training model + AdamW state. GroupNorm (not
-        # BatchNorm) makes the per-image encode numerically identical to slicing
-        # a batched encode, and the UNet sampling below is already batch-1.
         have_init = init_latent is not None or init_image is not None
         use_init = have_init and strength < 1.0
         imgs = []

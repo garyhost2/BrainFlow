@@ -1,27 +1,3 @@
-"""Endpoint vs velocity parameterisation of the patch prior.
-
-The two are the SAME vector field: for geodesic paths
-
-    u_t = slerp_velocity(z0, z1, t) = Log_{z_t}(z1) / (1 - t).
-
-What differs is the loss geometry. Substituting the identity into the velocity
-MSE,
-
-    ||v - u_t||^2 = ||Log_{z_t}(zhat1) - Log_{z_t}(z1)||^2 / (1 - t)^2,
-
-so training on velocity weights the ENDPOINT error by 1/(1-t)^2 -- 1.2x at
-t=0.1, 100x at t=0.9, 2500x at t=0.98. Capacity is therefore spent where the
-inversion is trivial and starved at t -> 0, which is exactly where inference
-starts. The endpoint parameterisation scores 1 - cos(zhat1, z1) uniformly in t.
-
-The second reason to prefer it is structural: ``TokenFlowPrior.out`` is
-zero-initialised, so zhat1 = normalize(z_t + 0) = z_t, hence v == 0, hence the
-ODE is the identity and the sampler returns the anchor EXACTLY. Under the
-velocity parameterisation that also holds, but only because the same layer is
-zeroed -- here it survives any output scale, since a zero residual is a fixed
-point of the map rather than a zero of the velocity.
-"""
-
 from __future__ import annotations
 
 import math
@@ -66,13 +42,9 @@ def batch(cfg, B=6):
     }
 
 
-# ---------------------------------------------------------------------------
-#  The identity the parameterisation rests on
-# ---------------------------------------------------------------------------
 @pytest.mark.parametrize("t", [0.1, 0.3, 0.5, 0.7, 0.9])
 @pytest.mark.parametrize("deg", [68.3, 15.0])
 def test_velocity_equals_log_over_one_minus_t(t, deg):
-    """u_t == Log_{z_t}(z1)/(1-t) at the real token width."""
     d, N, B = 1664, 2, 16
     th = math.radians(deg)
     torch.manual_seed(0)
@@ -89,12 +61,6 @@ def test_velocity_equals_log_over_one_minus_t(t, deg):
 
 
 def test_velocity_target_norm_is_theta_and_shrinks_with_the_anchor():
-    """||u_t|| == theta exactly, so the velocity MSE vanishes quadratically.
-
-    This is why the velocity term is ~740x smaller than `cos` at the measured
-    anchor (theta = 68.3 deg) and ~830x smaller at theta = 15 deg: mse averages
-    over d, giving theta^2/d against 1 - cos(theta) ~ theta^2/2.
-    """
     d, N, B = 1664, 2, 16
     prev = None
     for deg in (90.0, 68.3, 30.0, 15.0):
@@ -116,12 +82,8 @@ def test_velocity_target_norm_is_theta_and_shrinks_with_the_anchor():
         prev = ratio
 
 
-# ---------------------------------------------------------------------------
-#  The identity-flow bound
-# ---------------------------------------------------------------------------
 @pytest.mark.parametrize("param", ["endpoint", "velocity"])
 def test_zero_init_prior_is_the_identity_flow(param):
-    """A fresh prior must return its own starting point, exactly."""
     cfg = tiny_cfg(flow_source="anchor_det", flow_param=param)
     m = make(cfg).eval()
     b = batch(cfg)
@@ -133,7 +95,6 @@ def test_zero_init_prior_is_the_identity_flow(param):
 
 
 def test_endpoint_head_predicts_zt_at_init():
-    """zhat1 == z_t when the residual is zero -- the fixed point of the map."""
     cfg = tiny_cfg(flow_param="endpoint")
     m = make(cfg).eval()
     b = batch(cfg)
@@ -148,11 +109,6 @@ def test_endpoint_head_predicts_zt_at_init():
 
 
 def test_endpoint_and_velocity_agree_when_the_residual_is_matched():
-    """The two parameterisations describe the SAME field, not merely similar ones.
-
-    Force a known endpoint by writing the residual directly, then check that
-    _prior_velocity reproduces Log_{z_t}(zhat1)/(1-t).
-    """
     cfg = tiny_cfg(flow_param="endpoint")
     m = make(cfg).eval()
     b = batch(cfg)
@@ -160,7 +116,7 @@ def test_endpoint_and_velocity_agree_when_the_residual_is_matched():
     brain = m.backbone(b["fmri"], 1)
     torch.manual_seed(3)
     with torch.no_grad():
-        m.prior.out.bias.normal_(0, 0.1)          # non-trivial residual
+        m.prior.out.bias.normal_(0, 0.1)
     zt = F.normalize(torch.randn(B, cfg.token_len, cfg.token_dim), dim=-1)
     for tv in (0.1, 0.5, 0.9):
         t = torch.full((B,), tv)
@@ -170,16 +126,7 @@ def test_endpoint_and_velocity_agree_when_the_residual_is_matched():
         assert float((want - got).abs().max()) < 1e-5
 
 
-# ---------------------------------------------------------------------------
-#  Loss scale: the reason the parameterisation matters
-# ---------------------------------------------------------------------------
 def test_endpoint_flow_loss_is_on_the_same_scale_as_cos():
-    """`flow` and `cos` must be comparable, else lambda_flow is uninterpretable.
-
-    Under the velocity parameterisation the ratio is ~1/800 at d=1664 (mse
-    averages over d while `cos` does not), which is the same 2/d trap the config
-    already documents for lambda_reg.
-    """
     cfg = tiny_cfg(token_dim=1664, token_len=4, flow_param="endpoint",
                    flow_source="anchor_det")
     m = make(cfg)
@@ -191,7 +138,6 @@ def test_endpoint_flow_loss_is_on_the_same_scale_as_cos():
 
 
 def test_per_position_centering_changes_the_target_directions():
-    """center_mode must actually reach polar_encode, not just the config."""
     cfg_g = tiny_cfg(center_mode="global")
     cfg_p = tiny_cfg(center_mode="per_position")
     assert make(cfg_g).tgt_mean.shape == (cfg_g.token_dim,)

@@ -65,7 +65,6 @@ def parse_args():
     ap.add_argument("--mixco-s-thresh", type=float, default=0.5)
     ap.add_argument("--geometry", type=str, default="sphere",
                     choices=["euclidean", "sphere"])
-    # --- R-XFM ------------------------------------------------------------
     ap.add_argument("--flow-source", type=str, default="anchor_var",
                     choices=["noise", "anchor_det", "anchor_var"],
                     help="what the flow transports FROM. 'noise' is the legacy "
@@ -178,10 +177,6 @@ def parse_args():
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--out", type=str, default="outputs/step1b")
     ap.add_argument("--seed", type=int, default=0)
-    # Remote tracking. Off unless --wandb-project is given, so nothing about the
-    # existing jobs changes. diagnostics.jsonl stays the source of truth; wandb
-    # is a mirror, because the only other way to read a run is to be on the
-    # cluster's filesystem.
     ap.add_argument("--wandb-project", type=str, default=None,
                     help="W&B project. Unset disables tracking entirely.")
     ap.add_argument("--wandb-entity", type=str, default=None)
@@ -203,8 +198,6 @@ _WANDB = None
 
 
 def _wandb_start(args, cfg, out_dir):
-    """Return a live W&B run, or None. Never fatal: a tracking failure must not
-    kill a 12-hour job, so every path here degrades to local-only logging."""
     global _WANDB
     if not args.wandb_project:
         return None
@@ -234,10 +227,6 @@ def _wandb_start(args, cfg, out_dir):
 
 
 def _wandb_log(row: dict):
-    """No explicit step: train rows land many times per epoch while eval rows
-    land once, so an epoch-valued step would be non-monotonic and wandb would
-    drop the out-of-order ones. Every row carries `epoch`, so use that as the
-    x-axis in the UI."""
     if _WANDB is None:
         return
     try:
@@ -248,7 +237,6 @@ def _wandb_log(row: dict):
 
 
 def _append_metrics(out_dir, row: dict):
-    """One JSON object per eval, appended. paper_report.py reads the tail."""
     import json
     with open(Path(out_dir) / "diagnostics.jsonl", "a") as f:
         f.write(json.dumps({k: (float(v) if isinstance(v, (int, float)) else v)
@@ -258,12 +246,6 @@ def _append_metrics(out_dir, row: dict):
 
 @torch.no_grad()
 def per_position_mean(targets, subjects, token_len, token_dim, chunk=512):
-    """Mean bigG token PER POSITION, pooled over images and subjects: (N, d).
-
-    ``targets_bigg._accum_stats`` reshapes to (-1, d) before accumulating, so
-    ``stats.mean`` is a single vector averaged over positions as well as images.
-    Streaming here in chunks keeps the (n_img, 256, 1664) mmap off the heap.
-    """
     total = torch.zeros(token_len, token_dim, dtype=torch.float64)
     count = 0
     for s in subjects:
@@ -278,31 +260,11 @@ def per_position_mean(targets, subjects, token_len, token_dim, chunk=512):
 
 
 def _migrate_input_proj(model, state, label):
-    """Rewrite a per-subject ``input_proj`` ModuleDict into the shared layout.
-
-    Old checkpoints hold ``backbone.input_proj.<sid>.weight`` of shape
-    (h, V_sid); the shared encoder wants one ``backbone.input_proj.weight`` of
-    shape (h, max_vox). The key NAME differs, so ``strict=False`` would drop it
-    without a word and the warm start would silently begin from a random input
-    layer -- the one stage that matters most for a prior we are trying to reuse.
-
-    Only one subject's matrix can seed a shared one. Preference order:
-
-    1. the WIDEST subject that is also in this run -- column j then refers to the
-       same voxel in the checkpoint and in the data we are about to feed, so the
-       seeded weights are meaningful and not merely a warm shape;
-    2. otherwise the widest subject in the checkpoint -- voxel correspondence is
-       lost, but a trained projection is still a better starting point than noise.
-
-    Mirrors :func:`rxfm.models.migrate_input_proj`, which does the same for
-    the v5 ``brain_enc.`` prefix. Kept separate so ``step1`` does not take a
-    dependency on the legacy module for forty lines of key rewriting.
-    """
     bb = getattr(model, "backbone", None)
     if bb is None or not getattr(bb, "shared_encoder", False):
         return state
     if "backbone.input_proj.weight" in state:
-        return state                                    # already shared
+        return state
     old = {}
     for k, v in state.items():
         m = re.fullmatch(r"backbone\.input_proj\.(\d+)\.(weight|bias)", k)
@@ -338,12 +300,6 @@ def _migrate_input_proj(model, state, label):
 
 
 def _load_shape_safe(model, state, label):
-    """load_state_dict(strict=False) that also drops SHAPE-mismatched entries.
-
-    ``tgt_mean`` is (d,) under center_mode='global' and (N, d) under
-    'per_position', so a warm-start across the two would raise instead of simply
-    starting that buffer fresh.
-    """
     own = model.state_dict()
     dropped = [k for k, v in state.items()
                if k in own and tuple(own[k].shape) != tuple(v.shape)]
@@ -383,7 +339,6 @@ def main():
     lat_stats = None
     if args.low_level and args.ll_target == "latent":
         from rxfm.targets_latent import build_or_load_latent_targets
-        # decoder=None: refuse to build a 2 GB/subject cache inside a training job.
         targets |= build_or_load_latent_targets(
             tensors, args.subjects, args.target_dir, decoder=None, ll_size=args.ll_size)
         lat_stats = targets["_lat_stats"]
@@ -393,9 +348,6 @@ def main():
                                  num_workers=args.num_workers, fmri_noise_std=args.fmri_noise_std,
                                  val_frac=args.val_frac, seed=args.seed)
 
-    # CFG default depends on the flow source: with an anchor source the
-    # "unconditional" branch drops the brain tokens while z0 is itself
-    # brain-derived, so the two branches do not differ in the way guidance assumes.
     cfg_scale = args.cfg_scale
     if cfg_scale is None:
         cfg_scale = 3.0 if args.flow_source == "noise" else 1.0
@@ -495,13 +447,8 @@ def main():
     step = 0
     nan_skips = 0
     for epoch in range(1, args.epochs + 1):
-        # low_only: run the frozen backbone in eval mode (stable features; low_head
-        # has no train/eval-sensitive layers) so the head learns a clean mapping.
         model.eval() if low_only else model.train()
         bundle.train_sampler.set_epoch(epoch)
-        # BiMixCo runs only for the first mixup_pct of training, then the
-        # contrastive term reverts to clean SoftCLIP (MindEye2's schedule): the
-        # mix is a regulariser for the underfit phase, not the final objective.
         use_mixco = (not low_only) and epoch <= int(args.mixup_pct * args.epochs)
         if use_mixco and epoch == 1:
             print(f"✓ BiMixCo on for epochs 1-{int(args.mixup_pct * args.epochs)} "
@@ -532,10 +479,6 @@ def main():
                                          keep_term_graph=probe)
                 loss = ld["loss"]
 
-            # Per-term gradient norms: loss WEIGHTS are uninterpretable when the
-            # terms have different natural scales (`reg` is `cos` scaled by 2/d).
-            # Measured, not guessed. autograd.grad does not touch .grad, and every
-            # probe retains the graph, so loss.backward() below is unaffected.
             if probe:
                 gn = grad_norms({k: v for k, v in ld.items() if k != "loss"},
                                 model.parameters())
@@ -566,7 +509,6 @@ def main():
 
         if epoch % args.eval_freq == 0 or epoch == args.epochs:
             ema.store(model); ema.copy_to(model)
-            # Honest selection: choose on a leakage-free split; TEST is report-only.
             sel_loader = bundle.val if bundle.val is not None else bundle.eval
             sel_name = "val" if bundle.val is not None else "test"
             if bundle.val is None and epoch == args.eval_freq:
@@ -574,9 +516,6 @@ def main():
             sel_cos = eval_token_cosine(model, sel_loader, stats, device)
             msg = f"Ep{epoch:4d} | {sel_name}_cos={sel_cos:.4f}"
 
-            # Latent-space diagnostics: seconds, no decode. `delta_cos` is what
-            # the flow ADDS over its own starting point -- if it is <= 0 the prior
-            # is dead weight no matter what the decoded metrics say.
             diag = latent_diagnostics(model, sel_loader, device,
                                       n_steps=args.decode_steps,
                                       solver=args.solver, max_batches=args.diag_batches,
@@ -604,27 +543,10 @@ def main():
                 msg += f" test_cos={eval_token_cosine(model, bundle.eval, stats, device):.4f}"
             ema.restore(model)
 
-            # Persist the checkpoint on the val-cos signal BEFORE any decoder
-            # work. Decode-eval is heavy (SDXL UNet+VAE co-resident with the
-            # training model + AdamW state) and only a progress signal; a crash
-            # there must never throw away the trained weights -- it silently did
-            # once (an OOM in the img2img VAE-encode killed a 10-epoch run before
-            # a single checkpoint was written).
             ckpt = {"model": model.state_dict(), "ema": ema.shadow, "cfg": cfg,
                     "stats": stats.to_dict(), "voxels": bundle.voxels,
                     "subjects": args.subjects, "epoch": epoch}
             torch.save(ckpt, out_dir / "last.pt")
-            # Selection signal. `sel_cos` calls predict_tokens with
-            # cond_source="regression", so under R-XFM it scores exactly z0 and is
-            # structurally blind to delta_cos -- the quantity this branch exists to
-            # produce. It is also a POINTWISE functional (per-image, per-token inner
-            # product) while every deployed metric (CLIP-2way, retrieval) is a
-            # PAIRWISE ranking one; write the predictor as xhat = a*x + b*mbar + e
-            # and the pairwise metric is invariant to b after centring while the
-            # pointwise one is increasing in it, so the two can and did move in
-            # opposite directions (run 347831: val_cos fell from epoch 10 while
-            # decoded CLIP_2way climbed to epoch 110). Default to the flow-aware
-            # ranking statistic; --select-on cos restores the old behaviour.
             sel_key = {"two_way": "val/two_way",
                        "retrieval": "val/retr_fwd_300"}.get(args.select_on)
             sel_val = sel_cos if sel_key is None else diag.get(sel_key)
@@ -638,9 +560,6 @@ def main():
                 torch.save(ckpt, out_dir / "best.pt")
                 msg += f"  ✓best.pt({args.select_on}={sel_val:.4f})"
 
-            # Best-effort image metrics: guard so an OOM/failure just skips this
-            # epoch's decode instead of killing the run, and always restore the
-            # training weights + free the cache afterwards.
             if args.decode_eval:
                 im = None
                 try:
@@ -649,10 +568,6 @@ def main():
                     per_subj = max(1, args.decode_n // n_subj)
                     preds, gts, got = [], [], {}
                     blur_sq, blur_n = 0.0, 0
-                    # Always decode the leakage-free VAL split when one exists: both
-                    # best.pt (--freeze-token) and best_clip2way.pt are selected on
-                    # this metric, so it must not be TEST. TEST is reported once, by
-                    # the stage-2 full eval.
                     decode_loader = bundle.val if bundle.val is not None else bundle.eval
                     split_tag = "val" if decode_loader is bundle.val else "test"
                     with torch.no_grad():
@@ -666,11 +581,6 @@ def main():
                                                                 cond_source=cfg.cond_source)
                             blur = model.predict_lowlevel(fmri, batch["subject"])
                             lat = model.predict_low_latent(fmri, batch["subject"])
-                            # How good is the predicted layout vs the target the head is
-                            # trained on? (the img2img ceiling driver). Reported as
-                            # blur_mse in both modes so the two are directly comparable
-                            # -- in latent mode it is MSE in STANDARDISED latent space,
-                            # where 1.0 is what predicting the mean scores.
                             if blur is not None:
                                 gtb = F.interpolate(batch["image"][:take].float().to(device),
                                                     cfg.ll_size, mode="bilinear",
@@ -703,23 +613,10 @@ def main():
                 finally:
                     ema.restore(model)
                     torch.cuda.empty_cache()
-                # CLIP-2way checkpoint, saved AFTER the finally so ckpt's live
-                # tensors hold TRAINING weights again -- not the EMA weights
-                # copy_to() swapped in for the decode.
-                #
-                # This used to be gated on `bundle.val is None`, so a run with
-                # --val-frac (now the default) produced NO CLIP-selected
-                # checkpoint at all -- and best.pt selects on sel_cos, which in
-                # run 347831 fell monotonically from epoch 10 while the decoded
-                # CLIP_2way kept climbing to epoch 110. The two signals
-                # disagree, so keep a checkpoint for each.
                 if im is not None and im["CLIP_2way"] > best_clip:
                     best_clip = im["CLIP_2way"]
                     torch.save(ckpt, out_dir / "best_clip2way.pt")
                     msg += "  ✓best_clip2way.pt"
-                # --freeze-token: token model is fixed, so best.pt IS the low-level
-                # checkpoint -- select it on PixCorr+SSIM (the eval reloads EMA
-                # weights, which is what this decode measured).
                 if low_only and im is not None and (im["PixCorr"] + im["SSIM"]) > best_img:
                     best_img = im["PixCorr"] + im["SSIM"]
                     torch.save(ckpt, out_dir / "best.pt")
@@ -729,8 +626,6 @@ def main():
                 msg += f" | nan_skips={nan_skips}"
             print(msg)
 
-    # Guarantee best.pt exists: in --freeze-token mode it is only written when an
-    # image metric improves, so fall back to last.pt if no decode-eval ever ran.
     if not (out_dir / "best.pt").exists() and (out_dir / "last.pt").exists():
         import shutil
         shutil.copyfile(out_dir / "last.pt", out_dir / "best.pt")

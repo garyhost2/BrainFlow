@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# ─────────────────────────────────────────────────────────────────────────────
-# Step-1b one-time setup: vendored sgm (SDXL-unCLIP decoder) + checkpoint.
-# Run on the A100 node from the repo root:  bash scripts/setup_decoder.sh
-# ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 THIRD_PARTY="third_party"
@@ -11,7 +7,6 @@ CKPT="${THIRD_PARTY}/unclip6_epoch0_step110000.ckpt"
 
 mkdir -p "${THIRD_PARTY}"
 
-# 1) Vendored sgm + unclip6.yaml come from the MindEyeV2 repo (src/generative_models).
 if [ ! -d "${MINDEYE_DIR}" ]; then
   echo "▶ Cloning MedARC-AI/MindEyeV2 (for vendored sgm + unclip6.yaml)…"
   git clone --depth 1 https://github.com/MedARC-AI/MindEyeV2 "${MINDEYE_DIR}"
@@ -24,7 +19,6 @@ if [ ! -d "${MINDEYE_DIR}/src/generative_models/sgm" ]; then
   exit 1
 fi
 
-# 2) Dependencies the vendored sgm + bigG embedder need (pinned to MindEye2's set).
 echo "▶ Installing Step-1b deps (sgm / bigG / decoder)…"
 pip install --upgrade pip
 pip install \
@@ -32,15 +26,7 @@ pip install \
   "open_clip_torch==2.24.0" "kornia==0.7.1" "omegaconf==2.3.0" \
   "pytorch-lightning==2.0.1" "transformers==4.40.2" "diffusers==0.27.2" \
   "torchmetrics>=1.3" einops ftfy regex "huggingface_hub==0.23.4" safetensors
-# Pins that bit on Panther: torch 2.1.0 needs numpy<2 (ABI); pytorch-lightning
-# 2.0.1 needs pkg_resources, removed from setuptools>=81. transformers/diffusers
-# are PINNED (not >=): a fresh install otherwise pulls 2026-era wheels that assume
-# torch>=2.4 (transformers 5.x "disables PyTorch"; diffusers 0.38 references
-# torch.xpu, which 2.1.0 lacks → AttributeError on import).
-# xformers is optional (sgm uses softmax-xformers attn); install if your CUDA matches:
-#   pip install xformers==0.0.22.post7
 
-# 3) Download the SDXL-unCLIP decoder checkpoint (~5 GB) from the NSD dataset repo.
 if [ ! -f "${CKPT}" ]; then
   echo "▶ Downloading unclip6 decoder checkpoint…"
   python scripts/download_unclip6.py --out "${THIRD_PARTY}"

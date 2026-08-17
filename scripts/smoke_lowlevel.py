@@ -1,15 +1,3 @@
-"""Calibrate the low-level img2img pathway (find the best --ll-strength).
-
-Decodes GROUND-TRUTH bigG tokens (+ CLS) with a GROUND-TRUTH *blurry* image as the
-img2img init, sweeping ``strength``. This both (a) validates the img2img code path
-produces sane images on the real engine and (b) shows how much PixCorr/SSIM the
-blurry init buys vs. the token-only decode (strength=1.0). Pick the strength that
-maximises PixCorr/SSIM without collapsing CLIP, and pass it as --ll-strength when
-training the low-level head.
-
-Run: sbatch slurm/smoke_train.sbatch  (or adapt) -> python -m scripts.smoke_lowlevel
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -51,7 +39,6 @@ def main():
     cls, tokens = cls.float(), tokens.float()
     del emb; torch.cuda.empty_cache()
 
-    # GROUND-TRUTH blurry init = GT downsampled to ll_size (best case the head can predict)
     blurry = F.interpolate(gt, args.ll_size, mode="bilinear", align_corners=False).clamp(0, 1)
 
     print("▶ Loading SDXL-unCLIP decoder…")

@@ -1,15 +1,3 @@
-"""Sampling-calibration sweep: find the best (cond_source, cfg_scale) per metric.
-
-The flow trades pixel-alignment for semantics as guidance rises: high cfg / pure
-prior sharpens CLIP but collapses PixCorr, while regression / blend / low cfg
-stays near the conditional mean (high PixCorr, softer CLIP). This script loads a
-checkpoint + the decoder once and sweeps the decode configs on a fixed subset of
-test images, so you can read off the PixCorr-optimal and CLIP-optimal settings
-without retraining.
-
-Run via slurm/sweep.sbatch (needs the A100 / decoder).
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -61,16 +49,13 @@ def _load_model(ckpt_path, device):
     cfg: TokenStep1Config = ckpt["cfg"]
     stats = TargetStats.from_dict(ckpt["stats"])
     model = TokenStep1Model(cfg, ckpt["voxels"])
-    # Non-strict: a prior-only checkpoint (e.g. step1c_sphere, trained before the
-    # low head existed) has no low_head.* weights. Drop the untrained head so the
-    # sweep decodes token-only instead of crashing or using a random blur.
     res = model.load_state_dict(ckpt["model"], strict=False)
     if any("low_head" in k for k in res.missing_keys):
         model.low_head = None
         print("  checkpoint has no trained low_head -> token-only decodes")
     elif res.missing_keys:
         print(f"  [warn] {len(res.missing_keys)} missing keys (e.g. {res.missing_keys[:2]})")
-    if "ema" in ckpt:                                   # prefer EMA weights
+    if "ema" in ckpt:
         sd = model.state_dict()
         for k, v in ckpt["ema"].items():
             if k in sd:
@@ -81,7 +66,6 @@ def _load_model(ckpt_path, device):
 
 @torch.no_grad()
 def _collect(loader, n):
-    """A fixed subset of test batches (same images for every config = fair)."""
     out, tot = [], 0
     for b in loader:
         out.append((b["fmri"], int(b["subject"]), b["image"], b["emb"]))
@@ -125,8 +109,6 @@ def _eval_config(model, subset, stats, decoder, clip_metric, device, *,
         m.update(retrieval_metrics(torch.cat(tok_p)[:n], torch.cat(tok_g)[:n],
                                    batch_size=pool, device=device))
     if grid_path is not None:
-        # A qualitative panel per config -- the sweep produced no images at all
-        # before, so picking a config for the paper figure meant re-decoding.
         try:
             from torchvision.utils import save_image
             k = min(16, pred.shape[0])
@@ -154,14 +136,10 @@ def main():
     decoder = SDXLUnCLIPDecoder(device, args.mindeye_src, args.ckpt_path)
     clip_metric = CLIPMetric(device, hf_cache=hf_cache)
 
-    # Grid: cond_source x cfg_scale x img2img strength (regression ignores cfg).
-    # No trained low head -> the blur is None, so every strength is token-only;
-    # collapse to strength=1.0 to avoid 4x redundant decodes.
     strengths = args.ll_strengths if model.low_head is not None else [1.0]
     configs = []
     for cond in args.cond_sources:
         scales = [1.0] if cond == "regression" else args.cfg_scales
-        # blend_w only means anything for cond_source=blend
         blends = args.blend_ws if cond == "blend" else [None]
         for cfgs in scales:
             for bw in blends:
