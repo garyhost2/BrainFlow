@@ -128,6 +128,16 @@ echo "── arm ${ARM_ID}: ${NAME} → ${OUT}"
 echo "   subjects: ${SUBJECTS}   epochs: ${EPOCHS}"
 echo "   ${EXTRA}"
 
+# Remote tracking, opt-in: WANDB_PROJECT=<name> sbatch ... . The run name carries
+# the arm and the subject set, because those are what distinguish two rows in the
+# ablation table. Nothing is sent unless WANDB_PROJECT is set.
+WANDB_ARGS=""
+if [ -n "${WANDB_PROJECT:-}" ]; then
+    WANDB_ARGS="--wandb-project ${WANDB_PROJECT} --wandb-name ${NAME}_${SUBJ_TAG}"
+    [ -n "${WANDB_MODE_OVERRIDE:-}" ] && WANDB_ARGS="${WANDB_ARGS} --wandb-mode ${WANDB_MODE_OVERRIDE}"
+    echo "   tracking: W&B project ${WANDB_PROJECT} as ${NAME}_${SUBJ_TAG}"
+fi
+
 srun python -m scripts.train_step1b \
     --subjects ${SUBJECTS} \
     --epochs "${EPOCHS}" \
@@ -142,6 +152,7 @@ srun python -m scripts.train_step1b \
     --decode-eval --decode-n 64 \
     --out "${OUT}" \
     ${EXTRA} \
+    ${WANDB_ARGS} \
     ${TRAIN_EXTRA:-}
 
 echo "── done $(date). delta_cos trace:"

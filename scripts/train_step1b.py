@@ -177,6 +177,19 @@ def parse_args():
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--out", type=str, default="outputs/step1b")
     ap.add_argument("--seed", type=int, default=0)
+    # Remote tracking. Off unless --wandb-project is given, so nothing about the
+    # existing jobs changes. diagnostics.jsonl stays the source of truth; wandb
+    # is a mirror, because the only other way to read a run is to be on the
+    # cluster's filesystem.
+    ap.add_argument("--wandb-project", type=str, default=None,
+                    help="W&B project. Unset disables tracking entirely.")
+    ap.add_argument("--wandb-entity", type=str, default=None)
+    ap.add_argument("--wandb-name", type=str, default=None,
+                    help="Run name. Defaults to the basename of --out.")
+    ap.add_argument("--wandb-mode", type=str, default="online",
+                    choices=["online", "offline"],
+                    help="'offline' writes to <out>/wandb and needs a later "
+                         "`wandb sync`; use it if the compute nodes lose egress.")
     return ap.parse_args()
 
 def lr_at(step, total, warm, base, mn):
@@ -185,12 +198,61 @@ def lr_at(step, total, warm, base, mn):
     prog = (step - warm) / max(1, total - warm)
     return mn + 0.5 * (base - mn) * (1 + math.cos(math.pi * prog))
 
+_WANDB = None
+
+
+def _wandb_start(args, cfg, out_dir):
+    """Return a live W&B run, or None. Never fatal: a tracking failure must not
+    kill a 12-hour job, so every path here degrades to local-only logging."""
+    global _WANDB
+    if not args.wandb_project:
+        return None
+    try:
+        import os
+        import wandb
+    except ImportError:
+        print("[warn] --wandb-project set but wandb is not installed; "
+              "logging to diagnostics.jsonl only.")
+        return None
+    if args.wandb_mode == "online" and not os.environ.get("WANDB_API_KEY"):
+        print("[warn] WANDB_API_KEY unset; falling back to --wandb-mode offline. "
+              f"Sync later with: wandb sync {out_dir}/wandb/latest-run")
+        args.wandb_mode = "offline"
+    try:
+        _WANDB = wandb.init(
+            project=args.wandb_project, entity=args.wandb_entity,
+            name=args.wandb_name or Path(out_dir).name,
+            mode=args.wandb_mode, dir=str(out_dir),
+            config={**vars(args), **{f"cfg.{k}": v for k, v in vars(cfg).items()
+                                     if isinstance(v, (int, float, str, bool))}})
+        print(f"✓ W&B {args.wandb_mode}: {getattr(_WANDB, 'url', out_dir)}")
+    except Exception as e:
+        print(f"[warn] wandb.init failed ({e}); logging to diagnostics.jsonl only.")
+        _WANDB = None
+    return _WANDB
+
+
+def _wandb_log(row: dict):
+    """No explicit step: train rows land many times per epoch while eval rows
+    land once, so an epoch-valued step would be non-monotonic and wandb would
+    drop the out-of-order ones. Every row carries `epoch`, so use that as the
+    x-axis in the UI."""
+    if _WANDB is None:
+        return
+    try:
+        _WANDB.log({k: v for k, v in row.items()
+                    if isinstance(v, (int, float)) and not isinstance(v, bool)})
+    except Exception:
+        pass
+
+
 def _append_metrics(out_dir, row: dict):
     """One JSON object per eval, appended. paper_report.py reads the tail."""
     import json
     with open(Path(out_dir) / "diagnostics.jsonl", "a") as f:
         f.write(json.dumps({k: (float(v) if isinstance(v, (int, float)) else v)
                             for k, v in row.items()}) + "\n")
+    _wandb_log(row)
 
 
 @torch.no_grad()
@@ -363,6 +425,7 @@ def main():
                            cls_cond_mode=args.cls_cond_mode,
                            cls_jitter_rad=args.cls_jitter_rad,
                            stochastic_source=args.stochastic_source)
+    _wandb_start(args, cfg, out_dir)
     model = TokenStep1Model(cfg, bundle.voxels).to(device)
     if cfg.geometry == "sphere" and cfg.center_tokens:
         model.set_target_mean(
@@ -495,6 +558,10 @@ def main():
                                  low=f"{float(ld.get('low', 0)):.3f}",
                                  clip=f"{float(ld.get('clip', 0)):.3f}",
                                  lr=f"{lr:.1e}", skip=nan_skips)
+                _wandb_log({f"train/{k}": float(v) for k, v in ld.items()}
+                           | {"train/lr": lr, "train/grad_norm": float(gnorm),
+                              "train/nan_skips": nan_skips,
+                              "epoch": epoch, "step": step})
 
         if epoch % args.eval_freq == 0 or epoch == args.epochs:
             ema.store(model); ema.copy_to(model)
@@ -673,6 +740,12 @@ def main():
         split = "val" if bundle.val is not None else "test"
         print(f"Done. best {split}/{args.select_on}={best_cos:.4f}. "
               f"Checkpoints in {out_dir}")
+    if _WANDB is not None:
+        try:
+            _WANDB.summary["best_selection"] = float(best_img if low_only else best_cos)
+            _WANDB.finish()
+        except Exception:
+            pass
 
 def _save_grid(pred, gt, path, n=8):
     try:
