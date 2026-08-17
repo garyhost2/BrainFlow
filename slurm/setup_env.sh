@@ -41,6 +41,29 @@ pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorc
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 pip install -r "${REPO_DIR}/requirements.txt"
 
+# The decoder half of the environment. requirements.txt alone leaves out
+# transformers, kornia and pytorch-lightning, so an env built from this script
+# could train but died at the first --decode-eval. setup_step1b.sh owns the
+# pinned set (and is idempotent: it skips the MindEyeV2 clone and the 5 GB
+# unclip6 checkpoint if they are already present).
+bash "${REPO_DIR}/scripts/setup_step1b.sh"
+
+python - <<'PY'
+import importlib, sys
+need = ["torch", "torchvision", "diffusers", "transformers", "open_clip",
+        "kornia", "pytorch_lightning", "omegaconf", "h5py", "webdataset",
+        "scipy", "pytest"]
+missing = []
+for m in need:
+    try:
+        importlib.import_module(m)
+    except Exception:
+        missing.append(m)
+if missing:
+    print("INCOMPLETE ENV, missing:", ", ".join(missing)); sys.exit(1)
+print("env import check: all", len(need), "modules present")
+PY
+
 echo
 echo "✓ Environment '${ENV_NAME}' ready. To use:"
 echo "    conda activate ${ENV_NAME}"
