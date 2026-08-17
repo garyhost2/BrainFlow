@@ -30,10 +30,10 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from brainflow.tensor_cache import assert_tensor_cache_alignment
-from brainflow.step1.targets_bigg import _load_embedder, _encode_dual
-from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder, quiet_benign_warnings
-from brainflow.step1.metrics import pixcorr, ssim, CLIPMetric
+from rxfm.tensor_cache import assert_tensor_cache_alignment
+from rxfm.targets import _load_embedder, _encode_dual
+from rxfm.decoder import SDXLUnCLIPDecoder, quiet_benign_warnings
+from rxfm.image_metrics import pixcorr, ssim, CLIPMetric
 
 
 def parse_args():

@@ -51,7 +51,7 @@ def tree():
 def _run(root, *extra):
     out = root / "paper"
     r = subprocess.run(
-        [sys.executable, "-m", "scripts.paper_report", "--root", str(root),
+        [sys.executable, "-m", "scripts.report", "--root", str(root),
          "--out", str(out), *extra],
         capture_output=True, text=True, cwd=str(REPO),
         env={**__import__("os").environ, "PYTHONIOENCODING": "utf-8"})
@@ -95,7 +95,7 @@ class TestPaperReport:
     def test_empty_tree_fails_loudly(self):
         with tempfile.TemporaryDirectory() as d:
             r = subprocess.run(
-                [sys.executable, "-m", "scripts.paper_report", "--root", d,
+                [sys.executable, "-m", "scripts.report", "--root", d,
                  "--out", str(Path(d) / "paper")],
                 capture_output=True, text=True, cwd=str(REPO))
             assert r.returncode != 0

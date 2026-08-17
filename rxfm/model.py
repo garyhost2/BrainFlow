@@ -30,7 +30,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .model import ResMLP, SinusoidalTime
+from .modules import ResMLP, SinusoidalTime
 from .sphere import (random_sphere, project_tangent, exp_map, log_map,
                      slerp, slerp_velocity, polar_encode, polar_decode,
                      tangent_noise_rad)
@@ -341,7 +341,7 @@ class CrossAttn(nn.Module):
 class SubjectResidualAdapter(nn.Module):
     """Per-subject rank-r residual on the shared hidden vector (LoRA + bias).
 
-    Ported from :class:`brainflow.models.SubjectResidualAdapter`. Zero-initialised
+    Ported from :class:`rxfm.models.SubjectResidualAdapter`. Zero-initialised
     on all three tensors, so at step 0 the adapter is exactly the identity and the
     model is the pure shared encoder -- adding a subject cannot perturb the others
     until gradients say it should.
@@ -1320,7 +1320,7 @@ class TokenStep1Model(nn.Module):
     @torch.no_grad()
     def diagnose(self, fmri, subject, target_raw, *, target_cls=None,
                  n_steps=20, solver="heun"):
-        """Latent-space diagnostics for :mod:`brainflow.step1.instrument`.
+        """Latent-space diagnostics for :mod:`rxfm.diagnostics`.
 
         Returns per-sample tensors so the caller can aggregate across batches.
         The key output is the pair (anchor_cos, flow_cos): their difference is

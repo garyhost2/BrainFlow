@@ -7,11 +7,11 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-from brainflow.step1.frontier import (FrontierPoint, format_surface, latent_frontier,
+from rxfm.frontier import (FrontierPoint, format_surface, latent_frontier,
                                       pareto_front, parse_ks, predicted_frontier,
                                       predicted_resultant)
-from brainflow.step1.model_tokens import TokenStep1Config, TokenStep1Model
-from brainflow.step1.targets import TargetStats
+from rxfm.model import TokenStep1Config, TokenStep1Model
+from rxfm.target_stats import TargetStats
 
 
 VOX = {1: 96}

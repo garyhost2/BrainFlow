@@ -43,10 +43,10 @@ pip install -r "${REPO_DIR}/requirements.txt"
 
 # The decoder half of the environment. requirements.txt alone leaves out
 # transformers, kornia and pytorch-lightning, so an env built from this script
-# could train but died at the first --decode-eval. setup_step1b.sh owns the
+# could train but died at the first --decode-eval. setup_decoder.sh owns the
 # pinned set (and is idempotent: it skips the MindEyeV2 clone and the 5 GB
 # unclip6 checkpoint if they are already present).
-bash "${REPO_DIR}/scripts/setup_step1b.sh"
+bash "${REPO_DIR}/scripts/setup_decoder.sh"
 
 python - <<'PY'
 import importlib, sys

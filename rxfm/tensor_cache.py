@@ -1,7 +1,7 @@
 """Alignment contract for the per-subject tensor cache.
 
 Deliberately dependency-free: every script that reads the cache imports this,
-and pulling in ``brainflow.data`` for a guard would drag ``webdataset`` and
+and pulling in ``rxfm.nsd`` for a guard would drag ``webdataset`` and
 ``h5py`` into scripts that need neither.
 """
 from __future__ import annotations

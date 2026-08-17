@@ -9,14 +9,14 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-from brainflow.tensor_cache import assert_tensor_cache_alignment
-from brainflow.step1.model_tokens import TokenStep1Config, TokenStep1Model
-from brainflow.step1.targets_bigg import build_or_load_bigg_targets
-from brainflow.step1.targets import TargetStats
-from brainflow.step1.data import build_step1_loaders
-from brainflow.step1.metrics import EMA, pixcorr, ssim, CLIPMetric
-from brainflow.step1.decoder_sgm import quiet_benign_warnings
-from brainflow.step1.instrument import (latent_diagnostics, train_val_gap,
+from rxfm.tensor_cache import assert_tensor_cache_alignment
+from rxfm.model import TokenStep1Config, TokenStep1Model
+from rxfm.targets import build_or_load_bigg_targets
+from rxfm.target_stats import TargetStats
+from rxfm.dataset import build_step1_loaders
+from rxfm.image_metrics import EMA, pixcorr, ssim, CLIPMetric
+from rxfm.decoder import quiet_benign_warnings
+from rxfm.diagnostics import (latent_diagnostics, train_val_gap,
                                         grad_norms, write_manifest)
 
 def setup_a100():
@@ -294,7 +294,7 @@ def _migrate_input_proj(model, state, label):
     2. otherwise the widest subject in the checkpoint -- voxel correspondence is
        lost, but a trained projection is still a better starting point than noise.
 
-    Mirrors :func:`brainflow.models.migrate_input_proj`, which does the same for
+    Mirrors :func:`rxfm.models.migrate_input_proj`, which does the same for
     the v5 ``brain_enc.`` prefix. Kept separate so ``step1`` does not take a
     dependency on the legacy module for forty lines of key rewriting.
     """
@@ -382,7 +382,7 @@ def main():
     stats: TargetStats = targets["_stats"]
     lat_stats = None
     if args.low_level and args.ll_target == "latent":
-        from brainflow.step1.targets_latent import build_or_load_latent_targets
+        from rxfm.targets_latent import build_or_load_latent_targets
         # decoder=None: refuse to build a 2 GB/subject cache inside a training job.
         targets |= build_or_load_latent_targets(
             tensors, args.subjects, args.target_dir, decoder=None, ll_size=args.ll_size)
@@ -484,7 +484,7 @@ def main():
 
     decoder = clip_metric = None
     if args.decode_eval:
-        from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder
+        from rxfm.decoder import SDXLUnCLIPDecoder
         decoder = SDXLUnCLIPDecoder(device, args.mindeye_src, args.ckpt_path,
                                     cls_vector_slot=tuple(args.cls_vector_slot))
         clip_metric = CLIPMetric(device, hf_cache=hf_cache)

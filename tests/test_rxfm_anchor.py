@@ -15,9 +15,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from brainflow.step1.model_tokens import (TokenStep1Config, TokenStep1Model,
+from rxfm.model import (TokenStep1Config, TokenStep1Model,
                                           sigma_from_jitter, wrapped_gaussian_kl)
-from brainflow.step1.sphere import exp_map, project_tangent, slerp, slerp_velocity
+from rxfm.sphere import exp_map, project_tangent, slerp, slerp_velocity
 
 
 VOX = {1: 128, 2: 96}
@@ -200,7 +200,7 @@ def test_cls_jitter_is_in_radians_not_per_coordinate_sigma(d):
     (41 deg), not 0.02 -- and it scales with d, so the same config means different
     things at different widths. That is the defect this parameterisation fixes.
     """
-    from brainflow.step1.sphere import tangent_noise, tangent_noise_rad
+    from rxfm.sphere import tangent_noise, tangent_noise_rad
     torch.manual_seed(0)
     z = F.normalize(torch.randn(2048, d), dim=-1)
     rad = 0.30

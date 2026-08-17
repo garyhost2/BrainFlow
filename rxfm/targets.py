@@ -24,7 +24,7 @@ from pathlib import Path
 import torch
 from tqdm.auto import tqdm
 
-from .targets import TargetStats
+from .target_stats import TargetStats
 
 TOKEN_LEN = 256
 TOKEN_DIM = 1664
@@ -36,7 +36,7 @@ def _add_sgm_to_path(mindeye_src: Path):
     gm = mindeye_src / "generative_models"
     if not gm.exists():
         raise FileNotFoundError(
-            f"Vendored sgm not found at {gm}. Run scripts/setup_step1b.sh first.")
+            f"Vendored sgm not found at {gm}. Run scripts/setup_decoder.sh first.")
     for p in (str(mindeye_src), str(gm)):
         if p not in sys.path:
             sys.path.insert(0, p)

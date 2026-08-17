@@ -18,12 +18,12 @@ for m in cuda12.1/toolkit/12.1.1 cuda11.8/toolkit/11.8.0; do
     module load "$m" 2>/dev/null && { echo "Loaded module: $m"; break; }
 done
 
-VENV="${VENV:-$HOME/envs/brainflow}"
+VENV="${VENV:-$HOME/envs/rxfm}"
 if [ -f "${VENV}/bin/activate" ]; then
     source "${VENV}/bin/activate"
     echo "Activated venv: ${VENV}"
 elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
-    source "$HOME/anaconda3/etc/profile.d/conda.sh"; conda activate "${ENV_NAME:-brainflow}"
+    source "$HOME/anaconda3/etc/profile.d/conda.sh"; conda activate "${ENV_NAME:-rxfm}"
 fi
 
 REPO_DIR="${REPO_DIR:-$HOME/BrainFlow}"
@@ -68,7 +68,7 @@ if [ "${FREE_GB}" -lt "$(( NEED_GB + 20 ))" ]; then
 fi
 echo "────────────────────────────────────────────────────────────────"
 
-python -m scripts.train_step1b \
+python -m scripts.train \
     --data-dir "${DATA_DIR}" \
     --target-dir "${TARGET_DIR}" \
     --subjects ${SUBJECTS} \

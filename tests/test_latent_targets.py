@@ -15,10 +15,10 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from brainflow.step1.targets_latent import (build_or_load_latent_targets,
+from rxfm.targets_latent import (build_or_load_latent_targets,
                                             _subj_file, _accum_stats)
-from brainflow.step1.data import build_step1_loaders
-from brainflow.step1.model_tokens import TokenStep1Config, TokenStep1Model
+from rxfm.dataset import build_step1_loaders
+from rxfm.model import TokenStep1Config, TokenStep1Model
 
 N_TR, N_TE, V = 20, 8, 30
 

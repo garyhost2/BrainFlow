@@ -20,9 +20,9 @@ from pathlib import Path
 
 import torch
 
-from brainflow.tensor_cache import assert_tensor_cache_alignment
-from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder, quiet_benign_warnings
-from brainflow.step1.targets_latent import build_or_load_latent_targets, _subj_file
+from rxfm.tensor_cache import assert_tensor_cache_alignment
+from rxfm.decoder import SDXLUnCLIPDecoder, quiet_benign_warnings
+from rxfm.targets_latent import build_or_load_latent_targets, _subj_file
 
 
 def parse_args():

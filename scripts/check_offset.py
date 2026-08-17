@@ -1,6 +1,6 @@
 """Gate 0: decide the behav->betas trial offset from the data itself.
 
-``brainflow/data.py`` indexes the betas HDF5 with ``all_trial - 1`` while indexing
+``rxfm/data.py`` indexes the betas HDF5 with ``all_trial - 1`` while indexing
 the COCO image HDF5 with ``all_coco`` unshifted. MindEye2's ``dataset_creation``
 notebook defines behav column 5 as::
 
@@ -186,9 +186,9 @@ def main():
               "EVERY candidate, so this cannot discriminate. Check the target cache "
               "and the voxel/behav alignment before trusting any arm downstream.")
     if best["offset"] != -1:
-        print("\n   brainflow/data.py:132 currently uses `all_trial - 1`. "
+        print("\n   rxfm/data.py:132 currently uses `all_trial - 1`. "
               f"This says it should be `all_trial + {best['offset']}`.")
-    # Machine-readable verdict: gate1_rxfm.sbatch greps for this line, so an
+    # Machine-readable verdict: train_arms.sbatch greps for this line, so an
     # inconclusive run can no longer unblock the ablation just by existing.
     print(f"\nGATE0: verdict={'CONCLUSIVE' if conclusive else 'INCONCLUSIVE'} "
           f"offset={best['offset']:+d} top1={best['top1']:.4f} "

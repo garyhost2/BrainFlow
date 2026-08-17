@@ -9,7 +9,7 @@ inflated the headline numbers rather than merely shrinking them.
 """
 import pytest
 
-from brainflow.step1.data import SubjectSampler
+from rxfm.dataset import SubjectSampler
 
 
 def _batches(sampler):

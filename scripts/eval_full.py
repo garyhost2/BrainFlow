@@ -9,7 +9,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from brainflow.metrics_full import evaluate_full
+from rxfm.metrics import evaluate_full
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -64,10 +64,10 @@ def run_self_test() -> int:
     return 0
 
 def run_full_eval(args: argparse.Namespace) -> int:
-    from brainflow.config import load_config
-    from brainflow.data import build_dataloaders
-    from brainflow.vae import FrozenVAE
-    from brainflow.solvers import make_t_grid
+    from rxfm.config import load_config
+    from rxfm.nsd import build_dataloaders
+    from rxfm.vae import FrozenVAE
+    from rxfm.solvers import make_t_grid
 
     cfg = load_config()
     if args.cfg_scale is not None:
@@ -90,11 +90,11 @@ def run_full_eval(args: argparse.Namespace) -> int:
     is_phase2 = any(k.startswith("flow_clip.") for k in state.keys())
 
     if is_phase2:
-        from brainflow.phase2_model import BrainFlowPhase2
+        from rxfm.phase2_model import BrainFlowPhase2
         model = BrainFlowPhase2(cfg, voxels).to(device).eval()
         model.load_state_dict(state, strict=False)
     else:
-        from brainflow.models import BrainFlowV5, migrate_input_proj
+        from rxfm.models import BrainFlowV5, migrate_input_proj
         model = BrainFlowV5(cfg, voxels).to(device).eval()
         state = migrate_input_proj(state, model.brain_enc.max_vox)
         model.load_state_dict(state, strict=False)

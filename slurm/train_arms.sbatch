@@ -2,7 +2,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Gate 1 — does R-XFM beat the anchor it starts from?
 #
-#   sbatch --array=0-3 slurm/gate1_rxfm.sbatch
+#   sbatch --array=0-3 slurm/train_arms.sbatch
 #
 # Four arms on subject 1, pilot length. The question is single and cheap:
 # does the flow ADD anything over its own starting point?
@@ -50,7 +50,7 @@ for m in cuda12.1/toolkit/12.1.1 cuda11.8/toolkit/11.8.0; do
     module load "$m" 2>/dev/null && { echo "module: $m"; break; }
 done
 
-ENV_NAME="${ENV_NAME:-brainflow}"
+ENV_NAME="${ENV_NAME:-rxfm}"
 [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ] && source "$HOME/anaconda3/etc/profile.d/conda.sh"
 conda activate "${ENV_NAME}"
 
@@ -67,7 +67,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 if [ ! -f "outputs/gate0_offset.txt" ]; then
     echo "═══════════════════════════════════════════════════════════════════"
     echo " REFUSING TO RUN: Gate 0 has not been recorded."
-    echo " brainflow/data.py indexes betas with (all_trial - 1) while indexing"
+    echo " rxfm/data.py indexes betas with (all_trial - 1) while indexing"
     echo " the image hdf5 unshifted. MindEye2 defines behav column 5 as"
     echo "   global_trial = (SESSION-1)*750 + jj      # 0-based"
     echo " and consumes it with NO offset. If ours is wrong, every arm below"
@@ -98,7 +98,7 @@ fi
 # with 0.007 top-1 retrieval against 0.131 at the right offset. Compare the two.
 GATE0_OFFSET="$(grep -o 'GATE0:.*offset=[+-][0-9]*' outputs/gate0_offset.txt \
                 | grep -o 'offset=[+-][0-9]*' | cut -d= -f2 | head -1)"
-CODE_OFFSET="$(python -c 'from brainflow.tensor_cache import BEHAV_TO_BETAS_OFFSET as o; print(f"{o:+d}")')"
+CODE_OFFSET="$(python -c 'from rxfm.tensor_cache import BEHAV_TO_BETAS_OFFSET as o; print(f"{o:+d}")')"
 if [ "${GATE0_OFFSET}" != "${CODE_OFFSET}" ]; then
     echo "═══════════════════════════════════════════════════════════════════"
     echo " REFUSING TO RUN: gate 0 measured offset=${GATE0_OFFSET} but the code"
@@ -155,7 +155,7 @@ if [ -n "${WANDB_PROJECT:-}" ]; then
     echo "   tracking: W&B project ${WANDB_PROJECT} as ${NAME}_${SUBJ_TAG}"
 fi
 
-srun python -m scripts.train_step1b \
+srun python -m scripts.train \
     --subjects ${SUBJECTS} \
     --epochs "${EPOCHS}" \
     --batch-size 48 \

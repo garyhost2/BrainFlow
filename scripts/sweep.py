@@ -7,7 +7,7 @@ checkpoint + the decoder once and sweeps the decode configs on a fixed subset of
 test images, so you can read off the PixCorr-optimal and CLIP-optimal settings
 without retraining.
 
-Run via slurm/sweep_step1b.sbatch (needs the A100 / decoder).
+Run via slurm/sweep.sbatch (needs the A100 / decoder).
 """
 
 from __future__ import annotations
@@ -19,14 +19,14 @@ from pathlib import Path
 
 import torch
 
-from brainflow.tensor_cache import assert_tensor_cache_alignment
-from brainflow.step1.model_tokens import TokenStep1Config, TokenStep1Model
-from brainflow.step1.targets import TargetStats
-from brainflow.step1.targets_bigg import build_or_load_bigg_targets
-from brainflow.step1.data import build_step1_loaders
-from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder, quiet_benign_warnings
-from brainflow.step1.metrics import pixcorr, ssim, CLIPMetric
-from brainflow.metrics_full import evaluate_full, retrieval_metrics, format_comparison
+from rxfm.tensor_cache import assert_tensor_cache_alignment
+from rxfm.model import TokenStep1Config, TokenStep1Model
+from rxfm.target_stats import TargetStats
+from rxfm.targets import build_or_load_bigg_targets
+from rxfm.dataset import build_step1_loaders
+from rxfm.decoder import SDXLUnCLIPDecoder, quiet_benign_warnings
+from rxfm.image_metrics import pixcorr, ssim, CLIPMetric
+from rxfm.metrics import evaluate_full, retrieval_metrics, format_comparison
 
 
 def parse_args():

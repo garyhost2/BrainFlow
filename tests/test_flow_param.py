@@ -30,8 +30,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from brainflow.step1.model_tokens import TokenStep1Config, TokenStep1Model
-from brainflow.step1.sphere import log_map, slerp, slerp_velocity
+from rxfm.model import TokenStep1Config, TokenStep1Model
+from rxfm.sphere import log_map, slerp, slerp_velocity
 
 
 VOX = {1: 128}
@@ -201,7 +201,7 @@ def test_per_position_centering_changes_the_target_directions():
     torch.manual_seed(0)
     per_pos = torch.randn(cfg_p.token_len, cfg_p.token_dim)
     m.set_target_mean(per_pos)
-    from brainflow.step1.sphere import polar_encode
+    from rxfm.sphere import polar_encode
     x = torch.randn(4, cfg_p.token_len, cfg_p.token_dim)
     z_p, _ = polar_encode(x, m.tgt_mean)
     z_g, _ = polar_encode(x, per_pos.mean(0))

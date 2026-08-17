@@ -5,10 +5,10 @@ from pathlib import Path
 
 import torch
 
-from brainflow.tensor_cache import assert_tensor_cache_alignment
-from brainflow.step1.targets_bigg import _load_embedder, _encode_dual
-from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder
-from brainflow.step1.metrics import pixcorr, ssim
+from rxfm.tensor_cache import assert_tensor_cache_alignment
+from rxfm.targets import _load_embedder, _encode_dual
+from rxfm.decoder import SDXLUnCLIPDecoder
+from rxfm.image_metrics import pixcorr, ssim
 
 def main():
     ap = argparse.ArgumentParser()

@@ -14,7 +14,7 @@ Walks ``outputs/**/metrics.json`` (from ``eval_step1b``) and ``outputs/**/sweep.
 
 Runs entirely on files already on disk -- no GPU, no model, no decoder.
 
-    python -m scripts.paper_report --root outputs --out outputs/paper
+    python -m scripts.report --root outputs --out outputs/paper
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import json
 import sys
 from pathlib import Path
 
-from brainflow.metrics_full import NSD_REFERENCE, LOWER_IS_BETTER
+from rxfm.metrics import NSD_REFERENCE, LOWER_IS_BETTER
 
 # The report is UTF-8 (arrows mark metric direction). Don't let a cp1252 console
 # turn a finished report into a traceback -- the file is written either way.

@@ -9,10 +9,10 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-from brainflow.step1.instrument import (dispersion, effective_rank, grad_norms,
+from rxfm.diagnostics import (dispersion, effective_rank, grad_norms,
                                         latent_diagnostics, param_report,
                                         train_val_gap, write_manifest)
-from brainflow.step1.model_tokens import TokenStep1Config, TokenStep1Model
+from rxfm.model import TokenStep1Config, TokenStep1Model
 
 VOX = {1: 128}
 

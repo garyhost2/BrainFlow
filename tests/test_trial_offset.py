@@ -11,7 +11,7 @@ misaligned one. These tests pin both halves: the constant, and the refusal.
 """
 import pytest
 
-from brainflow.tensor_cache import (BEHAV_TO_BETAS_OFFSET, TENSOR_CACHE_FORMAT,
+from rxfm.tensor_cache import (BEHAV_TO_BETAS_OFFSET, TENSOR_CACHE_FORMAT,
                                     assert_tensor_cache_alignment,
                                     tensor_cache_meta)
 

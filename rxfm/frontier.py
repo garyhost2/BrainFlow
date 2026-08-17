@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F
 
-from ..metrics_full import evaluate_full, retrieval_metrics, two_way_identification
-from .instrument import dispersion, effective_rank
+from .metrics import evaluate_full, retrieval_metrics, two_way_identification
+from .diagnostics import dispersion, effective_rank
 from .sphere import polar_encode
 
 

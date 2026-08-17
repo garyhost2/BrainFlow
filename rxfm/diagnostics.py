@@ -160,7 +160,7 @@ def latent_diagnostics(model, loader, device, *, n_steps: int = 20,
         out["sigma_max"] = max(sig_max)
 
     P = torch.cat(pred_pool); T = torch.cat(targ_pool)
-    from ..metrics_full import retrieval_metrics, two_way_identification
+    from .metrics import retrieval_metrics, two_way_identification
     r = retrieval_metrics(P, T, batch_size=300, device=torch.device("cpu"))
     out["retr_fwd_300"] = r["retrieval_fwd"]
     out["retr_bwd_300"] = r["retrieval_bwd"]

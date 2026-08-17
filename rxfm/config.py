@@ -157,7 +157,7 @@ class Config:
     output_dir: Path = Path("./outputs")
     experiment_name: str = "baseline"
 
-    wandb_project: str = "brainflow-v5"
+    wandb_project: str = "rxfm-v5"
     wandb_run_name: str = "v5-multisubject"
     wandb_mode: str = "online"
 

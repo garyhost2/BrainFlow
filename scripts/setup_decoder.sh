@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # Step-1b one-time setup: vendored sgm (SDXL-unCLIP decoder) + checkpoint.
-# Run on the A100 node from the repo root:  bash scripts/setup_step1b.sh
+# Run on the A100 node from the repo root:  bash scripts/setup_decoder.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 

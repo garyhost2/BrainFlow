@@ -14,7 +14,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from brainflow.metrics_full import (evaluate_full, two_way_identification,
+from rxfm.metrics import (evaluate_full, two_way_identification,
                                     correlation_distance, retrieval_metrics,
                                     ssim_grayscale, format_comparison)
 
@@ -120,12 +120,12 @@ class TestEvaluateFullTwoWayKeys:
             x = torch.eye(B, dtype=pred.dtype, device=pred.device)
             return x, x.clone()
 
-        monkeypatch.setattr("brainflow.metrics_full._alexnet_feature_pair",
+        monkeypatch.setattr("rxfm.metrics._alexnet_feature_pair",
                             lambda pred, target, layer, device: _pair(pred, target, device))
-        monkeypatch.setattr("brainflow.metrics_full._inception_feature_pair", _pair)
-        monkeypatch.setattr("brainflow.metrics_full._clip_feature_pair", _pair)
-        monkeypatch.setattr("brainflow.metrics_full._effnet_feature_pair", _pair)
-        monkeypatch.setattr("brainflow.metrics_full._swav_feature_pair", _pair)
+        monkeypatch.setattr("rxfm.metrics._inception_feature_pair", _pair)
+        monkeypatch.setattr("rxfm.metrics._clip_feature_pair", _pair)
+        monkeypatch.setattr("rxfm.metrics._effnet_feature_pair", _pair)
+        monkeypatch.setattr("rxfm.metrics._swav_feature_pair", _pair)
 
         pred = torch.rand(4, 3, 64, 64)
         target = torch.rand(4, 3, 64, 64)
@@ -161,8 +161,8 @@ class TestCorrelationDistance:
         def _pair(pred, target, device):
             x = torch.randn(pred.shape[0], 32)
             return x, x.clone()
-        monkeypatch.setattr("brainflow.metrics_full._effnet_feature_pair", _pair)
-        monkeypatch.setattr("brainflow.metrics_full._swav_feature_pair", _pair)
+        monkeypatch.setattr("rxfm.metrics._effnet_feature_pair", _pair)
+        monkeypatch.setattr("rxfm.metrics._swav_feature_pair", _pair)
         x = torch.rand(4, 3, 64, 64)
         result = evaluate_full(x, x.clone(), device="cpu",
                                skip=["AlexNet(2)", "AlexNet(5)", "Inception", "CLIP"])

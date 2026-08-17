@@ -22,7 +22,7 @@
 #   ARM=sphere GEOMETRY=sphere sbatch slurm/paper_arm.sbatch
 #   ARM=euclid GEOMETRY=euclidean sbatch slurm/paper_arm.sbatch
 #
-# then aggregate both with:  python -m scripts.paper_report
+# then aggregate both with:  python -m scripts.report
 #
 # Other knobs: SUBJECTS, SEED, EPOCHS, EVAL_SUBJECTS, ARM_EXTRA, SELECT.
 
@@ -33,11 +33,11 @@ for m in cuda12.1/toolkit/12.1.1 cuda11.8/toolkit/11.8.0; do
     module load "$m" 2>/dev/null && { echo "Loaded module: $m"; break; }
 done
 
-VENV="${VENV:-$HOME/envs/brainflow}"
+VENV="${VENV:-$HOME/envs/rxfm}"
 if [ -f "${VENV}/bin/activate" ]; then
     source "${VENV}/bin/activate"
 elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
-    source "$HOME/anaconda3/etc/profile.d/conda.sh"; conda activate "${ENV_NAME:-brainflow}"
+    source "$HOME/anaconda3/etc/profile.d/conda.sh"; conda activate "${ENV_NAME:-rxfm}"
 fi
 
 REPO_DIR="${REPO_DIR:-$HOME/BrainFlow}"; cd "${REPO_DIR}"
@@ -95,7 +95,7 @@ if [ "${FREE_GB}" -lt "$(( NEED_GB + 20 ))" ]; then
 fi
 
 echo "════════════════ STAGE 1/3: TRAIN ════════════════"
-python -u -m scripts.train_step1b \
+python -u -m scripts.train \
     --data-dir "${DATA_DIR}" --target-dir "${TARGET_DIR}" \
     --mindeye-src "${MINDEYE_SRC}" --ckpt-path "${UNCLIP_CKPT}" \
     --subjects ${SUBJECTS} \
@@ -117,7 +117,7 @@ for c in ${CAND}; do [ -f "$c" ] && { CKPT="$c"; break; }; done
 [ -n "${CKPT}" ] || { echo "ERROR: no checkpoint in ${OUT}" >&2; exit 1; }
 
 echo "════════════════ STAGE 2/3: FULL EVAL (${CKPT}) ════════════════"
-python -u -m scripts.eval_step1b \
+python -u -m scripts.evaluate \
     --ckpt "${CKPT}" \
     --data-dir "${DATA_DIR}" --target-dir "${TARGET_DIR}" \
     --mindeye-src "${MINDEYE_SRC}" --ckpt-path "${UNCLIP_CKPT}" \
@@ -127,7 +127,7 @@ python -u -m scripts.eval_step1b \
     --out "${OUT}/eval_full"
 
 echo "════════════════ STAGE 3/3: OPERATING POINTS ════════════════"
-python -u -m scripts.sweep_step1b \
+python -u -m scripts.sweep \
     --ckpt "${CKPT}" \
     --data-dir "${DATA_DIR}" --target-dir "${TARGET_DIR}" \
     --mindeye-src "${MINDEYE_SRC}" --ckpt-path "${UNCLIP_CKPT}" \
@@ -138,7 +138,7 @@ python -u -m scripts.sweep_step1b \
     --out "${OUT}/sweep"
 
 echo "════════════════ REPORT ════════════════"
-python -u -m scripts.paper_report --root outputs --out outputs/paper || true
+python -u -m scripts.report --root outputs --out outputs/paper || true
 
 echo "Done at $(date)."
 echo "  checkpoints -> ${OUT}"

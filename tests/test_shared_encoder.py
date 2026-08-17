@@ -12,7 +12,7 @@ import re
 import pytest
 import torch
 
-from brainflow.step1.model_tokens import TokenStep1Config, TokenBackbone
+from rxfm.model import TokenStep1Config, TokenBackbone
 
 # Real NSD voxel counts, so the parameter arithmetic below is the true one.
 VOX = {1: 15724, 2: 14278, 5: 13039, 7: 12682}
@@ -120,7 +120,7 @@ def _old_state(subs):
 
 
 def test_migration_seeds_shared_layer_from_checkpoint():
-    from scripts.train_step1b import _migrate_input_proj
+    from scripts.train import _migrate_input_proj
 
     old = _old_state({1: VOX[1]})
     model = _Holder(_backbone(True, VOX))
@@ -145,7 +145,7 @@ def test_migration_seeds_shared_layer_from_checkpoint():
 def test_migration_prefers_widest_subject_present_in_run():
     """Voxel index j only means the same thing for the same subject, so an
     in-run subject beats a wider out-of-run one."""
-    from scripts.train_step1b import _migrate_input_proj
+    from scripts.train import _migrate_input_proj
 
     old = _old_state({1: VOX[1], 7: VOX[7]})          # 1 is wider than 7
     model = _Holder(_backbone(True, {7: VOX[7]}))     # but only 7 is in the run
@@ -155,7 +155,7 @@ def test_migration_prefers_widest_subject_present_in_run():
 
 
 def test_migration_is_noop_for_per_subject_target():
-    from scripts.train_step1b import _migrate_input_proj
+    from scripts.train import _migrate_input_proj
 
     old = _old_state({1: VOX[1]})
     model = _Holder(_backbone(False, {1: VOX[1]}))

@@ -17,7 +17,7 @@ for m in cuda12.1/toolkit/12.1.1 cuda11.8/toolkit/11.8.0; do
     module load "$m" 2>/dev/null && { echo "module: $m"; break; }
 done
 
-ENV_NAME="${ENV_NAME:-brainflow}"
+ENV_NAME="${ENV_NAME:-rxfm}"
 [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ] && source "$HOME/anaconda3/etc/profile.d/conda.sh"
 conda activate "${ENV_NAME}"
 

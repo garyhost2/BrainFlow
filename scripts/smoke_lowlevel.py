@@ -7,7 +7,7 @@ blurry init buys vs. the token-only decode (strength=1.0). Pick the strength tha
 maximises PixCorr/SSIM without collapsing CLIP, and pass it as --ll-strength when
 training the low-level head.
 
-Run: sbatch slurm/smoke_step1b_a100.sbatch  (or adapt) -> python -m scripts.smoke_lowlevel
+Run: sbatch slurm/smoke_train.sbatch  (or adapt) -> python -m scripts.smoke_lowlevel
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from brainflow.tensor_cache import assert_tensor_cache_alignment
-from brainflow.step1.targets_bigg import _load_embedder, _encode_dual
-from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder
-from brainflow.step1.metrics import pixcorr, ssim, CLIPMetric
+from rxfm.tensor_cache import assert_tensor_cache_alignment
+from rxfm.targets import _load_embedder, _encode_dual
+from rxfm.decoder import SDXLUnCLIPDecoder
+from rxfm.image_metrics import pixcorr, ssim, CLIPMetric
 
 
 def main():

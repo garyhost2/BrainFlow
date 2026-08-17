@@ -1,11 +1,11 @@
 import torch
 import torch.nn.functional as F
 
-from brainflow.step1.sphere import (
+from rxfm.sphere import (
     random_sphere, project_tangent, exp_map, log_map,
     slerp, slerp_velocity, polar_encode, polar_decode, tangent_noise,
 )
-from brainflow.step1.model_tokens import TokenStep1Config, TokenStep1Model
+from rxfm.model import TokenStep1Config, TokenStep1Model
 
 torch.manual_seed(0)
 
@@ -262,7 +262,7 @@ def test_low_only_fast_path_trains_only_the_head():
 #  BiMixCo augmentation (anti-overfit)
 # ---------------------------------------------------------------------------
 def test_mixco_mixes_only_selected_rows_and_stays_convex():
-    from brainflow.step1.model_tokens import mixco
+    from rxfm.model import mixco
     torch.manual_seed(0)
     x = torch.randn(64, 12)
     mixed, perm, betas, select = mixco(x, beta=0.15, s_thresh=0.5)
@@ -279,7 +279,7 @@ def test_mixco_mixes_only_selected_rows_and_stays_convex():
 
 def test_mixco_nce_target_rows_sum_to_one():
     """The two-hot target must be a distribution, incl. when a row draws itself."""
-    from brainflow.step1.model_tokens import mixco_nce
+    from rxfm.model import mixco_nce
     torch.manual_seed(0)
     B, D = 8, 5
     preds = F.normalize(torch.randn(B, D), dim=-1)
@@ -297,7 +297,7 @@ def test_mixco_nce_target_rows_sum_to_one():
 
 
 def test_training_step_with_mixco_trains_and_differs_from_clean():
-    from brainflow.step1.model_tokens import TokenStep1Config
+    from rxfm.model import TokenStep1Config
     cfg = _tiny_cfg("sphere")
     cfg.mixup_pct = 0.33
     model = TokenStep1Model(cfg, {1: 10})
@@ -372,7 +372,7 @@ def _latent_cfg():
 
 
 def test_latent_head_outputs_decoder_latent_shape():
-    from brainflow.step1.model_tokens import LatentLowLevelHead
+    from rxfm.model import LatentLowLevelHead
     model = TokenStep1Model(_latent_cfg(), {1: 10})
     assert isinstance(model.low_head, LatentLowLevelHead)
     assert model.low_is_latent
@@ -381,7 +381,7 @@ def test_latent_head_outputs_decoder_latent_shape():
 
 
 def test_latent_head_shape_matches_decoder_constant():
-    from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder
+    from rxfm.decoder import SDXLUnCLIPDecoder
     model = TokenStep1Model(_latent_cfg(), {1: 10})
     out = model.low_head(torch.randn(1, 10), 1)
     assert tuple(out.shape[1:]) == SDXLUnCLIPDecoder.LATENT_SHAPE
@@ -478,7 +478,7 @@ def test_latent_head_can_overfit_two_distinct_layouts():
 
 def test_old_rgb_checkpoint_config_still_builds_rgb_head():
     """A cfg pickled before ll_target existed must not silently become a latent head."""
-    from brainflow.step1.model_tokens import LowLevelHead
+    from rxfm.model import LowLevelHead
     cfg = _tiny_cfg("sphere")
     del cfg.ll_target                       # simulate an older pickled dataclass
     model = TokenStep1Model(cfg, {1: 10})
