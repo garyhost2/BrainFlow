@@ -93,6 +93,21 @@ if ! grep -q "GATE0: verdict=CONCLUSIVE" outputs/gate0_offset.txt; then
     echo "═══════════════════════════════════════════════════════════════════"
     exit 1
 fi
+# A verdict is not agreement. On 2026-08-17 gate 0 returned CONCLUSIVE offset=+0
+# while the code still used all_trial-1, and five jobs launched onto a pairing
+# with 0.007 top-1 retrieval against 0.131 at the right offset. Compare the two.
+GATE0_OFFSET="$(grep -o 'GATE0:.*offset=[+-][0-9]*' outputs/gate0_offset.txt \
+                | grep -o 'offset=[+-][0-9]*' | cut -d= -f2 | head -1)"
+CODE_OFFSET="$(python -c 'from brainflow.tensor_cache import BEHAV_TO_BETAS_OFFSET as o; print(f"{o:+d}")')"
+if [ "${GATE0_OFFSET}" != "${CODE_OFFSET}" ]; then
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo " REFUSING TO RUN: gate 0 measured offset=${GATE0_OFFSET} but the code"
+    echo " uses BEHAV_TO_BETAS_OFFSET=${CODE_OFFSET}. Every arm below would train"
+    echo " on fMRI paired with the wrong trial's image."
+    echo "═══════════════════════════════════════════════════════════════════"
+    exit 1
+fi
+echo "── Gate 0 offset ${GATE0_OFFSET} matches the code ──"
 
 # ── Arms ─────────────────────────────────────────────────────────────────────
 ARM_ID="${SLURM_ARRAY_TASK_ID:-3}"

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 
+from brainflow.tensor_cache import assert_tensor_cache_alignment
 from brainflow.step1.targets_bigg import _load_embedder, _encode_dual
 from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder
 from brainflow.step1.metrics import pixcorr, ssim
@@ -26,7 +27,7 @@ def main():
     out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
     data_dir = Path(args.data_dir)
 
-    tensors = torch.load(data_dir / args.tensor_cache, map_location="cpu")
+    tensors = assert_tensor_cache_alignment(data_dir / args.tensor_cache, torch.load(data_dir / args.tensor_cache, map_location="cpu"))
     imgs = tensors[f"imgs_test_{args.subject}"][:args.n]
 
     print("▶ Encoding ground-truth bigG (cls + tokens)…")

@@ -20,6 +20,7 @@ from pathlib import Path
 
 import torch
 
+from brainflow.tensor_cache import assert_tensor_cache_alignment
 from brainflow.step1.decoder_sgm import SDXLUnCLIPDecoder, quiet_benign_warnings
 from brainflow.step1.targets_latent import build_or_load_latent_targets, _subj_file
 
@@ -60,7 +61,7 @@ def main():
         raise SystemExit(
             f"ERROR: need ~{need_gb:.1f}G (+20G headroom) but only {free_gb:.1f}G free.")
 
-    tensors = torch.load(Path(args.data_dir) / args.tensor_cache, map_location="cpu")
+    tensors = assert_tensor_cache_alignment(Path(args.data_dir) / args.tensor_cache, torch.load(Path(args.data_dir) / args.tensor_cache, map_location="cpu"))
     print("▶ loading SDXL-unCLIP (for its VAE)…")
     decoder = SDXLUnCLIPDecoder(device, args.mindeye_src, args.ckpt_path)
 

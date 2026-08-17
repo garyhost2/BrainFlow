@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 from tqdm.auto import tqdm
 
+from brainflow.tensor_cache import assert_tensor_cache_alignment
 from brainflow.step1.model import Step1Config, Step1Model
 from brainflow.step1.targets import TargetStats
 from brainflow.step1.data import build_step1_loaders
@@ -57,7 +58,7 @@ def main():
         model.load_state_dict(sd)
     model = model.to(device).eval()
 
-    tensors = torch.load(data_dir / args.tensor_cache, map_location="cpu")
+    tensors = assert_tensor_cache_alignment(data_dir / args.tensor_cache, torch.load(data_dir / args.tensor_cache, map_location="cpu"))
     targets = torch.load(data_dir / args.target_cache, map_location="cpu")
     bundle = build_step1_loaders(tensors, targets, subjects, batch_size=64, num_workers=8)
 

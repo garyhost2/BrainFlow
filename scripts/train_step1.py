@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
+from brainflow.tensor_cache import assert_tensor_cache_alignment
 from brainflow.step1.model import Step1Config, Step1Model
 from brainflow.step1.targets import build_or_load_targets, TargetStats
 from brainflow.step1.data import build_step1_loaders
@@ -91,7 +92,7 @@ def main():
     data_dir = Path(args.data_dir)
     hf_cache = data_dir / "hf_cache"
 
-    tensors = torch.load(data_dir / args.tensor_cache, map_location="cpu")
+    tensors = assert_tensor_cache_alignment(data_dir / args.tensor_cache, torch.load(data_dir / args.tensor_cache, map_location="cpu"))
     targets = build_or_load_targets(
         tensors, args.subjects, data_dir / args.target_cache, device, hf_cache=hf_cache)
     stats: TargetStats = targets["_stats"]
