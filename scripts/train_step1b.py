@@ -170,6 +170,12 @@ def parse_args():
                     help="freeze the whole token model and train ONLY the low-level "
                          "head; select best.pt on PixCorr+SSIM (not val_cos). Use with "
                          "--init-from to add a low-level head without drifting the prior.")
+    ap.add_argument("--freeze-anchor", action="store_true",
+                    help="freeze the encoder, anchor, radius and log-sigma heads and "
+                         "train ONLY the flow prior. Trained jointly, the anchor keeps "
+                         "improving under the flow, so the flow's own source is "
+                         "non-stationary and it converges to something ~0.12 from every "
+                         "target. Use with --init-from to give the prior a fixed source.")
     ap.add_argument("--eval-freq", type=int, default=5)
     ap.add_argument("--decode-eval", action="store_true")
     ap.add_argument("--decode-n", type=int, default=16)
@@ -453,6 +459,25 @@ def main():
             n_frozen += 0 if train_it else p.numel()
         print(f"✓ freeze-token: {n_frozen/1e6:.1f}M frozen, {n_train/1e6:.2f}M trainable "
               f"(low_head only); best.pt selected on PixCorr+SSIM")
+    if args.freeze_anchor:
+        if args.freeze_token:
+            raise SystemExit("--freeze-anchor and --freeze-token are mutually exclusive: "
+                             "one trains the flow prior, the other the low-level head.")
+        # Everything that defines the SOURCE is frozen: the encoder and anchor fix mu,
+        # radius_head fixes the norm, logs_head fixes the posterior width. Leaving any
+        # of them trainable would keep the source moving, which is the thing this flag
+        # exists to rule out.
+        trainable_prefixes = ("prior", "cls_prior")
+        n_frozen = n_train = 0
+        for name, p_ in model.named_parameters():
+            train_it = name.startswith(trainable_prefixes)
+            p_.requires_grad_(train_it)
+            n_train += p_.numel() if train_it else 0
+            n_frozen += 0 if train_it else p_.numel()
+        if n_train == 0:
+            raise SystemExit("--freeze-anchor left nothing trainable: no `prior` module.")
+        print(f"✓ freeze-anchor: {n_frozen/1e6:.1f}M frozen, {n_train/1e6:.2f}M trainable "
+              f"(flow prior only); the source is now stationary")
     write_manifest(out_dir, args=args, cfg=cfg, model=model, voxels=bundle.voxels)
     if cfg.geometry == "sphere" and cfg.flow_source != "noise":
         print(f"✓ R-XFM source={cfg.flow_source} param={cfg.resolved_flow_param()} "
