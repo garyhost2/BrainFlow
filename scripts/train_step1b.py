@@ -140,6 +140,17 @@ def parse_args():
     ap.add_argument("--cls-cfg-scale", type=float, default=3.0)
     ap.add_argument("--solver", type=str, default="heun", choices=["euler", "heun"])
     ap.add_argument("--uniform-t-prob", type=float, default=0.1)
+    ap.add_argument("--logit-normal-m", type=float, default=0.0,
+                    help="mean of the logit-normal flow-time schedule: "
+                         "t = sigmoid(N(m, s)). m=0 centres t at 0.5, which puts only "
+                         "~2%% of training mass below t=0.1. With an informative source "
+                         "that is the wrong place: zt = slerp(z0, z1, t) is already at "
+                         "cosine 0.78 at t=0.5 and 0.99 at t=0.9, so the model trains on "
+                         "inputs that are nearly the answer, while the sampler STARTS at "
+                         "t=0 where the input is the anchor. Negative m moves mass to low "
+                         "t (m=-1.5 puts the median at t=0.18).")
+    ap.add_argument("--logit-normal-s", type=float, default=1.0,
+                    help="std of the logit-normal flow-time schedule")
     ap.add_argument("--lambda-radius", type=float, default=1.0)
     ap.add_argument("--lambda-low", type=float, default=1.0,
                     help="low-level (blurry-image) loss weight; 0 disables the pathway")
@@ -413,6 +424,8 @@ def main():
                            subject_rank=args.subject_rank,
                            lambda_clip=args.lambda_clip, clip_temp=args.clip_temp,
                            geometry=args.geometry, uniform_t_prob=args.uniform_t_prob,
+                           logit_normal_m=args.logit_normal_m,
+                           logit_normal_s=args.logit_normal_s,
                            lambda_radius=args.lambda_radius, two_head=args.two_head,
                            lambda_rcfm=args.lambda_rcfm, cls_cfg_scale=args.cls_cfg_scale,
                            solver=args.solver, low_level=args.low_level,
