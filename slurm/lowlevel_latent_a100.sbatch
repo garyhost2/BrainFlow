@@ -63,6 +63,13 @@ if [ "${CACHE_OK}" -eq 0 ]; then
     srun python -m scripts.build_latent_targets --subjects ${SUBJECTS} --ll-size "${LL_SIZE}"
 fi
 
+# Remote tracking, opt-in: WANDB_PROJECT=<name> sbatch ... . Nothing is sent
+# unless WANDB_PROJECT is set.
+WANDB_ARGS=""
+if [ -n "${WANDB_PROJECT:-}" ]; then
+    WANDB_ARGS="--wandb-project ${WANDB_PROJECT} --wandb-name $(basename ${OUT})"
+    echo "   tracking: W&B project ${WANDB_PROJECT} as $(basename ${OUT})"
+fi
 srun python -m scripts.train_step1b \
     --subjects ${SUBJECTS} \
     --epochs "${EPOCHS}" \
@@ -76,6 +83,7 @@ srun python -m scripts.train_step1b \
     --eval-freq 5 \
     --decode-eval --decode-n 64 \
     --diag-batches 8 \
+    ${WANDB_ARGS} \
     --out "${OUT}" \
     ${TRAIN_EXTRA:-}
 

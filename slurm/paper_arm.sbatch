@@ -95,6 +95,13 @@ if [ "${FREE_GB}" -lt "$(( NEED_GB + 20 ))" ]; then
 fi
 
 echo "════════════════ STAGE 1/3: TRAIN ════════════════"
+# Remote tracking, opt-in: WANDB_PROJECT=<name> sbatch ... . Nothing is sent
+# unless WANDB_PROJECT is set.
+WANDB_ARGS=""
+if [ -n "${WANDB_PROJECT:-}" ]; then
+    WANDB_ARGS="--wandb-project ${WANDB_PROJECT} --wandb-name $(basename ${OUT})"
+    echo "   tracking: W&B project ${WANDB_PROJECT} as $(basename ${OUT})"
+fi
 python -u -m scripts.train_step1b \
     --data-dir "${DATA_DIR}" --target-dir "${TARGET_DIR}" \
     --mindeye-src "${MINDEYE_SRC}" --ckpt-path "${UNCLIP_CKPT}" \
@@ -104,6 +111,7 @@ python -u -m scripts.train_step1b \
     --epochs "${EPOCHS}" --batch-size "${BATCH}" --lr "${LR}" \
     --enc-hidden "${ENC_HIDDEN}" --val-frac "${VAL_FRAC}" \
     --eval-freq 10 --decode-eval --decode-n "${EVAL_N}" \
+    ${WANDB_ARGS} \
     --out "${OUT}" ${ARM_EXTRA}
 
 case "${SELECT}" in
