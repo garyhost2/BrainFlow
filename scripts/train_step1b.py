@@ -545,8 +545,18 @@ def main():
     nan_skips = 0
     for epoch in range(1, args.epochs + 1):
         # low_only: run the frozen backbone in eval mode (stable features; low_head
-        # has no train/eval-sensitive layers) so the head learns a clean mapping.
-        model.eval() if low_only else model.train()
+        # is put back in train mode below) so the head learns a clean mapping.
+        if low_only:
+            model.eval()
+            # The claim that low_head has no train/eval-sensitive layers is false:
+            # its stem is LayerNorm -> GELU -> Dropout(enc_drop). model.eval()
+            # silently disabled that dropout, so the head trained unregularised and
+            # memorised the train split -- run ll_latent_s1 reached train L1 0.06
+            # while val blur_mse stayed at 1.0, the predict-the-mean score.
+            if model.low_head is not None:
+                model.low_head.train()
+        else:
+            model.train()
         bundle.train_sampler.set_epoch(epoch)
         # BiMixCo runs only for the first mixup_pct of training, then the
         # contrastive term reverts to clean SoftCLIP (MindEye2's schedule): the

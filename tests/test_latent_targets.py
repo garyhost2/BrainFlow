@@ -185,3 +185,44 @@ class TestTrainingStep:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestLowHeadTrainMode:
+    """--freeze-token put the WHOLE model in eval(), including the low head.
+
+    The trainer's comment claimed low_head "has no train/eval-sensitive layers".
+    Its stem is LayerNorm -> GELU -> Dropout(enc_drop), so eval() silently
+    disabled the only regularisation the head has. Run ll_latent_s1 then reached
+    train L1 0.06 while val blur_mse stayed at 1.0 -- the score for predicting
+    the channel mean -- and PixCorr never moved off 0.10 in 120 epochs.
+    """
+
+    def _model(self, enc_drop=0.15):
+        from brainflow.step1.model_tokens import TokenStep1Config, TokenStep1Model
+        cfg = TokenStep1Config(subjects=[1], enc_hidden=64, enc_blocks=1,
+                               ll_target="latent", ll_hidden=32, ll_base=16,
+                               enc_drop=enc_drop, low_level=True)
+        return TokenStep1Model(cfg, {1: 128})
+
+    def test_low_head_has_dropout_so_eval_mode_matters(self):
+        model = self._model()
+        drops = [m for m in model.low_head.modules() if isinstance(m, torch.nn.Dropout)]
+        assert drops, "low_head lost its dropout; the train-mode fix is now pointless"
+        assert all(d.p > 0 for d in drops)
+
+    def test_eval_then_low_head_train_leaves_dropout_active(self):
+        model = self._model()
+        model.eval()
+        assert not model.low_head.training
+        model.low_head.train()
+        assert model.low_head.training
+        assert not model.backbone.training, "the backbone must stay frozen/eval"
+        drops = [m for m in model.low_head.modules() if isinstance(m, torch.nn.Dropout)]
+        assert all(d.training for d in drops)
+
+    def test_trainer_puts_the_low_head_back_in_train_mode(self):
+        # Pin the trainer source itself: a blanket model.eval() in the low_only
+        # branch is the regression this guards against.
+        src = (Path(__file__).resolve().parent.parent
+               / "scripts" / "train_step1b.py").read_text(encoding="utf-8")
+        assert "model.low_head.train()" in src
