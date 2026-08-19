@@ -626,13 +626,14 @@ def main():
                 nan_skips += 1
             step += 1
             if step % 50 == 0:
-                pbar.set_postfix(flow=f"{float(ld.get('flow', 0)):.3f}",
-                                 rcfm=f"{float(ld.get('rcfm', 0)):.3f}",
-                                 reg=f"{float(ld.get('reg', 0)):.3f}",
-                                 cos=f"{float(ld.get('cos', 0)):.3f}",
-                                 low=f"{float(ld.get('low', 0)):.3f}",
-                                 clip=f"{float(ld.get('clip', 0)):.3f}",
-                                 lr=f"{lr:.1e}", skip=nan_skips)
+                # Only show terms this step actually computed. Under --freeze-token
+                # the backbone and the whole prior forward are skipped, so flow/cos/
+                # clip/rcfm/reg do not exist -- printing them as 0.000 made a healthy
+                # low-level run look like a total collapse.
+                shown = {k: f"{float(ld[k]):.3f}"
+                         for k in ("flow", "rcfm", "reg", "cos", "low", "clip", "clip_tok")
+                         if k in ld}
+                pbar.set_postfix(**shown, lr=f"{lr:.1e}", skip=nan_skips)
                 _wandb_log({f"train/{k}": float(v) for k, v in ld.items()}
                            | {"train/lr": lr, "train/grad_norm": float(gnorm),
                               "train/nan_skips": nan_skips,
