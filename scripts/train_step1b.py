@@ -641,6 +641,11 @@ def main():
 
         if epoch % args.eval_freq == 0 or epoch == args.epochs:
             ema.store(model); ema.copy_to(model)
+            # low_head is left in train mode for the epoch so its dropout runs;
+            # every eval must switch it off or the metrics are measured through a
+            # randomly dropped head. blur_mse read 1.565 at enc_drop=0.3 with this
+            # missing, against ~1.36 for the same head with no dropout at all.
+            model.eval()
             # Honest selection: choose on a leakage-free split; TEST is report-only.
             sel_loader = bundle.val if bundle.val is not None else bundle.eval
             sel_name = "val" if bundle.val is not None else "test"
@@ -720,6 +725,8 @@ def main():
                 im = None
                 try:
                     ema.store(model); ema.copy_to(model)
+                    # Same reason as the eval above: dropout must be off here.
+                    model.eval()
                     n_subj = max(1, len(args.subjects))
                     per_subj = max(1, args.decode_n // n_subj)
                     preds, gts, got = [], [], {}
