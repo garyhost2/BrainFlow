@@ -156,6 +156,16 @@ def parse_args():
                     help="low-level (blurry-image) loss weight; 0 disables the pathway")
     ap.add_argument("--ll-strength", type=float, default=0.7,
                     help="img2img strength at decode (lower preserves more layout)")
+    ap.add_argument("--ll-hidden", type=int, default=1024,
+                    help="low head's per-subject voxel-encoder width. With ll-base it "
+                         "sets the size of `to_grid`, Linear(ll_hidden, ll_base*144), "
+                         "which is most of the head. At the defaults the head has ~6500 "
+                         "parameters per training image on one subject and memorises it: "
+                         "train L1 0.06 while val blur_mse sits at 1.0, the score for "
+                         "predicting the channel mean.")
+    ap.add_argument("--ll-base", type=int, default=256,
+                    help="channels at the low head's 12x12 stem; halving it quarters "
+                         "`to_grid` and the first upsample block.")
     ap.add_argument("--ll-size", type=int, default=64,
                     help="blurry-image resolution the low head predicts (lower = more learnable)")
     ap.add_argument("--ll-loss", type=str, default="l1", choices=["l1", "huber", "mse"],
@@ -431,7 +441,8 @@ def main():
                            solver=args.solver, low_level=args.low_level,
                            lambda_low=args.lambda_low, ll_strength=args.ll_strength,
                            ll_size=args.ll_size, ll_loss=args.ll_loss,
-                           ll_target=args.ll_target,
+                           ll_target=args.ll_target, ll_hidden=args.ll_hidden,
+                           ll_base=args.ll_base,
                            lambda_cos=args.lambda_cos, lambda_reg=args.lambda_reg,
                            enc_drop=args.enc_drop, mixup_pct=args.mixup_pct,
                            mixco_beta=args.mixco_beta, mixco_s_thresh=args.mixco_s_thresh,
