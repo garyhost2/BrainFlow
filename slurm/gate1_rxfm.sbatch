@@ -39,7 +39,7 @@
 #SBATCH --account=a100_intern
 #SBATCH --qos=a100_intern
 #SBATCH --gres=gpu:A100_80GB:1
-#SBATCH -c 8
+#SBATCH -c 16
 #SBATCH --mem=96G
 #SBATCH -t 12:00:00
 
@@ -167,7 +167,9 @@ fi
 srun python -m scripts.train_step1b \
     --subjects ${SUBJECTS} \
     --epochs "${EPOCHS}" \
-    --batch-size 48 \
+    --batch-size ${BATCH:-192} \
+    --lr ${LR:-6e-4} \
+    --num-workers ${WORKERS:-12} \
     --enc-hidden 2048 \
     --geometry sphere \
     --val-frac 0.1 \
