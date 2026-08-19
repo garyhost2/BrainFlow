@@ -155,6 +155,15 @@ if [ -n "${WANDB_PROJECT:-}" ]; then
     echo "   tracking: W&B project ${WANDB_PROJECT} as ${NAME}_${SUBJ_TAG}"
 fi
 
+# Decoding 64 images through SDXL every eval costs ~5 min against ~1.3 min per
+# training epoch, so with --eval-freq 5 about 45% of a diagnostic run goes to
+# decoded metrics when its only question is val/delta_cos, a latent quantity.
+DECODE_ARGS="--decode-eval --decode-n ${DECODE_N:-64}"
+if [ "${DECODE_EVAL:-1}" = "0" ]; then
+    DECODE_ARGS=""
+    echo "   decode-eval OFF (latent diagnostics only)"
+fi
+
 srun python -m scripts.train_step1b \
     --subjects ${SUBJECTS} \
     --epochs "${EPOCHS}" \
@@ -166,7 +175,7 @@ srun python -m scripts.train_step1b \
     --diag-batches 8 \
     --gradnorm-every 200 \
     --no-low-level \
-    --decode-eval --decode-n 64 \
+    ${DECODE_ARGS} \
     --out "${OUT}" \
     ${EXTRA} \
     ${WANDB_ARGS} \
