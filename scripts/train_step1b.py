@@ -136,6 +136,12 @@ def parse_args():
                     help="structured CLS + patch factorisation (paper default)")
     ap.add_argument("--no-two-head", dest="two_head", action="store_false",
                     help="patch-only ablation (no global CLS head)")
+    ap.add_argument("--lambda-flow", type=float, default=1.0,
+                    help="weight on the PATCH flow. With velocity prediction the "
+                         "loss is mse(v, u_t) averaged over 1664 dims, so it reads "
+                         "~1e-3 while the CLS flow's gradnorm is ~2.6x larger -- the "
+                         "prior that conditions the patch flow gets more gradient "
+                         "than the patch flow itself.")
     ap.add_argument("--lambda-rcfm", type=float, default=1.0,
                     help="global CLS flow-matching weight")
     ap.add_argument("--cls-cfg-scale", type=float, default=3.0)
@@ -452,7 +458,7 @@ def main():
                            logit_normal_m=args.logit_normal_m,
                            logit_normal_s=args.logit_normal_s,
                            lambda_radius=args.lambda_radius, two_head=args.two_head,
-                           lambda_rcfm=args.lambda_rcfm, cls_cfg_scale=args.cls_cfg_scale,
+                           lambda_rcfm=args.lambda_rcfm, lambda_flow=args.lambda_flow, cls_cfg_scale=args.cls_cfg_scale,
                            solver=args.solver, low_level=args.low_level,
                            lambda_low=args.lambda_low, ll_strength=args.ll_strength,
                            ll_size=args.ll_size, ll_loss=args.ll_loss,
