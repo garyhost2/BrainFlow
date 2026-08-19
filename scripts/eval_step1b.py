@@ -57,6 +57,14 @@ def parse_args():
     ap.add_argument("--retrieval-pool", type=int, default=300,
                     help="candidates per retrieval pool (NSD convention: 300)")
     ap.add_argument("--out", type=str, default="outputs/step1b/eval")
+    ap.add_argument("--wandb-project", type=str, default=None,
+                    help="W&B project. Unset disables tracking. Logs the metric "
+                         "table and the reconstruction grids as images.")
+    ap.add_argument("--wandb-entity", type=str, default=None)
+    ap.add_argument("--wandb-name", type=str, default=None,
+                    help="run name; defaults to the basename of --out")
+    ap.add_argument("--wandb-mode", type=str, default="online",
+                    choices=["online", "offline"])
     return ap.parse_args()
 
 def main():
@@ -209,6 +217,7 @@ def main():
            "subjects": sorted(per_subject), "per_subject": per_subject, "mean": mean}
     (out_dir / "metrics.json").write_text(json.dumps(out, indent=2))
 
+    _wandb_publish(args, out, out_dir)
     print("\n" + json.dumps(mean, indent=2))
     if args.full_metrics:
         label = (f"mean of {len(per_subject)} subjects" if len(per_subject) > 1
@@ -217,6 +226,45 @@ def main():
         print(format_comparison(mean))
     print(f"\n✓ metrics -> {out_dir/'metrics.json'}")
     print(f"✓ grids   -> {out_dir}/recon_grid_s*.png")
+
+def _wandb_publish(args, out, out_dir):
+    """Mirror the metric table and the recon grids to W&B. Never fatal: a
+    tracking failure must not lose an eval that already wrote metrics.json."""
+    if not args.wandb_project:
+        return
+    try:
+        import os
+        import wandb
+    except ImportError:
+        print("[warn] --wandb-project set but wandb is not installed")
+        return
+    mode = args.wandb_mode
+    if mode == "online" and not os.environ.get("WANDB_API_KEY"):
+        print("[warn] WANDB_API_KEY unset; logging offline")
+        mode = "offline"
+    try:
+        run = wandb.init(project=args.wandb_project, entity=args.wandb_entity,
+                         name=args.wandb_name or Path(out_dir).name,
+                         mode=mode, dir=str(out_dir), job_type="eval",
+                         config=out["config"])
+        flat = {f"eval/{k}": v for k, v in out["mean"].items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        for subj, m in out.get("per_subject", {}).items():
+            flat.update({f"eval/s{subj}/{k}": v for k, v in m.items()
+                         if isinstance(v, (int, float)) and not isinstance(v, bool)})
+        run.log(flat)
+        run.summary.update(flat)
+        grids = sorted(Path(out_dir).glob("recon_grid_s*.png"))
+        if grids:
+            run.log({"reconstructions": [
+                wandb.Image(str(g),
+                            caption=f"{g.stem}: top row ground truth, bottom row reconstruction")
+                for g in grids]})
+        print(f"✓ W&B {mode}: {getattr(run, 'url', out_dir)}")
+        run.finish()
+    except Exception as e:
+        print(f"[warn] wandb publish failed ({e}); metrics.json is unaffected")
+
 
 if __name__ == "__main__":
     main()
