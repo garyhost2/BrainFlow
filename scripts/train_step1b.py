@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import math
 import re
+import sys
 from pathlib import Path
 
 import torch
@@ -428,6 +429,20 @@ def main():
         cfg_scale = 3.0 if args.flow_source == "noise" else 1.0
         print(f"✓ --cfg-scale unset; resolved to {cfg_scale} for "
               f"--flow-source {args.flow_source}")
+
+    # A warm start has to inherit the checkpoint's centring. tgt_mean is (d,)
+    # under center_mode=global and (n_tokens, d) under per_position, so a mismatch
+    # does not fail loudly -- _load_shape_safe just reports "kept fresh: tgt_mean"
+    # and the frozen model then runs under a centring it was never trained with.
+    # Measured cost: anchor cosine 0.2305 in the run that wrote the checkpoint
+    # against 0.2060 re-running it under the default global centring.
+    if args.init_from and "--center-mode" not in sys.argv:
+        ck_cfg = torch.load(args.init_from, map_location="cpu").get("cfg")
+        ck_mode = getattr(ck_cfg, "center_mode", None)
+        if ck_mode and ck_mode != args.center_mode:
+            print(f"✓ --init-from: adopting center-mode={ck_mode} from the checkpoint "
+                  f"(was {args.center_mode}); pass --center-mode to override")
+            args.center_mode = ck_mode
 
     cfg = TokenStep1Config(subjects=args.subjects, enc_hidden=args.enc_hidden,
                            shared_encoder=args.shared_encoder,
