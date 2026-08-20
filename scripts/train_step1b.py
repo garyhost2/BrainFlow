@@ -95,7 +95,7 @@ def parse_args():
                          "offset that inflates every cosine in the repo. Run "
                          "scripts/check_centering.py to measure the split first.")
     ap.add_argument("--select-on", type=str, default="two_way",
-                    choices=["two_way", "retrieval", "cos"],
+                    choices=["two_way", "retrieval", "cos", "delta", "win_rate"],
                     help="signal for best.pt. 'cos' (legacy) calls predict_tokens "
                          "with cond_source='regression', so it scores z0 and is "
                          "structurally blind to the flow; it is also a pointwise "
@@ -560,6 +560,7 @@ def main():
         clip_metric = CLIPMetric(device, hf_cache=hf_cache)
 
     best_cos = -1.0
+    best_delta = float("-inf")
     best_clip = -1.0
     best_img = -1.0
     step = 0
@@ -712,7 +713,9 @@ def main():
             # decoded CLIP_2way climbed to epoch 110). Default to the flow-aware
             # ranking statistic; --select-on cos restores the old behaviour.
             sel_key = {"two_way": "val/two_way",
-                       "retrieval": "val/retr_fwd_300"}.get(args.select_on)
+                       "retrieval": "val/retr_fwd_300",
+                       "delta": "val/delta_cos",
+                       "win_rate": "val/delta_cos_win_rate"}.get(args.select_on)
             sel_val = sel_cos if sel_key is None else diag.get(sel_key)
             if sel_val is None:
                 if epoch == args.eval_freq:
@@ -723,6 +726,13 @@ def main():
                 best_cos = sel_val
                 torch.save(ckpt, out_dir / "best.pt")
                 msg += f"  ✓best.pt({args.select_on}={sel_val:.4f})"
+
+            delta_val = diag.get("val/delta_cos")
+            if not low_only and delta_val is not None and delta_val > best_delta:
+                best_delta = delta_val
+                torch.save(ckpt, out_dir / "best_delta.pt")
+                msg += (f"  ✓best_delta.pt({delta_val:+.4f}"
+                        f"/win={diag.get('val/delta_cos_win_rate', float('nan')):.3f})")
 
             # Best-effort image metrics: guard so an OOM/failure just skips this
             # epoch's decode instead of killing the run, and always restore the
