@@ -7,7 +7,7 @@
 #SBATCH --qos=a100_intern
 #SBATCH --gres=gpu:A100_80GB:1
 #SBATCH -c 16
-#SBATCH --mem=96G
+#SBATCH --mem=400G
 #SBATCH -t 20:00:00
 
 set -euo pipefail
