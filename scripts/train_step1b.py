@@ -198,6 +198,11 @@ def parse_args():
                     help="freeze the whole token model and train ONLY the low-level "
                          "head; select best.pt on PixCorr+SSIM (not val_cos). Use with "
                          "--init-from to add a low-level head without drifting the prior.")
+    ap.add_argument("--reset-prior", action="store_true",
+                    help="with --init-from, drop the checkpoint's prior/cls_prior "
+                         "weights so the flow trains from scratch on a frozen "
+                         "anchor. Needed because a checkpoint selected on two_way "
+                         "carries a prior that has already overfit.")
     ap.add_argument("--freeze-anchor", action="store_true",
                     help="freeze the encoder, anchor, radius and log-sigma heads and "
                          "train ONLY the flow prior. Trained jointly, the anchor keeps "
@@ -488,6 +493,12 @@ def main():
     if args.init_from:
         ck = torch.load(args.init_from, map_location="cpu")
         state = _migrate_input_proj(model, ck["model"], "init-from")
+        if args.reset_prior:
+            dropped = [k for k in state if k.startswith(("prior.", "cls_prior."))]
+            for k in dropped:
+                state.pop(k)
+            print(f"✓ --reset-prior: dropped {len(dropped)} prior/cls_prior tensors; "
+                  f"the flow starts from scratch")
         res = _load_shape_safe(model, state, "init-from")
         print(f"✓ warm-start from {args.init_from}: {len(res.missing_keys)} fresh params "
               f"(e.g. low_head), {len(res.unexpected_keys)} unexpected")
