@@ -1454,7 +1454,8 @@ class TokenStep1Model(nn.Module):
                     zdir = self._sample_prior_sphere(brain, cls_hat, n_steps, cfg_scale,
                                                      solver, z0=self._infer_z0(mu, logs))
             elif cond_source == "blend":
-                sp = self._sample_prior_sphere(brain, cls_hat, n_steps, cfg_scale, solver)
+                sp = self._sample_prior_sphere(brain, cls_hat, n_steps, cfg_scale,
+                                               solver, z0=self._infer_z0(mu, logs))
                 zdir = F.normalize(cfg.blend_w * sp + (1 - cfg.blend_w) * mu, dim=-1)
             else:
                 raise ValueError(f"Unknown cond_source: {cond_source!r}")

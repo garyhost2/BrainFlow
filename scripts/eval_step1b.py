@@ -27,6 +27,10 @@ def parse_args():
     ap.add_argument("--ckpt-path", type=str, default="third_party/unclip6_epoch0_step110000.ckpt")
     ap.add_argument("--cond-source", type=str, default="prior",
                     choices=["regression", "prior", "blend"])
+    ap.add_argument("--no-decode", action="store_true",
+                    help="embedding-space metrics only: skip SDXL entirely")
+    ap.add_argument("--blend-w", type=float, default=None,
+                    help="cond_source=blend: 1.0 = full flow sample, 0.0 = anchor")
     ap.add_argument("--cfg-scale", type=float, default=3.0,
                     help="guidance scale for the patch prior")
     ap.add_argument("--cls-cfg-scale", type=float, default=3.0,
@@ -86,6 +90,8 @@ def main():
     cfg.cond_source = args.cond_source; cfg.cfg_scale = args.cfg_scale
     cfg.cls_cfg_scale = args.cls_cfg_scale
     cfg.n_steps = args.steps; cfg.solver = args.solver
+    if args.blend_w is not None:
+        cfg.blend_w = args.blend_w
     if args.ll_strength is not None:
         cfg.ll_strength = args.ll_strength
     stats = TargetStats.from_dict(ckpt["stats"])
@@ -120,10 +126,16 @@ def main():
             tensors, subjects, args.target_dir, device, args.mindeye_src, hf_cache=hf_cache)
     bundle = build_step1_loaders(tensors, targets, subjects, batch_size=32, num_workers=8)
 
-    decoder = SDXLUnCLIPDecoder(device, args.mindeye_src, args.ckpt_path,
-                                num_steps=args.decode_steps,
-                                cls_vector_slot=tuple(args.cls_vector_slot))
-    clip_metric = CLIPMetric(device, hf_cache=hf_cache)
+    if args.no_decode and not args.retrieval:
+        raise SystemExit("--no-decode with --no-retrieval measures nothing")
+    if args.no_decode:
+        decoder = clip_metric = None
+        print("▶ --no-decode: retrieval only, SDXL not loaded")
+    else:
+        decoder = SDXLUnCLIPDecoder(device, args.mindeye_src, args.ckpt_path,
+                                    num_steps=args.decode_steps,
+                                    cls_vector_slot=tuple(args.cls_vector_slot))
+        clip_metric = CLIPMetric(device, hf_cache=hf_cache)
 
     want = args.eval_subjects or [subjects[0]]
     unknown = [s for s in want if s not in subjects]
@@ -144,7 +156,8 @@ def main():
             s = int(batch["subject"])
             if s not in bank:
                 continue
-            got = sum(p.shape[0] for p in bank[s]["pred"])
+            got = (bank[s].get("n", 0) if args.no_decode
+                   else sum(p.shape[0] for p in bank[s]["pred"]))
             if got >= args.max_images:
                 if all(sum(p.shape[0] for p in b["pred"]) >= args.max_images
                        for b in bank.values()):
@@ -154,17 +167,27 @@ def main():
             fmri = batch["fmri"][:take].to(device, non_blocking=True)
             tok, cls_hat = model.predict_tokens(fmri, s, stats,
                                                 n_samples=args.n_samples)
-            blur = model.predict_lowlevel(fmri, s)
-            lat = model.predict_low_latent(fmri, s, moment_match=args.moment_match)
-            bank[s]["pred"].append(decoder.decode(tok, cls_hat, init_image=blur,
-                                                  init_latent=lat,
-                                                  strength=cfg.ll_strength))
-            bank[s]["gt"].append(batch["image"][:take])
+            if not args.no_decode:
+                blur = model.predict_lowlevel(fmri, s)
+                lat = model.predict_low_latent(fmri, s, moment_match=args.moment_match)
+                bank[s]["pred"].append(decoder.decode(tok, cls_hat, init_image=blur,
+                                                      init_latent=lat,
+                                                      strength=cfg.ll_strength))
+                bank[s]["gt"].append(batch["image"][:take])
+            else:
+                bank[s]["n"] = bank[s].get("n", 0) + int(tok.shape[0])
             if args.retrieval:
                 # Retrieval runs on the predicted embedding, not on pixels. Park it
                 # on CPU in fp16: 982 x 256 x 1664 is ~0.8 GB per side in fp16.
                 bank[s]["tp"].append(tok.detach().to("cpu", torch.float16))
                 bank[s]["tg"].append(batch["emb"][:take].to("cpu", torch.float16))
+
+    def _score_retrieval_only(n, tp, tg):
+        m = {"n": int(n)}
+        if tp:
+            m.update(retrieval_metrics(torch.cat(tp), torch.cat(tg),
+                                       batch_size=args.retrieval_pool, device=device))
+        return m
 
     def _score(pred, gt, tp, tg):
         # Legacy keys keep the pre-2026-08 definitions so every historical run
@@ -185,6 +208,18 @@ def main():
     per_subject = {}
     for s in want:
         b = bank[s]
+        if args.no_decode:
+            if not b["tp"]:
+                print(f"[warn] subject {s}: no batches collected, skipping")
+                continue
+            per_subject[s] = _score_retrieval_only(b.get("n", 0), b["tp"], b["tg"])
+            r = per_subject[s]
+            print(f"  subj{s:02d}: fwd={r.get('retrieval_fwd', float('nan')):.4f} "
+                  f"bwd={r.get('retrieval_bwd', float('nan')):.4f} "
+                  f"bwd-fwd={r.get('retrieval_bwd', float('nan')) - r.get('retrieval_fwd', float('nan')):+.4f} "
+                  f"(n={r['n']})", flush=True)
+            b["tp"].clear(); b["tg"].clear()
+            continue
         if not b["pred"]:
             print(f"[warn] subject {s}: no batches collected, skipping")
             continue
@@ -218,7 +253,7 @@ def main():
             mean[k] = float(sum(vals) / len(vals))
     out = {"config": {"cond_source": args.cond_source, "cfg_scale": args.cfg_scale,
                       "steps": args.steps, "solver": args.solver,
-                      "n_samples": args.n_samples,
+                      "n_samples": args.n_samples, "blend_w": cfg.blend_w,
                       "ll_strength": cfg.ll_strength, "ckpt": args.ckpt},
            "subjects": sorted(per_subject), "per_subject": per_subject, "mean": mean}
     (out_dir / "metrics.json").write_text(json.dumps(out, indent=2))
