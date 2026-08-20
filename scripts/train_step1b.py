@@ -159,6 +159,16 @@ def parse_args():
     ap.add_argument("--logit-normal-s", type=float, default=1.0,
                     help="std of the logit-normal flow-time schedule")
     ap.add_argument("--lambda-radius", type=float, default=1.0)
+    ap.add_argument("--lambda-low-clip", type=float, default=0.0,
+                    help="SoftCLIP on the flattened low-level field. L1 alone has "
+                         "nothing that punishes emitting the same field for every "
+                         "input, and five low-level attempts have collapsed to the "
+                         "conditional mean; in-batch negatives are what fixed the "
+                         "same failure on the token branch.")
+    ap.add_argument("--lambda-low-std", type=float, default=0.0,
+                    help="match the predicted field's per-channel std to the "
+                         "target's. Attacks shrinkage during training instead of "
+                         "rescaling afterwards, which cannot add information.")
     ap.add_argument("--lambda-low", type=float, default=1.0,
                     help="low-level (blurry-image) loss weight; 0 disables the pathway")
     ap.add_argument("--ll-strength", type=float, default=0.7,
@@ -182,6 +192,10 @@ def parse_args():
                          "VAE latent E(blur(GT)) the decoder actually starts from. "
                          "'latent' needs the cache from scripts/build_latent_targets.py")
     ap.add_argument("--no-low-level", dest="low_level", action="store_false", default=True)
+    # The sbatch arms hardcode --no-low-level, so TRAIN_EXTRA needs a way to turn
+    # the branch back on: argparse takes the last occurrence, and TRAIN_EXTRA is
+    # appended last.
+    ap.add_argument("--low-level", dest="low_level", action="store_true")
     ap.add_argument("--val-frac", type=float, default=0.1,
                     help="train fraction held out for leakage-free selection (0 disables)")
     ap.add_argument("--weight-decay", type=float, default=0.02)
@@ -465,7 +479,10 @@ def main():
                            lambda_radius=args.lambda_radius, two_head=args.two_head,
                            lambda_rcfm=args.lambda_rcfm, lambda_flow=args.lambda_flow, cls_cfg_scale=args.cls_cfg_scale,
                            solver=args.solver, low_level=args.low_level,
-                           lambda_low=args.lambda_low, ll_strength=args.ll_strength,
+                           lambda_low=args.lambda_low,
+                           lambda_low_clip=args.lambda_low_clip,
+                           lambda_low_std=args.lambda_low_std,
+                           ll_strength=args.ll_strength,
                            ll_size=args.ll_size, ll_loss=args.ll_loss,
                            ll_target=args.ll_target, ll_hidden=args.ll_hidden,
                            ll_base=args.ll_base,

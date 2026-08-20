@@ -249,6 +249,13 @@ class TokenStep1Config:
     ll_hidden: int = 1024         # low head's OWN per-subject voxel-encoder width
     ll_loss: str = "l1"           # l1 | huber | mse -- L1 is far less mean-seeking
     lambda_low: float = 1.0
+    # An L1/MSE regression has no term that punishes emitting the SAME field for
+    # every input, so the head converges on the conditional mean of the latent --
+    # which the VAE renders as a near-white frame (run ll_fix_4subj: PixCorr
+    # 0.0198, every 2-way metric at chance). This is the failure the token branch
+    # had before lambda_clip_tok; in-batch negatives are what fixed it there.
+    lambda_low_clip: float = 0.0     # SoftCLIP on the flattened low-level field
+    lambda_low_std: float = 0.0      # per-channel second-moment match to target
     ll_strength: float = 0.7      # img2img strength at decode (calibrate via smoke)
 
     # --- sampling -------------------------------------------------------
@@ -995,7 +1002,9 @@ class TokenStep1Model(nn.Module):
                     "low_only training needs low_head enabled + the matching target "
                     "(target_img for ll_target=rgb, target_lat for ll_target=latent)")
             out = {k: v.detach() for k, v in out.items()} | {
-                "loss": cfg.lambda_low * out["low"]}
+                "loss": (cfg.lambda_low * out["low"]
+                         + cfg.lambda_low_clip * out.get("low_clip", 0.0)
+                         + cfg.lambda_low_std * out.get("low_std", 0.0))}
             return out
         mix = None
         fmri_clean = fmri
@@ -1035,6 +1044,10 @@ class TokenStep1Model(nn.Module):
             total = total + cfg.lambda_clip_tok * out["clip_tok"]
         if "low" in out:
             total = total + cfg.lambda_low * out["low"]
+        if "low_clip" in out:
+            total = total + cfg.lambda_low_clip * out["low_clip"]
+        if "low_std" in out:
+            total = total + cfg.lambda_low_std * out["low_std"]
         # Terms are detached for logging by default. `keep_term_graph` retains
         # them so instrument.grad_norms can measure each term's own gradient --
         # without it the probe silently reports nothing.
@@ -1068,7 +1081,20 @@ class TokenStep1Model(nn.Module):
             low = F.huber_loss(pred, target, delta=0.1)
         else:                                    # "l1" (default): least mean-seeking
             low = F.l1_loss(pred, target)
-        return {"low": low}
+        out = {"low": low}
+        cfg = self.cfg
+        if getattr(cfg, "lambda_low_clip", 0.0) > 0:
+            out["low_clip"] = soft_clip_loss(
+                F.normalize(pred.flatten(1).float(), dim=-1),
+                F.normalize(target.flatten(1).float(), dim=-1), cfg.clip_temp)
+        if getattr(cfg, "lambda_low_std", 0.0) > 0:
+            # Shrinkage shows up as a per-channel std well below the 1.0 the target
+            # was standardised to. Match the second moment directly rather than
+            # rescaling after the fact, which cannot add information.
+            dims = (0,) + tuple(range(2, pred.dim()))
+            out["low_std"] = (pred.float().std(dim=dims)
+                              - target.float().std(dim=dims)).abs().mean()
+        return out
 
     @torch.no_grad()
     def predict_lowlevel(self, fmri, subject):
