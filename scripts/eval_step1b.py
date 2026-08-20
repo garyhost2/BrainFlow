@@ -27,6 +27,11 @@ def parse_args():
     ap.add_argument("--ckpt-path", type=str, default="third_party/unclip6_epoch0_step110000.ckpt")
     ap.add_argument("--cond-source", type=str, default="prior",
                     choices=["regression", "prior", "blend"])
+    ap.add_argument("--z0-mode", type=str, default="default",
+                    choices=["default", "noise", "shuffle"],
+                    help="ablate the flow's starting point: 'shuffle' starts each "
+                         "sample from its neighbour's anchor, 'noise' from a random "
+                         "point. Unchanged metrics mean the flow ignores z0.")
     ap.add_argument("--no-decode", action="store_true",
                     help="embedding-space metrics only: skip SDXL entirely")
     ap.add_argument("--blend-w", type=float, default=None,
@@ -90,6 +95,7 @@ def main():
     cfg.cond_source = args.cond_source; cfg.cfg_scale = args.cfg_scale
     cfg.cls_cfg_scale = args.cls_cfg_scale
     cfg.n_steps = args.steps; cfg.solver = args.solver
+    cfg.z0_mode = args.z0_mode
     if args.blend_w is not None:
         cfg.blend_w = args.blend_w
     if args.ll_strength is not None:
@@ -254,6 +260,7 @@ def main():
     out = {"config": {"cond_source": args.cond_source, "cfg_scale": args.cfg_scale,
                       "steps": args.steps, "solver": args.solver,
                       "n_samples": args.n_samples, "blend_w": cfg.blend_w,
+                      "z0_mode": args.z0_mode,
                       "ll_strength": cfg.ll_strength, "ckpt": args.ckpt},
            "subjects": sorted(per_subject), "per_subject": per_subject, "mean": mean}
     (out_dir / "metrics.json").write_text(json.dumps(out, indent=2))

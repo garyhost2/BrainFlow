@@ -166,6 +166,11 @@ class TokenStep1Config:
     # "endpoint" explicitly alongside a non-spherical geometry is an error rather
     # than a silent downgrade.
     flow_param: str = "auto"          # auto | endpoint | velocity
+    # Inference-time ablation on the flow's starting point. "shuffle" hands each
+    # sample its NEIGHBOUR's anchor: if flow_cos is unchanged the transport is
+    # not using z0 at all, which is the difference between R-XFM being wrong and
+    # R-XFM not being implemented. Eval-only; training never sets it.
+    z0_mode: str = "default"          # default | noise | shuffle
 
     def resolved_flow_param(self) -> str:
         if self.flow_param != "auto":
@@ -1325,6 +1330,11 @@ class TokenStep1Model(nn.Module):
         want the lowest-variance estimate. ``stochastic_source=True`` draws
         instead, which is what the multi-sample / latent-averaging arm needs.
         """
+        mode = getattr(self.cfg, "z0_mode", "default")
+        if mode == "noise":
+            return random_sphere(mu.shape, mu.device, mu.dtype)
+        if mode == "shuffle":
+            return torch.roll(mu, 1, dims=0)
         if self.cfg.flow_source == "noise":
             return random_sphere(mu.shape, mu.device, mu.dtype)
         if self.cfg.stochastic_source:
