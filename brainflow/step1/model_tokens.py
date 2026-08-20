@@ -1078,11 +1078,25 @@ class TokenStep1Model(nn.Module):
         return self.low_head(fmri, subject)
 
     @torch.no_grad()
-    def predict_low_latent(self, fmri, subject):
-        """Predicted img2img latent (B,4,96,96) in the decoder's space, or None."""
+    def predict_low_latent(self, fmri, subject, moment_match: bool = False):
+        """Predicted img2img latent (B,4,96,96) in the decoder's space, or None.
+
+        ``moment_match`` rescales each channel of the standardised prediction to
+        unit variance before unstandardising. An L1-regressed head under
+        uncertainty shrinks toward the conditional mean, so its per-channel std
+        is well below the 1.0 the target was standardised to; multiplying that
+        shrunken field by ``lat_std`` yields a latent with too little variance,
+        which the VAE decodes as a pale, low-contrast image. Rescaling restores
+        the second moment without touching the predicted structure. It cannot
+        add information -- if the head is at the mean, this amplifies noise -- so
+        it is off by default and belongs in an eval sweep, not in training."""
         if not self.low_is_latent:
             return None
-        return self.low_head.unstandardize(self.low_head(fmri, subject).float())
+        z = self.low_head(fmri, subject).float()
+        if moment_match:
+            std = z.std(dim=(0, 2, 3), keepdim=True).clamp_min(1e-6)
+            z = z / std
+        return self.low_head.unstandardize(z)
 
     def _cls_flow_loss(self, brain, cls_dir, B, device):
         if self.cls_prior is None or cls_dir is None:

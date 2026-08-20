@@ -57,6 +57,12 @@ def parse_args():
     ap.add_argument("--retrieval-pool", type=int, default=300,
                     help="candidates per retrieval pool (NSD convention: 300)")
     ap.add_argument("--out", type=str, default="outputs/step1b/eval")
+    ap.add_argument("--moment-match", action="store_true",
+                    help="rescale the predicted img2img latent to unit per-channel "
+                         "variance before unstandardising. An L1 head shrinks toward "
+                         "the mean, so its latent has too little variance and the VAE "
+                         "decodes it pale and low-contrast; this restores the second "
+                         "moment. Cannot add information -- sweep it, do not assume it.")
     ap.add_argument("--wandb-project", type=str, default=None,
                     help="W&B project. Unset disables tracking. Logs the metric "
                          "table and the reconstruction grids as images.")
@@ -149,7 +155,7 @@ def main():
             tok, cls_hat = model.predict_tokens(fmri, s, stats,
                                                 n_samples=args.n_samples)
             blur = model.predict_lowlevel(fmri, s)
-            lat = model.predict_low_latent(fmri, s)
+            lat = model.predict_low_latent(fmri, s, moment_match=args.moment_match)
             bank[s]["pred"].append(decoder.decode(tok, cls_hat, init_image=blur,
                                                   init_latent=lat,
                                                   strength=cfg.ll_strength))
