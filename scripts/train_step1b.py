@@ -191,6 +191,13 @@ def parse_args():
                     help="what the low head regresses: a blurry RGB image, or the "
                          "VAE latent E(blur(GT)) the decoder actually starts from. "
                          "'latent' needs the cache from scripts/build_latent_targets.py")
+    ap.add_argument("--ll-use-backbone", action="store_true",
+                    help="build the low-level grid from the backbone's brain tokens "
+                         "instead of a fresh Linear on raw voxels. Six attempts have "
+                         "failed with the voxel front end and none beat val blur_mse "
+                         "1.0 (the predict-the-mean score); shrinking the head "
+                         "69.4M -> 32.3M moved it only 1.150 -> 1.113, so what the "
+                         "head can SEE is the bottleneck, not its size.")
     ap.add_argument("--no-low-level", dest="low_level", action="store_false", default=True)
     # The sbatch arms hardcode --no-low-level, so TRAIN_EXTRA needs a way to turn
     # the branch back on: argparse takes the last occurrence, and TRAIN_EXTRA is
@@ -486,6 +493,7 @@ def main():
                            ll_size=args.ll_size, ll_loss=args.ll_loss,
                            ll_target=args.ll_target, ll_hidden=args.ll_hidden,
                            ll_base=args.ll_base,
+                           ll_use_backbone=args.ll_use_backbone,
                            lambda_cos=args.lambda_cos, lambda_reg=args.lambda_reg,
                            enc_drop=args.enc_drop, mixup_pct=args.mixup_pct,
                            mixco_beta=args.mixco_beta, mixco_s_thresh=args.mixco_s_thresh,

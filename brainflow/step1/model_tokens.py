@@ -254,6 +254,13 @@ class TokenStep1Config:
     # which the VAE renders as a near-white frame (run ll_fix_4subj: PixCorr
     # 0.0198, every 2-way metric at chance). This is the failure the token branch
     # had before lambda_clip_tok; in-batch negatives are what fixed it there.
+    # Six low-level attempts have failed and none of them could see the backbone:
+    # the head runs its own Linear(V_s, ll_hidden) on RAW voxels while a 306M
+    # trunk that generalises to 0.80 retrieval sits beside it. Shrinking the head
+    # 69.4M -> 32.3M moved val blur_mse only 1.150 -> 1.113, still above the 1.0
+    # that predicting the channel mean scores, so the bottleneck is what the head
+    # can see, not how many parameters it has.
+    ll_use_backbone: bool = False    # build the grid from brain tokens, not voxels
     lambda_low_clip: float = 0.0     # SoftCLIP on the flattened low-level field
     lambda_low_std: float = 0.0      # per-channel second-moment match to target
     ll_strength: float = 0.7      # img2img strength at decode (calibrate via smoke)
@@ -595,6 +602,14 @@ class LatentLowLevelHead(nn.Module):
         self.ups = nn.Sequential(*blocks)
         self.out = nn.Conv2d(c, 4, 3, padding=1)
         nn.init.zeros_(self.out.weight); nn.init.zeros_(self.out.bias)
+        # Backbone route: map each brain token to `base` channels, then map the
+        # token axis onto the 12x12 grid. Keeps per-token structure (which a mean
+        # pool would destroy, and layout is exactly what this head predicts) for
+        # ~74k parameters against the 4M of the raw-voxel projection it replaces.
+        self.use_backbone = bool(getattr(cfg, "ll_use_backbone", False))
+        if self.use_backbone:
+            self.brain_tok = nn.Linear(cfg.brain_dim, self.base)
+            self.brain_pos = nn.Linear(cfg.n_brain_tokens, self.grid * self.grid)
         # Standardisation of the latent target; overwritten from the cache stats.
         self.register_buffer("lat_mean", torch.zeros(4))
         self.register_buffer("lat_std", torch.ones(4))
@@ -609,11 +624,19 @@ class LatentLowLevelHead(nn.Module):
     def unstandardize(self, z):
         return z * self.lat_std.view(1, -1, 1, 1) + self.lat_mean.view(1, -1, 1, 1)
 
-    def forward(self, fmri, subject):
+    def forward(self, fmri, subject, brain=None):
         """Standardised latent prediction (B, 4, 96, 96)."""
         B = fmri.shape[0]
-        x = self.stem(self.input_proj[str(int(subject))](fmri))
-        h = self.to_grid(x).view(B, self.base, self.grid, self.grid)
+        if self.use_backbone:
+            if brain is None:
+                raise ValueError("ll_use_backbone needs the backbone tokens; "
+                                 "pass brain=backbone(fmri, subject)")
+            t = self.brain_tok(brain.float())                  # (B, T, base)
+            h = self.brain_pos(t.transpose(1, 2))              # (B, base, grid*grid)
+            h = h.view(B, self.base, self.grid, self.grid)
+        else:
+            x = self.stem(self.input_proj[str(int(subject))](fmri))
+            h = self.to_grid(x).view(B, self.base, self.grid, self.grid)
         return self.out(self.ups(self.mix(h)))
 
 
@@ -996,7 +1019,11 @@ class TokenStep1Model(nn.Module):
             # Frozen-token warm-start: train ONLY the low-level head. It reads raw
             # voxels through its own encoder, so skip the frozen backbone AND the
             # whole DiT prior / CLS / contrastive forward+backward entirely.
-            out = self._low_level_loss(fmri, subject, target_img, target_lat)
+            lb = None
+            if getattr(cfg, "ll_use_backbone", False):
+                with torch.no_grad():
+                    lb = self.backbone(fmri, subject)
+            out = self._low_level_loss(fmri, subject, target_img, target_lat, lb)
             if "low" not in out:
                 raise ValueError(
                     "low_only training needs low_head enabled + the matching target "
@@ -1028,7 +1055,11 @@ class TokenStep1Model(nn.Module):
         # Unmixed voxels: the low head reads raw fMRI directly and regresses the
         # image's spatial layout, so a blended input against an unblended target
         # is straight label noise for it (it has no contrastive term to absorb it).
-        out |= self._low_level_loss(fmri_clean, subject, target_img, target_lat)
+        low_brain = None
+        if getattr(cfg, "ll_use_backbone", False):
+            low_brain = brain if mix is None else self.backbone(fmri_clean, subject)
+        out |= self._low_level_loss(fmri_clean, subject, target_img, target_lat,
+                                    low_brain)
 
         total = (cfg.lambda_flow * out["flow"]
                  + cfg.lambda_cos * out["cos"] + cfg.lambda_clip * out["clip"]
@@ -1060,7 +1091,7 @@ class TokenStep1Model(nn.Module):
     def low_is_latent(self) -> bool:
         return isinstance(self.low_head, LatentLowLevelHead)
 
-    def _low_level_loss(self, fmri, subject, target_img, target_lat=None):
+    def _low_level_loss(self, fmri, subject, target_img, target_lat=None, brain=None):
         if self.low_head is None:
             return {}
         if self.low_is_latent:
@@ -1073,7 +1104,7 @@ class TokenStep1Model(nn.Module):
                                    mode="bilinear", align_corners=False).clamp(0, 1)
         else:
             return {}
-        pred = self.low_head(fmri, subject)
+        pred = self.low_head(fmri, subject, brain)
         mode = getattr(self.cfg, "ll_loss", "l1")
         if mode == "mse":
             low = F.mse_loss(pred, target)
@@ -1106,7 +1137,8 @@ class TokenStep1Model(nn.Module):
         """
         if self.low_head is None or self.low_is_latent:
             return None
-        return self.low_head(fmri, subject)
+        b = self.backbone(fmri, subject) if self.cfg.ll_use_backbone else None
+        return self.low_head(fmri, subject, b)
 
     @torch.no_grad()
     def predict_low_latent(self, fmri, subject, moment_match: bool = False):
@@ -1123,7 +1155,8 @@ class TokenStep1Model(nn.Module):
         it is off by default and belongs in an eval sweep, not in training."""
         if not self.low_is_latent:
             return None
-        z = self.low_head(fmri, subject).float()
+        b = self.backbone(fmri, subject) if self.cfg.ll_use_backbone else None
+        z = self.low_head(fmri, subject, b).float()
         if moment_match:
             std = z.std(dim=(0, 2, 3), keepdim=True).clamp_min(1e-6)
             z = z / std
