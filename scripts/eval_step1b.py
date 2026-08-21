@@ -27,6 +27,13 @@ def parse_args():
     ap.add_argument("--ckpt-path", type=str, default="third_party/unclip6_epoch0_step110000.ckpt")
     ap.add_argument("--cond-source", type=str, default="prior",
                     choices=["regression", "prior", "blend"])
+    ap.add_argument("--grid-n", type=int, default=16,
+                    help="images in recon_grid (capped by what was scored)")
+    ap.add_argument("--grid-cols", type=int, default=16,
+                    help="images per row; rows alternate ground-truth / prediction")
+    ap.add_argument("--grid-offset", type=int, default=0,
+                    help="skip this many scored images before building the grid, so "
+                         "successive runs can show different examples")
     ap.add_argument("--z0-mode", type=str, default="default",
                     choices=["default", "noise", "shuffle"],
                     help="ablate the flow's starting point: 'shuffle' starts each "
@@ -237,9 +244,18 @@ def main():
               flush=True)
         try:
             from torchvision.utils import save_image
-            k = min(16, pred.shape[0])
-            save_image(torch.cat([gt[:k], pred[:k]]),
-                       str(out_dir / f"recon_grid_s{s}.png"), nrow=k)
+            off = max(0, min(args.grid_offset, pred.shape[0] - 1))
+            k = min(args.grid_n, pred.shape[0] - off)
+            cols = max(1, min(args.grid_cols, k))
+            g, pr = gt[off:off + k], pred[off:off + k]
+            # Alternate ground-truth and prediction rows so a wide grid stays
+            # readable: every prediction sits directly under its target.
+            tiles = []
+            for i in range(0, k, cols):
+                tiles.append(g[i:i + cols])
+                tiles.append(pr[i:i + cols])
+            save_image(torch.cat(tiles),
+                       str(out_dir / f"recon_grid_s{s}.png"), nrow=cols)
         except Exception as e:
             print(f"[grid skipped] {e}")
         b["pred"].clear(); b["gt"].clear(); b["tp"].clear(); b["tg"].clear()
