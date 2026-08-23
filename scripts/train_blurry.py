@@ -31,9 +31,21 @@ from brainflow.step1.blurry_mindeye import (BLURRY_PIXCORR_BAR, MindEyeBlurry,
 from brainflow.tensor_cache import assert_tensor_cache_alignment
 
 
-def _images01(imgs_u8, sel, device):
+def _images01(imgs_u8, sel, device, size=224):
+    """[0,1] images at MindEye2's resolution.
+
+    Our cache stores 256x256 (config.img_size); their whole low-level path is
+    224. The SD-VAE downsamples by 8, so 256 gives a 4x32x32 latent while
+    blin1 emits 3136 = 4x28x28 -- the first run died on exactly that mismatch.
+    ConvNeXt and their RandomResizedCrop are 224 as well, so one resize here
+    keeps the target, the auxiliary loss and the augmentation consistent.
+    """
     x = imgs_u8[sel.cpu()].to(device, non_blocking=True)
-    return x.float() / 255.0 if x.dtype == torch.uint8 else x.float()
+    x = x.float() / 255.0 if x.dtype == torch.uint8 else x.float()
+    if x.shape[-1] != size:
+        x = torch.nn.functional.interpolate(x, size, mode="bilinear",
+                                            align_corners=False).clamp(0, 1)
+    return x
 
 
 def main():
@@ -58,6 +70,9 @@ def main():
                     help="ablate the ConvNeXt term -- the ingredient none of our "
                          "seven attempts had")
     ap.add_argument("--val-frac", type=float, default=0.1)
+    ap.add_argument("--image-size", type=int, default=224,
+                    help="MindEye2's low-level path is 224 end to end; our cache "
+                         "is 256, and 256/8=32 does not fit blin1's 4x28x28")
     ap.add_argument("--eval-batches", type=int, default=20)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", type=str, default="outputs/blurry_mindeye")
@@ -94,7 +109,7 @@ def main():
         lat = torch.empty(len(imgs), 4, 28, 28, device=device)
         for i0 in range(0, len(imgs), 64):
             sel = torch.arange(i0, min(i0 + 64, len(imgs)))
-            lat[i0:i0 + len(sel)] = encode_target(_images01(imgs, sel, device), autoenc)
+            lat[i0:i0 + len(sel)] = encode_target(_images01(imgs, sel, device, args.image_size), autoenc)
         subj[s] = {"x": x, "imgs": imgs, "lat": lat,
                    "train": tr.to(device), "val": va.to(device),
                    "n_vox": x.shape[1]}
@@ -124,7 +139,7 @@ def main():
                             args.batch_size):
                 sel = d["val"][i0:i0 + args.batch_size]
                 pred, _ = model(d["x"][sel], s)
-                img = _images01(d["imgs"], sel, device)
+                img = _images01(d["imgs"], sel, device, args.image_size)
                 tot += blurry_pixcorr(pred, img, autoenc) * len(sel)
                 n += len(sel)
             res[s] = tot / max(n, 1)
@@ -141,7 +156,7 @@ def main():
             sel = d["train"][torch.randint(len(d["train"]), (args.batch_size,),
                                            device=device)]
             pred, aux = model(d["x"][sel], s)
-            img = _images01(d["imgs"], sel, device)
+            img = _images01(d["imgs"], sel, device, args.image_size)
             ld = blurry_loss(pred, aux, img, d["lat"][sel], cnx, augs,
                              args.cont_weight)
             loss = ld["loss"] * args.blur_scale
