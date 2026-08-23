@@ -60,6 +60,61 @@ def add_mindeye_to_path(mindeye_src) -> pathlib.Path:
     return src
 
 
+def _import_brainnetwork(max_stubs: int = 16):
+    """Import their BrainNetwork without installing what only their other classes need.
+
+    models.py opens with `import clip` (OpenAI CLIP), for the Clipper class, and
+    pulls in more for BrainDiffusionPrior. BrainNetwork itself needs only torch,
+    nn and `from diffusers.models.vae import Decoder`, all of which we have. So
+    stub whatever is missing, one ImportError at a time, rather than adding
+    dependencies we never call.
+
+    The stub answers any attribute with a dummy class, so `from X import Y` also
+    resolves. That is only safe because we verify afterwards that the one piece
+    BrainNetwork genuinely depends on -- the diffusers Decoder -- is the real
+    class and not something a stub handed back.
+    """
+    import importlib
+    import types
+
+    class _Stub(types.ModuleType):
+        # __path__ must be a real iterable: the import machinery walks it when
+        # resolving `from pkg.sub import X`, and a stub that answers every
+        # attribute with a class makes it raise TypeError instead of ImportError,
+        # escaping the retry loop entirely. Dunders must fall through for the
+        # same reason.
+        __path__: list = []
+
+        def __getattr__(self, name):
+            if name.startswith("__") and name.endswith("__"):
+                raise AttributeError(name)
+            return type(name, (), {})
+
+    stubbed = []
+    for _ in range(max_stubs):
+        try:
+            mod = importlib.import_module("models")
+            break
+        except ImportError as e:
+            name = getattr(e, "name", None) or str(e).split("'")[1]
+            if name in (None, "models") or name in stubbed:
+                raise
+            sys.modules[name] = _Stub(name)
+            stubbed.append(name)
+    else:
+        raise ImportError(f"gave up after stubbing {stubbed}")
+
+    from diffusers.models.vae import Decoder as RealDecoder
+    if getattr(mod, "Decoder", None) is not RealDecoder:
+        raise ImportError(
+            "their models.py did not get the real diffusers Decoder -- a stub "
+            f"shadowed it. Stubbed: {stubbed}. The blurry head's upsampler IS "
+            "that Decoder, so this would train a different architecture.")
+    if stubbed:
+        print(f"✓ stubbed unused MindEyeV2 imports: {', '.join(stubbed)}", flush=True)
+    return mod.BrainNetwork
+
+
 def soft_cont_loss(student_preds, teacher_preds, teacher_aug_preds, temp=0.125):
     """Verbatim from third_party/MindEyeV2/src/utils.py:309-319.
 
@@ -92,7 +147,7 @@ class MindEyeBlurry(nn.Module):
                  n_blocks: int = 4, drop: float = 0.15, seq_len: int = 1):
         super().__init__()
         add_mindeye_to_path(mindeye_src)
-        from models import BrainNetwork  # noqa: E402  (their tree, path-injected)
+        BrainNetwork = _import_brainnetwork()
 
         self.h, self.seq_len = h, seq_len
         self.ridge = nn.ModuleDict({str(s): nn.Linear(v, h * seq_len)
