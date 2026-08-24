@@ -33,6 +33,23 @@ export WANDB_MODE="${WANDB_MODE:-offline}"
 export OMP_NUM_THREADS=1
 echo "Node: $(hostname)"; nvidia-smi --query-gpu=name,memory.total --format=csv || true
 
+if [ ! -d data/stl10_binary ] && [ ! -d data/cifar-10-batches-py ]; then
+    echo "datasets absent, fetching"
+    python - <<'PYFETCH'
+import torchvision as tv
+jobs = [("stl10-train", lambda: tv.datasets.STL10("data", split="train", download=True)),
+        ("stl10-test",  lambda: tv.datasets.STL10("data", split="test", download=True)),
+        ("cifar-train", lambda: tv.datasets.CIFAR10("data", train=True, download=True)),
+        ("cifar-test",  lambda: tv.datasets.CIFAR10("data", train=False, download=True))]
+for name, fn in jobs:
+    try:
+        fn()
+        print("fetched", name, flush=True)
+    except Exception as e:
+        print("FAILED", name, repr(e)[:160], flush=True)
+PYFETCH
+fi
+
 RES_LIST=(32 48 96)
 RES=${RES_LIST[$SLURM_ARRAY_TASK_ID]}
 echo "resolution ${RES}"
