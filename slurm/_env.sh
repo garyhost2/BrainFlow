@@ -29,17 +29,20 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export OMP_NUM_THREADS=1
 
-python -c "import matplotlib" 2>/dev/null || {
-    echo "matplotlib missing -> installing into $ENV_NAME"
-    LOCK="$HOME/.mpl_install.lock"
+for pkg in matplotlib wandb; do
+    python -c "import $pkg" 2>/dev/null && continue
+    echo "$pkg missing -> installing into $ENV_NAME"
+    LOCK="$HOME/.pipinstall_${pkg}.lock"
     if mkdir "$LOCK" 2>/dev/null; then
-        pip install -q matplotlib || echo "WARN: matplotlib install failed"
-        rmdir "$LOCK"
+        pip install -q "$pkg" || echo "WARN: $pkg install failed"
+        rmdir "$LOCK" || true
     else
         for _ in $(seq 1 60); do
-            python -c "import matplotlib" 2>/dev/null && break
+            python -c "import $pkg" 2>/dev/null && break
             sleep 5
         done
     fi
-}
-python -c "import matplotlib" 2>/dev/null && echo "matplotlib ok" || echo "matplotlib absent - figures skipped, numbers unaffected"
+done
+for pkg in matplotlib wandb; do
+    python -c "import $pkg" 2>/dev/null && echo "$pkg ok" || echo "$pkg absent - run continues, numbers unaffected"
+done
