@@ -28,3 +28,18 @@ echo "env=$CONDA_DEFAULT_ENV python=$(which python)"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export OMP_NUM_THREADS=1
+
+python -c "import matplotlib" 2>/dev/null || {
+    echo "matplotlib missing -> installing into $ENV_NAME"
+    LOCK="$HOME/.mpl_install.lock"
+    if mkdir "$LOCK" 2>/dev/null; then
+        pip install -q matplotlib || echo "WARN: matplotlib install failed"
+        rmdir "$LOCK"
+    else
+        for _ in $(seq 1 60); do
+            python -c "import matplotlib" 2>/dev/null && break
+            sleep 5
+        done
+    fi
+}
+python -c "import matplotlib" 2>/dev/null && echo "matplotlib ok" || echo "matplotlib absent - figures skipped, numbers unaffected"

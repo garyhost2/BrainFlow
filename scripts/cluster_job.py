@@ -4,9 +4,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    HAVE_MPL = True
+except Exception:
+    HAVE_MPL = False
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -33,7 +37,7 @@ P.add_argument("--sr_batch", type=int, default=64)
 P.add_argument("--sr_base", type=int, default=64)
 P.add_argument("--sr_seeds", default="0,1,2")
 P.add_argument("--sr_ode_k", type=int, default=32)
-P.add_argument("--sr_data", default="stl10")
+P.add_argument("--sr_data", default="stl10", choices=["stl10","cifar10","synth"])
 P.add_argument("--sr_root", default="./data")
 ARGS = P.parse_args() if len(sys.argv) > 1 else P.parse_args([])
 
@@ -91,6 +95,8 @@ def save_csv(name, rows):
 
 
 def save_fig(name):
+    if not HAVE_MPL:
+        return
     p = os.path.join(OUT, "figures", name)
     plt.savefig(p, dpi=150, bbox_inches="tight")
     plt.close()
@@ -240,8 +246,6 @@ if ARGS.part in ("theorem", "both"):
                         M = endpoint_map(S0, S1, C, ARGS.thm_steps)
                         d = (fro(M - M0) / fro(M0)).cpu().numpy()
                         vo, vs = violations(S0, S1, C)
-                    for q, lab in [(50, "p50"), (90, "p90")]:
-                        pass
                     rows.append(dict(n=n, rep=rep, eps_off=eo, eps_skew=es,
                                      viol_off=float(np.mean(vo)), viol_skew=float(np.mean(vs)),
                                      drift_med=float(np.median(d)), drift_p90=float(np.percentile(d, 90)),
@@ -310,22 +314,23 @@ if ARGS.part in ("theorem", "both"):
             skew_over_span_at_unit_violation=ratio,
             slope_offspan=slopes["offspan"][0], slope_skew=slopes["skew"][0])
 
-    fig, ax = plt.subplots(1, 2, figsize=(11.5, 4.0))
-    for n in DIMS:
-        s1 = [r for r in off_only if r["n"] == n]
-        s2 = [r for r in skw_only if r["n"] == n]
-        if s1:
-            ax[0].loglog([r["viol_off"] for r in s1], [max(r["drift_med"], 1e-16) for r in s1],
-                         "o", label=f"n={n}")
-        if s2:
-            ax[1].loglog([r["viol_skew"] for r in s2], [max(r["drift_med"], 1e-16) for r in s2],
-                         "s", label=f"n={n}")
-    for a, t in zip(ax, ["span violation", "skew violation"]):
-        a.axhline(max(r["drift_p90"] for r in clean), ls="--", c="k", lw=1)
-        a.set_xlabel(t)
-        a.set_ylabel("relative endpoint-map displacement")
-        a.legend(fontsize=7)
-    save_fig("C1_theorem_scale.png")
+    if HAVE_MPL:
+        fig, ax = plt.subplots(1, 2, figsize=(11.5, 4.0))
+        for n in DIMS:
+            s1 = [r for r in off_only if r["n"] == n]
+            s2 = [r for r in skw_only if r["n"] == n]
+            if s1:
+                ax[0].loglog([r["viol_off"] for r in s1], [max(r["drift_med"], 1e-16) for r in s1],
+                             "o", label=f"n={n}")
+            if s2:
+                ax[1].loglog([r["viol_skew"] for r in s2], [max(r["drift_med"], 1e-16) for r in s2],
+                             "s", label=f"n={n}")
+        for a, t in zip(ax, ["span violation", "skew violation"]):
+            a.axhline(max(r["drift_p90"] for r in clean), ls="--", c="k", lw=1)
+            a.set_xlabel(t)
+            a.set_ylabel("relative endpoint-map displacement")
+            a.legend(fontsize=7)
+        save_fig("C1_theorem_scale.png")
     tock("theorem")
     flush_reg()
 
@@ -415,6 +420,12 @@ def psnr(a, b):
 
 
 def load_sr(res, root, name):
+    if name == "synth":
+        g = torch.Generator().manual_seed(0)
+        def mk(n):
+            x = torch.randn(n, 3, res, res, generator=g)
+            return (F.avg_pool2d(x, 3, 1, 1) * 2.2).clamp(-1, 1),                    torch.randint(0, 10, (n,), generator=g)
+        return mk(1024), mk(256), 10
     import torchvision
     from torchvision import transforms as T
     tf = T.Compose([T.Resize(res), T.CenterCrop(res), T.ToTensor(),
@@ -460,7 +471,6 @@ def sr_train(mode, Xtr, Ytr, f, steps, bs, base, nc, seed, res):
     net = UNet(cin, base=base, n_class=nc).to(DEV)
     opt = torch.optim.AdamW(net.parameters(), lr=2e-4, weight_decay=0.0)
     sch = torch.optim.lr_scheduler.OneCycleLR(opt, 2e-4, total_steps=steps, pct_start=0.05)
-    scaler = torch.amp.GradScaler("cuda", enabled=(DEV == "cuda"))
     N = Xtr.shape[0]
     run = None
     t0 = time.time()
@@ -469,7 +479,7 @@ def sr_train(mode, Xtr, Ytr, f, steps, bs, base, nc, seed, res):
         z1 = Xtr[idx]
         y = Ytr[idx]
         z0 = down_up(z1, f)
-        with torch.amp.autocast("cuda", enabled=(DEV == "cuda"), dtype=torch.bfloat16):
+        with torch.autocast("cuda", enabled=(DEV == "cuda"), dtype=torch.bfloat16):
             if mode == "reg":
                 pred = net(torch.cat([z0, z0], 1), torch.zeros(bs, device=DEV), y)
                 loss = F.mse_loss(pred, z1)
@@ -479,11 +489,9 @@ def sr_train(mode, Xtr, Ytr, f, steps, bs, base, nc, seed, res):
                 inp = torch.cat([zt, z0], 1) if see else zt
                 loss = F.mse_loss(net(inp, t, y), z1 - z0)
         opt.zero_grad(set_to_none=True)
-        scaler.scale(loss).backward()
-        scaler.unscale_(opt)
+        loss.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
-        scaler.step(opt)
-        scaler.update()
+        opt.step()
         sch.step()
         ld = loss.detach()
         run = ld if run is None else 0.99 * run + 0.01 * ld
@@ -509,15 +517,15 @@ if ARGS.part in ("sr", "both"):
         Z0te = down_up(Xte, f)
         Qt = Xte - down_up(Xte, f)
         null_t = float((Qt ** 2).flatten(1).sum(1).mean())
-        n_rk = min(Xtr.shape[0], 4 * r_pix + 256)
+        n_rk = min(Xtr.shape[0], 4 * r_pix + 256, 3072)
         Z0rk = down_up(Xtr[:n_rk], f)
-        cen = (Z0rk - Z0rk.mean(0, keepdim=True)).flatten(1)
-        sv = torch.linalg.svdvals(cen.double())
-        rk = int((sv > sv[0] * 1e-6).sum())
+        def _rank(M):
+            Mc = (M - M.mean(0, keepdim=True)).flatten(1).double()
+            ev = torch.linalg.eigvalsh(Mc @ Mc.T)
+            return int((ev > ev[-1] * 1e-10).sum())
+        rk = _rank(Z0rk)
         measurable = (n_rk - 1) > r_pix
-        rk1 = int((torch.linalg.svdvals(
-            (Xtr[:n_rk] - Xtr[:n_rk].mean(0, keepdim=True)).flatten(1).double())
-            > 1e-6).sum())
+        rk1 = _rank(Xtr[:n_rk])
         log(res=res, n_pix=n_pix, r_pix=r_pix, measured_rank_z0=rk, measured_rank_z1=rk1,
             rank_samples=n_rk, measurable=int(measurable),
             null_energy_target=null_t, identity_psnr=psnr(Z0te, Xte))
@@ -606,21 +614,22 @@ if ARGS.part in ("sr", "both"):
         "the sign of the difference between the two models does not depend on resolution",
         gaps=str([round(s, 4) for s in signs]), resolutions=str(RESL))
 
-    fig, ax = plt.subplots(1, 3, figsize=(14.5, 4.0))
-    for arm in ["identity", "reg", "m1", "m2"]:
-        ax[0].errorbar(RESL, [sagg(r, arm)[0] for r in RESL],
-                       yerr=[sagg(r, arm)[1] for r in RESL], fmt="o-", capsize=3, label=arm)
-        ax[1].plot(RESL, [sagg(r, arm, "null_ratio")[0] for r in RESL], "o-", label=arm)
-    ax[2].plot(RESL, signs, "o-")
-    ax[2].axhline(0, c="k", lw=0.8)
-    ax[0].set_ylabel("PSNR")
-    ax[1].set_ylabel("null-space energy / target")
-    ax[1].axhline(1.0, ls="--", c="k", lw=1)
-    ax[2].set_ylabel("m1 - m2 PSNR")
-    for a in ax:
-        a.set_xlabel("resolution")
-        a.legend(fontsize=7)
-    save_fig("C2_sr.png")
+    if HAVE_MPL:
+        fig, ax = plt.subplots(1, 3, figsize=(14.5, 4.0))
+        for arm in ["identity", "reg", "m1", "m2"]:
+            ax[0].errorbar(RESL, [sagg(r, arm)[0] for r in RESL],
+                           yerr=[sagg(r, arm)[1] for r in RESL], fmt="o-", capsize=3, label=arm)
+            ax[1].plot(RESL, [sagg(r, arm, "null_ratio")[0] for r in RESL], "o-", label=arm)
+        ax[2].plot(RESL, signs, "o-")
+        ax[2].axhline(0, c="k", lw=0.8)
+        ax[0].set_ylabel("PSNR")
+        ax[1].set_ylabel("null-space energy / target")
+        ax[1].axhline(1.0, ls="--", c="k", lw=1)
+        ax[2].set_ylabel("m1 - m2 PSNR")
+        for a in ax:
+            a.set_xlabel("resolution")
+            a.legend(fontsize=7)
+        save_fig("C2_sr.png")
     tock("sr")
     flush_reg()
 
