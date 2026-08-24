@@ -20,21 +20,16 @@ source slurm/_env.sh
 
 echo "Node: $(hostname)"; nvidia-smi --query-gpu=name,memory.total --format=csv || true
 
-if [ ! -d data/stl10_binary ] && [ ! -d data/cifar-10-batches-py ]; then
-    echo "datasets absent, fetching"
+if [ ! -d data/stl10_binary ]; then
+    echo "stl10 absent, fetching (~2.6 GB, allow 15-20 min)"
     python - <<'PYFETCH'
 import torchvision as tv
-jobs = [("stl10-train", lambda: tv.datasets.STL10("data", split="train", download=True)),
-        ("stl10-test",  lambda: tv.datasets.STL10("data", split="test", download=True)),
-        ("cifar-train", lambda: tv.datasets.CIFAR10("data", train=True, download=True)),
-        ("cifar-test",  lambda: tv.datasets.CIFAR10("data", train=False, download=True))]
-for name, fn in jobs:
-    try:
-        fn()
-        print("fetched", name, flush=True)
-    except Exception as e:
-        print("FAILED", name, repr(e)[:160], flush=True)
+tv.datasets.STL10("data", split="train", download=True)
+tv.datasets.STL10("data", split="test", download=True)
+print("fetched stl10", flush=True)
 PYFETCH
+else
+    echo "stl10 present, skipping fetch"
 fi
 
 RES_LIST=(32 48 96)
