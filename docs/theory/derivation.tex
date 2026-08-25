@@ -1,0 +1,1147 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1.05in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools,booktabs,bm}
+\usepackage{xcolor}
+\usepackage[colorlinks,linkcolor=blue!45!black,citecolor=blue!45!black]{hyperref}
+
+\newtheorem{lemma}{Lemma}[section]
+\newtheorem{proposition}[lemma]{Proposition}
+\newtheorem{theorem}[lemma]{Theorem}
+\newtheorem{corollary}[lemma]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[lemma]{Definition}
+\newtheorem{assumption}[lemma]{Assumption}
+\newtheorem{example}[lemma]{Example}
+\theoremstyle{remark}
+\newtheorem{remark}[lemma]{Remark}
+\newtheorem{measurement}[lemma]{Measurement}
+
+\DeclareMathOperator{\Cov}{Cov}
+\DeclareMathOperator{\Var}{Var}
+\DeclareMathOperator{\spn}{span}
+\DeclareMathOperator{\sd}{sd}
+\DeclareMathOperator{\Fix}{Fix}
+\DeclareMathOperator{\rank}{rank}
+\newcommand{\Sph}{\mathbb{S}^{d-1}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\T}{\mathsf{T}}
+\newcommand{\law}{\mathcal{L}}
+
+\begin{document}
+
+\section{Conventions}\label{sec:conv}
+
+\begin{definition}[second moments]\label{def:conv}
+For random vectors $X\in\R^{n}$, $Y\in\R^{m}$,
+\[
+\Cov(Y,X):=\E\big[(Y-\E Y)(X-\E X)^{\T}\big]\in\R^{m\times n},
+\qquad
+\Var(X):=\Cov(X,X),
+\]
+so that $\Cov(Y,X)=\Cov(X,Y)^{\T}$. Unless stated otherwise all random vectors are centred and
+$\Cov(Y,X)=\E[YX^{\T}]$.
+\end{definition}
+
+\begin{definition}[matrix calculus]\label{def:matcalc}
+For a differentiable invertible matrix-valued map $t\mapsto V(t)$,
+\begin{equation}\label{eq:dinv}
+\frac{d}{dt}V(t)^{-1}=-V(t)^{-1}V'(t)V(t)^{-1},
+\end{equation}
+obtained by differentiating $VV^{-1}=I$. The identity holds likewise for partial derivatives of a
+map $V(p,q)$.
+\end{definition}
+
+\begin{definition}[linear ODE, time-ordered exponential]\label{def:texp}
+For continuous $K:[0,1]\to\R^{n\times n}$ let $M(t)$ be the unique solution of
+\begin{equation}\label{eq:ivp}
+\dot M(t)=K(t)M(t),\qquad M(0)=I,
+\end{equation}
+written $M(t)=\mathcal T\exp\int_{0}^{t}K(s)\,ds$, the limit of the ordered products
+$\prod_{i}(I+K(t_i)\Delta t)$ with later times on the left. If $\{K(s)\}_{s}$ is a commuting family
+this equals $\exp\int_0^tK$; otherwise it does not.
+\end{definition}
+
+\begin{lemma}[Gaussian conditioning]\label{lem:gausscond}
+Let $(Y,X)$ be jointly Gaussian and centred with $\Var(X)\succ0$. Then
+$\E[Y\mid X=x]=\Cov(Y,X)\Var(X)^{-1}x$.
+\end{lemma}
+
+\begin{proof}
+Set $L:=\Cov(Y,X)\Var(X)^{-1}$ and $W:=Y-LX$. Then
+$\Cov(W,X)=\Cov(Y,X)-L\Var(X)=0$. The pair $(W,X)$ is jointly Gaussian and uncorrelated, hence
+independent, so $\E[W\mid X]=\E[W]=0$ and $\E[Y\mid X=x]=Lx$.
+\end{proof}
+
+\begin{definition}[symbols]\label{def:symbols}
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+$d$ & ambient dimension; $\Sph=\{z\in\R^{d}:\|z\|=1\}$\\
+$c$ & condition, $c\sim\mathrm{Unif}(\Sph)$\\
+$T_c\Sph$ & $\{v\in\R^d:\langle v,c\rangle=0\}$; $\Pi_z:=I-zz^{\T}$\\
+$\xi$ & latent factor, uniform on the unit sphere of $T_c\Sph$\\
+$\beta\in[0,1]$ & latent weight; $s:=\sqrt{1-\beta^{2}}$\\
+$m$ & $m:=sc+\beta\xi$\\
+$\kappa$ & concentration; $A:=A_d(\kappa)=I_{d/2}(\kappa)/I_{d/2-1}(\kappa)$\\
+$j$ & leak angle; $z_0:=\cos j\,c+\sin j\,\xi$\\
+$z_1$ & $z_1\sim\mathrm{vMF}(m,\kappa)$\\
+$\Sigma_0,\Sigma_1,C$ & $\Var(x_0)$, $\Var(x_1)$, $\E[x_0x_1^{\T}]$\\
+$S,N$ & $S:=C+C^{\T}$, $N:=\tfrac12(C^{\T}-C)$\\
+$P$ & $P:=I-cc^{\T}$\\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{definition}
+
+\section{The model}\label{sec:model}
+
+\begin{definition}[generative law]\label{def:model}
+Sample in this order:
+\[
+c\sim\mathrm{Unif}(\Sph);
+\qquad
+\xi\mid c\sim\mathrm{Unif}\big(\Sph\cap T_c\Sph\big);
+\qquad
+z_1\mid(c,\xi)\sim\mathrm{vMF}(m,\kappa),\quad m=sc+\beta\xi;
+\]
+\[
+z_0:=\cos j\,c+\sin j\,\xi.
+\]
+Then $\|m\|^{2}=s^{2}+\beta^{2}=1$ and $\|z_0\|=1$, since $\langle c,\xi\rangle=0$ and
+$\|c\|=\|\xi\|=1$.
+\end{definition}
+
+\begin{remark}\label{rem:coupling}
+$\xi$ is independent of $c$ and enters both $z_0$ (through $\sin j\,\xi$) and $z_1$ (through $m$).
+Fixing $\law(z_0\mid c)$ and $\law(z_1\mid c)$ does not determine the joint law of $(z_0,z_1)$
+given $c$; the residual freedom is the coupling.
+\end{remark}
+
+\begin{definition}[decoupled family]\label{def:rho}
+For $\rho\in[0,1]$ let $\xi_s,\xi_b$ be independent and uniform on $\Sph\cap T_c\Sph$ and set
+\[
+\xi_t:=\frac{\Pi_c\big(\rho\,\xi_s+\sqrt{1-\rho^{2}}\,\xi_b\big)}
+{\|\Pi_c(\rho\,\xi_s+\sqrt{1-\rho^{2}}\,\xi_b)\|},
+\qquad
+m:=s c+\beta\xi_t,
+\qquad
+z_0:=\cos j\,c+\sin j\,\xi_s,
+\qquad
+z_1\sim\mathrm{vMF}(m,\kappa).
+\]
+\end{definition}
+
+\begin{lemma}\label{lem:rhomarg}
+For every $\rho\in[0,1]$, $\law(\xi_t\mid c)=\law(\xi_s\mid c)$, hence $\law(z_0\mid c)$ and
+$\law(z_1\mid c)$ do not depend on $\rho$. Definition~\ref{def:model} is the case $\rho=1$.
+\end{lemma}
+
+\begin{proof}
+For $R\in SO(d)$ with $Rc=c$ the pair $(\xi_s,\xi_b)$ is equal in law to $(R\xi_s,R\xi_b)$, and
+$\xi_t$ is an $SO(d)$-equivariant function of that pair, so $\law(\xi_t\mid c)$ is invariant under
+every such $R$. The only such law on the unit sphere of $T_c\Sph$ is the uniform one. The
+statement for $z_1$ follows since $\law(z_1\mid c)$ is determined by $\law(\xi_t\mid c)$.
+\end{proof}
+
+\begin{lemma}[first moments]\label{lem:moments}
+\begin{equation}\label{eq:m1}
+\E[z_1\mid c,\xi]=Am,
+\qquad
+\E[\xi\mid c]=0,
+\qquad
+\E[z_1\mid c]=As\,c.
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+The first is the von Mises--Fisher mean. The second holds because $\law(\xi\mid c)$ is invariant
+under $\xi\mapsto-\xi$. The third follows by the tower rule,
+$\E[z_1\mid c]=\E[A(sc+\beta\xi)\mid c]=Asc+A\beta\E[\xi\mid c]=Asc$.
+\end{proof}
+
+\begin{definition}[interpolant, field, objectives]\label{def:flow}
+With $\theta:=\arccos\langle z_0,z_1\rangle$,
+\[
+z_t:=\frac{\sin((1-t)\theta)}{\sin\theta}z_0+\frac{\sin(t\theta)}{\sin\theta}z_1,
+\qquad
+\dot z_t=\frac{\theta}{\sin\theta}\Big(-\cos((1-t)\theta)z_0+\cos(t\theta)z_1\Big).
+\]
+The marginal field is
+\begin{equation}\label{eq:field}
+u(z,t;c):=\E\big[\dot z_t\mid z_t=z,\ c\big].
+\end{equation}
+Define
+\[
+\mathcal M_1:\ \min_{\phi}\ \E_{t\sim U[0,1]}\big\|\Pi_{z_t}v_\phi(z_t,t,c)-\dot z_t\big\|^{2},
+\qquad
+\mathcal M_2:\ \min_{\phi}\ \E_{t\sim U[0,1]}\big\|\Pi_{z_t}v_\phi(z_t,t,c,z_0)-\dot z_t\big\|^{2},
+\]
+both sampled by $\dot z=\Pi_zv_\phi$ from $z|_{t=0}=z_0$ to $t=1$. The population optimum of
+$\mathcal M_1$ is \eqref{eq:field}; that of $\mathcal M_2$ is treated in \S\ref{sec:cond}.
+\end{definition}
+
+\section{Reference levels}\label{sec:ref}
+
+\begin{proposition}\label{prop:ref}
+Let $z_1'$ be an independent replicate of $z_1$ under the stated conditioning. Then
+\begin{align}
+\E\langle z_0,z_1\rangle &= A\big(s\cos j+\beta\sin j\big), \label{eq:src}\\
+\E\langle m,z_1\rangle &= A, \label{eq:ceil}\\
+\E\langle c,z_1\rangle &= As, \label{eq:ceilc}\\
+\E\langle z_1',z_1\rangle &= A^{2} &&\hspace{-4em}\text{(replicate given }(c,\xi)), \label{eq:sampx}\\
+\E\langle z_1',z_1\rangle &= A^{2}s^{2} &&\hspace{-4em}\text{(replicate given }c). \label{eq:sampc}
+\end{align}
+\end{proposition}
+
+\begin{proof}
+\eqref{eq:src}: $z_0$ is $\sigma(c,\xi)$-measurable, so by \eqref{eq:m1},
+\[
+\E\langle z_0,z_1\rangle=\E\big\langle z_0,\E[z_1\mid c,\xi]\big\rangle
+=A\,\E\langle\cos j\,c+\sin j\,\xi,\ sc+\beta\xi\rangle=A(s\cos j+\beta\sin j).
+\]
+\eqref{eq:ceil}: $\E\langle m,z_1\rangle=A\langle m,m\rangle=A$.
+\eqref{eq:ceilc}: $\E\langle c,z_1\rangle=A\langle c,m\rangle=As$.
+\eqref{eq:sampx}: conditionally on $(c,\xi)$ the replicate is independent, so
+$\E\langle z_1',z_1\rangle=\|\E[z_1\mid c,\xi]\|^{2}=\|Am\|^{2}=A^{2}$.
+\eqref{eq:sampc}: the same step with conditioning on $c$ and $\E[z_1\mid c]=Asc$ gives
+$\|Asc\|^{2}=A^{2}s^{2}$.
+\end{proof}
+
+\begin{remark}\label{rem:whichopt}
+For $\mathcal F$-measurable unit $x$, $\E\langle x,z_1\rangle=\langle x,\E[z_1\mid\mathcal F]\rangle$,
+so by Cauchy--Schwarz the maximiser is $x=\E[z_1\mid\mathcal F]/\|\E[z_1\mid\mathcal F]\|$. For
+$\mathcal F=\sigma(c,\xi)$ this is $m$, of value $A$; for $\mathcal F=\sigma(c)$ it is $c$, of value
+$As$. Hence \eqref{eq:ceil} and \eqref{eq:ceilc} are the maxima of $\E\langle\cdot,z_1\rangle$
+under the two information sets, and the functional is maximised by conditional means.
+\end{remark}
+
+\begin{corollary}\label{cor:order}
+At $d=256$, $A=0.37$, $\beta=0.8$, $j=0.15$,
+\[
+\underbrace{0.0493}_{\eqref{eq:sampc}}<
+\underbrace{0.1369}_{\eqref{eq:sampx}}<
+\underbrace{0.2220}_{\eqref{eq:ceilc}}<
+\underbrace{0.2637}_{\eqref{eq:src}}<
+\underbrace{0.3700}_{\eqref{eq:ceil}}.
+\]
+\end{corollary}
+
+\begin{measurement}\label{meas:ref}
+Monte Carlo with $2\times10^{4}$ draws reproduces \eqref{eq:src}--\eqref{eq:sampc} at
+$\beta\in\{0,0.8,0.95\}$ to within $5\times10^{-4}$, against a sampling error of
+$4N^{-1/2}=2.8\times10^{-2}$.
+\end{measurement}
+
+\section{The flat Gaussian case}\label{sec:flat}
+
+\subsection{Setup}
+
+\begin{assumption}\label{ass:flat}
+$(x_0,x_1)$ are jointly Gaussian and centred in $\R^{n}$ with
+$\Sigma_0=\Var(x_0)$, $\Sigma_1=\Var(x_1)$, $C=\E[x_0x_1^{\T}]$, and
+$J=\begin{psmallmatrix}\Sigma_0&C\\C^{\T}&\Sigma_1\end{psmallmatrix}\succeq0$. The interpolant is
+$x_t=(1-t)x_0+tx_1$, so $\dot x_t=x_1-x_0$ is constant in $t$ along each sample path. We assume
+$V(t):=\Var(x_t)\succ0$ for all $t\in[0,1]$.
+\end{assumption}
+
+\begin{lemma}\label{lem:Vt}
+\begin{equation}\label{eq:Vt}
+V(t)=(1-t)^{2}\Sigma_0+t(1-t)S+t^{2}\Sigma_1,
+\qquad
+V(0)=\Sigma_0,\quad V(1)=\Sigma_1.
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+$x_t$ is a linear image of $(x_0,x_1)$, hence Gaussian and centred, with
+\[
+\E[x_tx_t^{\T}]=(1-t)^{2}\E[x_0x_0^{\T}]+(1-t)t\,\E[x_0x_1^{\T}]+t(1-t)\E[x_1x_0^{\T}]+t^{2}\E[x_1x_1^{\T}].
+\]
+Substituting $\E[x_1x_0^{\T}]=C^{\T}$ and collecting the middle terms into $t(1-t)(C+C^{\T})$ gives
+\eqref{eq:Vt}.
+\end{proof}
+
+\subsection{The marginal field}
+
+\begin{lemma}\label{lem:G}
+Let $G(t):=\Cov(x_1-x_0,x_t)$. Then
+\begin{equation}\label{eq:G}
+G(t)=(1-t)\big(C^{\T}-\Sigma_0\big)+t\big(\Sigma_1-C\big).
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+By bilinearity and Definition~\ref{def:conv},
+\[
+G(t)=\E\big[(x_1-x_0)\big((1-t)x_0+tx_1\big)^{\T}\big]
+=(1-t)C^{\T}-(1-t)\Sigma_0+t\Sigma_1-tC. \qedhere
+\]
+\end{proof}
+
+\begin{lemma}\label{lem:id}
+\begin{equation}\label{eq:id}
+G(t)=\tfrac12V'(t)+N,\qquad N=\tfrac12\big(C^{\T}-C\big),
+\end{equation}
+with $N$ skew-symmetric and independent of $t$.
+\end{lemma}
+
+\begin{proof}
+Differentiating \eqref{eq:Vt},
+\[
+V'(t)=-2(1-t)\Sigma_0+(1-2t)S+2t\Sigma_1,
+\qquad
+\tfrac12V'(t)=-(1-t)\Sigma_0+\tfrac{1-2t}{2}\big(C+C^{\T}\big)+t\Sigma_1.
+\]
+Subtracting from \eqref{eq:G}, the $\Sigma_0$ and $\Sigma_1$ terms cancel, leaving
+\[
+G(t)-\tfrac12V'(t)
+=C^{\T}\Big[(1-t)-\tfrac{1-2t}{2}\Big]+C\Big[-t-\tfrac{1-2t}{2}\Big]
+=\tfrac12C^{\T}-\tfrac12C=N,
+\]
+since $(1-t)-\tfrac{1-2t}{2}=\tfrac12$ and $-t-\tfrac{1-2t}{2}=-\tfrac12$.
+\end{proof}
+
+\begin{corollary}\label{cor:idsym}
+$G(t)=\tfrac12V'(t)$ for all $t$ if and only if $C=C^{\T}$. For $n=1$ this holds identically.
+\end{corollary}
+
+\begin{proposition}\label{prop:linfield}
+Under Assumption~\ref{ass:flat},
+\begin{equation}\label{eq:K}
+u(x,t):=\E[\dot x_t\mid x_t=x]=K(t)x,
+\qquad
+K(t)=G(t)V(t)^{-1}=\tfrac12V'(t)V(t)^{-1}+NV(t)^{-1}.
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+$(x_1-x_0,x_t)$ is jointly Gaussian and centred, so Lemma~\ref{lem:gausscond} with $Y=x_1-x_0$,
+$X=x_t$ gives $u(x,t)=G(t)V(t)^{-1}x$. Substitute \eqref{eq:id}.
+\end{proof}
+
+\begin{definition}[endpoint map]\label{def:M}
+The probability-flow ODE is $\dot z(t)=K(t)z(t)$, so $z(t)=M(t)z(0)$ with $M$ solving
+\eqref{eq:ivp}. Write $M:=M(1)$.
+\end{definition}
+
+\begin{remark}\label{rem:fluxnull}
+Set $\Lambda(t):=V(t)^{-1}NV(t)^{-1}$. Then $\Lambda^{\T}=-\Lambda$ and
+$NV(t)^{-1}=V(t)\Lambda(t)$, so the second term of \eqref{eq:K} is of the form
+$V\Lambda$ with $\Lambda$ skew. Proposition~\ref{prop:push} shows this term does not affect the
+law of $x_t$; Theorem~\ref{thm:pencil} shows it does affect $M$.
+\end{remark}
+
+\subsection{Marginal matching}
+
+\begin{proposition}\label{prop:push}
+$M(t)\Sigma_0M(t)^{\T}=V(t)$ for all $t\in[0,1]$; in particular $M\Sigma_0M^{\T}=\Sigma_1$. No
+hypothesis on $N$ is required.
+\end{proposition}
+
+\begin{proof}
+Let $P(t):=M(t)\Sigma_0M(t)^{\T}$, so $P(0)=\Sigma_0=V(0)$, and by \eqref{eq:ivp},
+$P'=KP+PK^{\T}$. Evaluate the same expression at $P=V$. Using \eqref{eq:K}, symmetry of $V$ and
+$V'$, and $N^{\T}=-N$,
+\[
+KV=\tfrac12V'+N,
+\qquad
+K^{\T}=\tfrac12V^{-1}V'-V^{-1}N,
+\qquad
+VK^{\T}=\tfrac12V'-N,
+\]
+hence $KV+VK^{\T}=V'$. Therefore $V$ solves $P'=KP+PK^{\T}$ with the same initial condition, and by
+uniqueness $P\equiv V$.
+\end{proof}
+
+\begin{remark}\label{rem:pushnotenough}
+Proposition~\ref{prop:push} does not determine $M$: if $M\Sigma_0M^{\T}=\Sigma_1$ then
+$(MQ)\Sigma_0(MQ)^{\T}=\Sigma_1$ for every $Q$ with $Q\Sigma_0Q^{\T}=\Sigma_0$.
+\end{remark}
+
+\subsection{The pencil criterion}
+
+\begin{theorem}\label{thm:pencil}
+Assume
+\[
+\textbf{(i)}\ N=0,
+\qquad
+\textbf{(ii)}\ S\in\spn\{\Sigma_0,\Sigma_1\}.
+\]
+Then $M$ is a function of $(\Sigma_0,\Sigma_1)$ alone: any two couplings satisfying
+\textup{(i)}--\textup{(ii)} with the same marginals produce the same endpoint map.
+\end{theorem}
+
+\begin{proof}
+\emph{Step 1.} By (ii) write $S=\sigma\Sigma_0+\tau\Sigma_1$. Substituting into \eqref{eq:Vt},
+\[
+V(t)=p(t)\Sigma_0+q(t)\Sigma_1,
+\qquad
+p(t)=(1-t)^{2}+\sigma t(1-t),
+\qquad
+q(t)=t^{2}+\tau t(1-t),
+\]
+with $(p(0),q(0))=(1,0)$ and $(p(1),q(1))=(0,1)$ for every admissible $(\sigma,\tau)$. The coupling
+moves the curve $\gamma(t)=(p(t),q(t))$ but not its endpoints.
+
+\emph{Step 2.} On $\Omega:=\{(p,q)\in\R^{2}:p\Sigma_0+q\Sigma_1\succ0\}$ define
+\[
+V(p,q):=p\Sigma_0+q\Sigma_1,
+\qquad
+A(p,q):=\tfrac12\Sigma_0V^{-1},
+\qquad
+B(p,q):=\tfrac12\Sigma_1V^{-1}.
+\]
+By (i), $K(t)=\tfrac12V'(t)V(t)^{-1}$ with $V'(t)=p'(t)\Sigma_0+q'(t)\Sigma_1$, hence
+$K(t)=p'(t)A(\gamma(t))+q'(t)B(\gamma(t))$. Thus \eqref{eq:ivp} is the pullback along $\gamma$ of
+the matrix-valued $1$-form $\omega:=A\,dp+B\,dq$, and $M$ is the parallel transport of $\omega$
+along $\gamma$ from $(1,0)$ to $(0,1)$. The set $\Omega$ is convex by linearity of $V$ in $(p,q)$,
+hence simply connected.
+
+\emph{Step 3.} If transport is path-independent on $\Omega$ there is $M(p,q)$ with
+$\partial_pM=AM$, $\partial_qM=BM$. Cross-differentiating,
+\[
+\partial_q\partial_pM=(\partial_qA)M+ABM,
+\qquad
+\partial_p\partial_qM=(\partial_pB)M+BAM,
+\]
+so for invertible $M$ equality of mixed partials is equivalent to
+\begin{equation}\label{eq:frob}
+\partial_qA-\partial_pB+[A,B]=0,
+\end{equation}
+which by the Frobenius theorem is also sufficient on the simply connected $\Omega$.
+
+\emph{Step 4.} From $\partial_pV=\Sigma_0$, $\partial_qV=\Sigma_1$ and \eqref{eq:dinv},
+\[
+\partial_qA=-\tfrac12\Sigma_0V^{-1}\Sigma_1V^{-1}=-\big(\tfrac12\Sigma_0V^{-1}\big)\big(\Sigma_1V^{-1}\big)=-2AB,
+\qquad
+\partial_pB=-2BA,
+\]
+whence $\partial_qA-\partial_pB+[A,B]=-2AB+2BA+AB-BA=-[A,B]$, so \eqref{eq:frob} holds if and only
+if $[A,B]=0$.
+
+\emph{Step 5.} By construction $pA+qB=\tfrac12(p\Sigma_0+q\Sigma_1)V^{-1}=\tfrac12I$. For $q\neq0$,
+$B=\tfrac{1}{2q}I-\tfrac{p}{q}A$, so
+\[
+[A,B]=\Big[A,\tfrac{1}{2q}I\Big]-\tfrac{p}{q}[A,A]=0.
+\]
+The set $\{q=0\}$ is null in $\Omega$ and $[A,B]$ is continuous, so $[A,B]\equiv0$ on $\Omega$.
+
+\emph{Step 6.} By Steps 3--5 transport is path-independent on $\Omega$; by Step 1 the endpoints of
+$\gamma$ are $(1,0)$ and $(0,1)$ independently of the coupling, with $V(1,0)=\Sigma_0$ and
+$V(0,1)=\Sigma_1$. Hence $M$ depends only on $(\Sigma_0,\Sigma_1)$.
+\end{proof}
+
+\begin{remark}\label{rem:notused}
+Step 5 does not use $[\Sigma_0,\Sigma_1]=0$. Commutation of the marginals is not required for
+coupling-independence; only (i) and (ii) are.
+\end{remark}
+
+\begin{corollary}\label{cor:brenier}
+If in addition $[\Sigma_0,\Sigma_1]=0$ then $M=\Sigma_1^{1/2}\Sigma_0^{-1/2}$, the Brenier map
+between $\mathcal N(0,\Sigma_0)$ and $\mathcal N(0,\Sigma_1)$.
+\end{corollary}
+
+\begin{proof}
+By Theorem~\ref{thm:pencil} evaluate $M$ along the segment $p(u)=1-u$, $q(u)=u$ in $\Omega$, so
+$V(u)=(1-u)\Sigma_0+u\Sigma_1$ and $K=\tfrac12(\Sigma_1-\Sigma_0)V(u)^{-1}$. Since $\Sigma_0$ and
+$\Sigma_1$ commute they are simultaneously diagonalisable, so $\{V(u),V'(u)\}_u$ is a commuting
+family, the time-ordering of Definition~\ref{def:texp} is vacuous, and
+\[
+M=\exp\Big(\tfrac12\int_0^1V'V^{-1}\,du\Big)
+=\exp\Big(\tfrac12\big[\log\Sigma_1-\log\Sigma_0\big]\Big)=\Sigma_1^{1/2}\Sigma_0^{-1/2}. \qedhere
+\]
+\end{proof}
+
+\begin{corollary}\label{cor:notbayes}
+For $n=1$ with means restored, $M:x_0\mapsto\mu_1+\tfrac{\sigma_1}{\sigma_0}(x_0-\mu_0)$, whereas
+$\E[x_1\mid x_0]=\mu_1+\rho\tfrac{\sigma_1}{\sigma_0}(x_0-\mu_0)$ with
+$\rho=\Cov(x_0,x_1)/(\sigma_0\sigma_1)$. The two coincide only at $\rho=1$.
+\end{corollary}
+
+\subsection{Failure off the pencil}
+
+\begin{proposition}\label{prop:obstruction}
+Drop hypothesis \textup{(ii)} and set $V(p,r,q)=p\Sigma_0+rS+q\Sigma_1$ on the corresponding
+positivity domain, with $A=\tfrac12\Sigma_0V^{-1}$, $R=\tfrac12SV^{-1}$, $B=\tfrac12\Sigma_1V^{-1}$.
+Then $pA+rR+qB=\tfrac12I$ and
+\[
+[A,B]=-\frac{r}{q}[A,R].
+\]
+The integrability condition \eqref{eq:frob} in the $(p,q)$ directions therefore holds if and only
+if $r[A,R]=0$, and hypothesis \textup{(ii)} is the case $r\equiv0$.
+\end{proposition}
+
+\begin{proof}
+$pA+rR+qB=\tfrac12VV^{-1}=\tfrac12I$ as in Step 5. Solving for $B$ and commuting with $A$,
+\[
+q[A,B]=\Big[A,\ \tfrac12I-pA-rR\Big]=-p[A,A]-r[A,R]=-r[A,R].
+\]
+Steps 3--4 of Theorem~\ref{thm:pencil} apply verbatim in the $(p,q)$ directions, reducing
+\eqref{eq:frob} to $[A,B]=0$.
+\end{proof}
+
+\begin{remark}\label{rem:obstrscope}
+Proposition~\ref{prop:obstruction} establishes failure of a sufficient condition, not
+coupling-dependence. The latter is exhibited by Example~\ref{ex:arms}\,(c)--(d).
+\end{remark}
+
+\subsection{Numerical verification}
+
+\begin{measurement}\label{meas:id}
+Over $300$ random admissible triples $(\Sigma_0,\Sigma_1,C)$ with $n\in\{1,\dots,5\}$ and
+$t\sim U(0.05,0.95)$,
+\[
+\max\big\|G(t)-\tfrac12V'(t)-\tfrac12(C^{\T}-C)\big\|_{\max}=3.6\times10^{-15}.
+\]
+\end{measurement}
+
+\begin{example}\label{ex:arms}
+Let $n=3$, $\Sigma_0=\mathrm{diag}(1,\ 0.4,\ 0.15)$, $D=\mathrm{diag}(0.8,\ 0.5,\ 0.25)$, let
+$Q,Q'\in SO(3)$ be fixed and generic, let $E=Q'\mathrm{diag}(1,\ 0.6,\ 0.3)Q'^{\T}$, and let
+$W=-W^{\T}$ be a fixed generic skew matrix. For $a\in\{0,0.1,0.2,0.3,0.45,0.6\}$ consider the four
+families
+\[
+\begin{array}{llll}
+\text{(a)} & \Sigma_1=D, & C=a\,\mathrm{diag}\big(\sqrt{(\Sigma_0)_{ii}(\Sigma_1)_{ii}}\big), \\[2pt]
+\text{(b)} & \Sigma_1=QDQ^{\T}, & C=\tfrac{a}{2}\big(\Sigma_0+\Sigma_1\big), \\[2pt]
+\text{(c)} & \Sigma_1=D, & C=0.35\,a\,E, \\[2pt]
+\text{(d)} & \Sigma_1=QDQ^{\T}, & C=0.15\big(\Sigma_0+\Sigma_1\big)+a\,W,
+\end{array}
+\]
+restricted to those $a$ for which $J\succeq0$. Write
+$\delta:=\max_a\|M(a)-M(0)\|_F/\|M(0)\|_F$.
+\end{example}
+
+\begin{measurement}\label{meas:arms}
+For Example~\ref{ex:arms}, integrating \eqref{eq:ivp} on a uniform grid of $4000$ steps:
+\begin{center}
+\begin{tabular}{ccccccc}
+\toprule
+family & $C=C^{\T}$ & $[\Sigma_0,\Sigma_1]=0$ & $S\in\spn\{\Sigma_0,\Sigma_1\}$ & $\delta$ &
+$\|M-\Sigma_1^{1/2}\Sigma_0^{-1/2}\|_{\mathrm{rel}}$ & $\|M\Sigma_0M^{\T}-\Sigma_1\|_{\max}$\\
+\midrule
+(a) & yes & yes & yes & $6.3\times10^{-5}$ & $1.0\times10^{-4}$ & $1.2\times10^{-4}$\\
+(b) & yes & no  & yes & $6.3\times10^{-5}$ & $3.3\times10^{-2}$ & $2.3\times10^{-4}$\\
+(c) & yes & yes & no  & $7.6\times10^{-3}$ & $1.1\times10^{-2}$ & $1.0\times10^{-4}$\\
+(d) & no  & no  & yes & $9.5\times10^{-1}$ & $3.2\times10^{-1}$ & $1.5\times10^{-4}$\\
+\bottomrule
+\end{tabular}
+\end{center}
+The discretisation floor is $10^{-4}$, read from the last column.
+\end{measurement}
+
+\begin{remark}\label{rem:armsread}
+Family (b) satisfies (i)--(ii) with $[\Sigma_0,\Sigma_1]\neq0$ and is invariant, confirming
+Remark~\ref{rem:notused}; it departs from the Brenier map, confirming that
+Corollary~\ref{cor:brenier} requires the extra hypothesis. Families (c) and (d) violate (ii) and
+(i) respectively and both move, so neither hypothesis alone suffices. In every family the last
+column is at the discretisation floor, confirming Proposition~\ref{prop:push} independently of
+$N$.
+\end{remark}
+
+\subsection{Degenerate sources}
+
+\begin{corollary}\label{cor:degen}
+In the scalar case, as $\Var(x_0)\to0$ the endpoint map degenerates to the constant
+$x_0\mapsto\mu_1$.
+\end{corollary}
+
+\begin{proof}
+By Corollary~\ref{cor:notbayes} the gain $\sigma_1/\sigma_0$ multiplies $(x_0-\mu_0)$, which
+vanishes identically when $\Var(x_0)=0$.
+\end{proof}
+
+\begin{remark}\label{rem:degenmech}
+A Lipschitz map cannot increase Hausdorff dimension, hence cannot push a measure onto one of
+strictly larger support dimension. When $\law(x_0)$ is degenerate no flow with Lipschitz field is
+marginal-preserving, and Assumption~\ref{ass:flat} fails at $t=0$.
+\end{remark}
+
+\begin{definition}[regularised family]\label{def:sigfam}
+For $\sigma>0$ replace $z_0$ of Definition~\ref{def:model} by
+\[
+z_0^{(\sigma)}:=\cos\varphi_0\,c+\sin\varphi_0\,\xi,
+\qquad
+\varphi_0=j+\sigma\varepsilon,
+\qquad
+\varepsilon\sim\mathcal N(0,1)\ \text{independent of}\ (c,\xi,z_1).
+\]
+\end{definition}
+
+\begin{lemma}\label{lem:sigrank}
+For every $\sigma>0$, $\Var(\langle z_0^{(\sigma)},c\rangle\mid c)>0$ and the support of
+$\law(z_0^{(\sigma)}\mid c)$ has dimension $d-1$. For $\sigma=0$ both statements fail: the variance
+is $0$ and the support has dimension $d-2$.
+\end{lemma}
+
+\begin{proof}
+$\langle z_0^{(\sigma)},c\rangle=\cos(j+\sigma\varepsilon)$, which is non-constant for $\sigma>0$
+and equals $\cos j$ identically for $\sigma=0$. The support is
+$\{\cos\varphi\,c+\sin\varphi\,\xi\}$ over $\varphi$ in an interval and $\xi$ in a $(d-2)$-sphere,
+of dimension $(d-2)+1$ for $\sigma>0$ and $d-2$ for $\sigma=0$.
+\end{proof}
+
+\begin{proposition}\label{prop:sigmean}
+In the scalar Gaussian model with $\Var(x_0)=\sigma^{2}>0$, the endpoint map is
+$x_0\mapsto\mu_1+(\sigma_1/\sigma)(x_0-\mu_0)$, so $\E[M(x_0)]=\mu_1$ for every $\sigma>0$ and the
+limit $\sigma\downarrow0$ is the constant map to $\mu_1$.
+\end{proposition}
+
+\begin{proof}
+Corollaries~\ref{cor:notbayes} and \ref{cor:degen}, with $\E[x_0-\mu_0]=0$.
+\end{proof}
+
+\begin{measurement}\label{meas:sigflat}
+For Definition~\ref{def:sigfam} at $d=256$, $A=0.37$, $\beta=0.8$, $j=0.15$, with second moments
+estimated from $1.2\times10^{5}$ draws and the endpoint map computed in the invariant algebra
+$\spn\{cc^{\T},P\}$:
+\begin{center}
+\begin{tabular}{ccccc}
+\toprule
+$\sigma$ & $\sd(\langle z_0,c\rangle)$ & $\Var(\langle z_0,c\rangle)$ & gain & $\E\langle z_1,c\rangle$\\
+\midrule
+$0$     & $5.6\times10^{-16}$ & $7.1\times10^{-24}$ & $\infty$ & $0.22241$\\
+$0.005$ & $7.5\times10^{-4}$  & $5.6\times10^{-7}$  & $73.65$  & $0.22216$\\
+$0.01$  & $1.5\times10^{-3}$  & $2.2\times10^{-6}$  & $36.84$  & $0.22213$\\
+$0.03$  & $4.5\times10^{-3}$  & $2.0\times10^{-5}$  & $12.28$  & $0.22212$\\
+$0.06$  & $9.3\times10^{-3}$  & $8.6\times10^{-5}$  & $5.983$  & $0.22210$\\
+$0.10$  & $1.6\times10^{-2}$  & $2.7\times10^{-4}$  & $3.378$  & $0.22163$\\
+$0.20$  & $4.0\times10^{-2}$  & $1.6\times10^{-3}$  & $1.382$  & $0.22204$\\
+$0.40$  & $1.2\times10^{-1}$  & $1.4\times10^{-2}$  & $0.4675$ & $0.22185$\\
+\bottomrule
+\end{tabular}
+\end{center}
+The gain agrees with $\sd(\langle z_1,c\rangle)/\sd(\langle z_0,c\rangle)$ to a maximum relative
+error of $7.1\times10^{-3}$, and $\E\langle z_1,c\rangle$ agrees with $As=0.2220$ to
+$4.1\times10^{-4}$ throughout. The pencil determinant $a_0b_1-a_1b_0$ is nonzero at every
+$\sigma$, including $\sigma=0$, and changes sign between $\sigma=0.03$ and $\sigma=0.06$.
+\end{measurement}
+
+\begin{remark}\label{rem:sigread}
+Hypotheses (i) and (ii) of Theorem~\ref{thm:pencil} hold at every $\sigma$ including $\sigma=0$.
+Only Assumption~\ref{ass:flat} fails at $\sigma=0$, at the single point $t=0$ and in the single
+direction $c$.
+\end{remark}
+
+\subsection{Quantitative form}
+
+Theorem~\ref{thm:pencil} is a dichotomy. The following states that it is also a stability
+statement: the endpoint map responds to a violation at first order, with a response operator that
+annihilates exactly the directions the theorem permits.
+
+\begin{proposition}[first-order response]\label{prop:stab}
+Let $C_0$ satisfy \textup{(i)} and \textup{(ii)} of Theorem~\ref{thm:pencil}, let
+$E\in\R^{n\times n}$, and put $C_\varepsilon:=C_0+\varepsilon E$. Write $V_0,G_0,K_0$ for the data
+of $C_0$ and let $\Phi$ solve $\Phi'=K_0\Phi$, $\Phi(0)=I$, so that $\Phi(t)=M(t)$ for $C_0$ and
+$M_0=\Phi(1)$. Then there is $\varepsilon_0>0$ such that
+$\varepsilon\mapsto M(C_\varepsilon)$ is real-analytic on $(-\varepsilon_0,\varepsilon_0)$ and
+\begin{equation}\label{eq:resp}
+M(C_\varepsilon)=M_0+\varepsilon\,\mathcal D(E)+O(\varepsilon^{2}),
+\qquad
+\mathcal D(E)=M_0\int_0^1\Phi(t)^{-1}K_E(t)\,\Phi(t)\,dt,
+\end{equation}
+\begin{equation}\label{eq:KE}
+K_E(t)=\big[(1-t)E^{\T}-tE\big]V_0(t)^{-1}
+-G_0(t)V_0(t)^{-1}\big[t(1-t)(E+E^{\T})\big]V_0(t)^{-1}.
+\end{equation}
+Moreover $\mathcal D(E)=0$ whenever $E=E^{\T}$ and $E\in\spn\{\Sigma_0,\Sigma_1\}$.
+\end{proposition}
+
+\begin{proof}
+\emph{Analyticity.} By \eqref{eq:Vt}, $V_\varepsilon(t)=V_0(t)+\varepsilon t(1-t)(E+E^{\T})$ is
+affine in $\varepsilon$. Since $V_0(t)\succ0$ on the compact $[0,1]$, its least eigenvalue is
+bounded below by some $\lambda>0$, so there is $\varepsilon_0>0$ with $V_\varepsilon(t)\succ0$ for
+all $t\in[0,1]$ and $|\varepsilon|<\varepsilon_0$. On that set $V_\varepsilon(t)^{-1}$ is
+real-analytic in $\varepsilon$ and continuous in $t$, and $G_\varepsilon(t)$ is affine in
+$\varepsilon$ by \eqref{eq:G}; hence $K_\varepsilon(t)=G_\varepsilon(t)V_\varepsilon(t)^{-1}$ is
+real-analytic in $\varepsilon$, jointly continuous, and uniformly bounded on
+$[0,1]\times(-\varepsilon_0,\varepsilon_0)$. Analytic dependence of the solution of the linear
+initial value problem \eqref{eq:ivp} on a parameter gives the first claim.
+
+\emph{The formula.} Differentiating \eqref{eq:ivp} in $\varepsilon$ at $\varepsilon=0$ and writing
+$D(t):=\partial_\varepsilon M_\varepsilon(t)|_{\varepsilon=0}$,
+\[
+D'=K_0D+K_E\Phi,\qquad D(0)=0,
+\]
+since $M_\varepsilon(t)|_{\varepsilon=0}=\Phi(t)$. Differentiating $G_\varepsilon$ and
+$V_\varepsilon$ in $\varepsilon$ and applying $\partial_\varepsilon(V^{-1})=-V^{-1}(\partial_\varepsilon V)V^{-1}$
+gives \eqref{eq:KE}. Variation of constants yields
+$D(t)=\Phi(t)\int_0^t\Phi(s)^{-1}K_E(s)\Phi(s)\,ds$; evaluate at $t=1$.
+
+\emph{The kernel.} If $E=E^{\T}$ and $E\in\spn\{\Sigma_0,\Sigma_1\}$ then $C_\varepsilon$ is
+symmetric, so (i) holds, and $C_\varepsilon+C_\varepsilon^{\T}=2C_0+2\varepsilon E\in
+\spn\{\Sigma_0,\Sigma_1\}$, so (ii) holds. By Theorem~\ref{thm:pencil}, $M(C_\varepsilon)=M_0$ for
+every such $\varepsilon$, and the derivative vanishes.
+\end{proof}
+
+\begin{corollary}\label{cor:stab}
+With $\|E\|=1$, $\ \|M(C_\varepsilon)-M_0\|=\varepsilon\|\mathcal D(E)\|+O(\varepsilon^{2})$. The
+displacement of the endpoint map is therefore proportional to the size of the violation at first
+order, with constant $\|\mathcal D(E)\|$ depending only on the components of $E$ that violate
+\textup{(i)} or \textup{(ii)}.
+\end{corollary}
+
+\begin{measurement}\label{meas:stab}
+Six dimensions $n\in\{2,4,8,16,32,64\}$, six systems each, $2048$ random pairs of marginals per
+cell and thirty-six couplings per pair, float64, second-order integration at $2000$ steps. Across
+the $73{,}728$ systems satisfying (i)--(ii) the relative displacement has ninetieth percentile
+$4.06\times10^{-8}$, against a median of at least $9.78\times10^{-3}$ once a hypothesis is
+violated at relative size $0.1$: a separation of $2.4\times10^{5}$. Invariance is unaffected by
+$[\Sigma_0,\Sigma_1]$, holding at normalised commutator up to $0.199$, as
+Remark~\ref{rem:notused} requires. Regressing $\log_{10}$ displacement on $\log_{10}$ violation,
+$180$ points per family, gives slope $0.9828$ with residual $0.0349$ for violations of (ii) and
+slope $0.9419$ with residual $0.0563$ for violations of (i): both unity to within the fit, as
+Corollary~\ref{cor:stab} requires. At unit relative violation the two responses are $0.647$ and
+$0.0982$, a ratio of $6.585$. That ratio is the quotient of the two constants
+$\|\mathcal D(E)\|$; it is measured, not predicted.
+\end{measurement}
+
+\subsection{The loss floor}
+
+\begin{definition}\label{def:floor}
+$\mathcal F(C):=\displaystyle\int_0^1\operatorname{Tr}\Var\big(\dot x_t\mid x_t\big)\,dt$, the
+value of the objective $\mathcal M_1$ of Definition~\ref{def:flow} at its population optimum.
+\end{definition}
+
+\begin{lemma}\label{lem:floor}
+Under Assumption~\ref{ass:flat},
+\begin{equation}\label{eq:floor}
+\mathcal F(C)=\int_0^1\operatorname{Tr}\Big(\Sigma_0+\Sigma_1-C-C^{\T}
+-G(t)V(t)^{-1}G(t)^{\T}\Big)\,dt .
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+$\dot x_t=x_1-x_0$ with $\Var(x_1-x_0)=\Sigma_0+\Sigma_1-C-C^{\T}$. In the proof of
+Lemma~\ref{lem:gausscond}, with $Y=x_1-x_0$ and $X=x_t$, the residual $W=Y-LX$ is independent of
+$X$, so $\Var(Y\mid X)=\Var(W)=\Var(Y)-\Cov(Y,X)\Var(X)^{-1}\Cov(X,Y)$, which is constant in $x$.
+Substitute $\Cov(Y,X)=G(t)$ from Lemma~\ref{lem:G} and $\Var(X)=V(t)$, then integrate.
+\end{proof}
+
+\begin{proposition}\label{prop:decouple}
+The loss floor is not a function of the endpoint map. Explicitly, take $n=1$ and
+$\Sigma_0=\Sigma_1=1$. Every $c\in[-1,1]$ satisfies \textup{(i)} and \textup{(ii)} and gives
+$M=1$, while
+\begin{equation}\label{eq:F1}
+\mathcal F(c)=\int_0^1\Big(2(1-c)-\frac{(1-2t)^{2}(1-c)^{2}}{1-2t(1-t)(1-c)}\Big)dt,
+\qquad
+\mathcal F(1)=0,\quad \mathcal F(0)=\frac{\pi}{2}.
+\end{equation}
+Consequently there is no function $\varphi$ with $\varphi(0)=0$ such that
+$|\mathcal F(C_1)-\mathcal F(C_2)|\le\varphi\big(\|M(C_1)-M(C_2)\|\big)$ for all admissible
+couplings with common marginals.
+\end{proposition}
+
+\begin{proof}
+For $n=1$ every $C$ is symmetric, so (i) holds; and $\spn\{\Sigma_0,\Sigma_1\}=\R$, so (ii)
+holds. Positive semidefiniteness of $J$ is $|c|\le1$. By Corollary~\ref{cor:idsym},
+$G=\tfrac12V'$, so $K=\tfrac12V'V^{-1}$ and
+$M=\exp\big(\tfrac12\int_0^1V'/V\,dt\big)=\sqrt{V(1)/V(0)}=\sqrt{\Sigma_1/\Sigma_0}=1$,
+independently of $c$. By \eqref{eq:Vt}, $V(t)=1-2t(1-t)(1-c)$, hence
+$G(t)=\tfrac12V'(t)=-(1-2t)(1-c)$, and $\Var(x_1-x_0)=2-2c$; substituting into \eqref{eq:floor}
+gives \eqref{eq:F1}. At $c=1$ both terms vanish. At $c=0$, $V=2t^{2}-2t+1$ and
+$(1-2t)^{2}=2V-1$, so the integrand is $2-(2V-1)/V=1/V$, and with $u=t-\tfrac12$,
+\[
+\int_0^1\frac{dt}{2t^{2}-2t+1}=\int_{-1/2}^{1/2}\frac{du}{2u^{2}+\tfrac12}
+=\Big[\arctan(2u)\Big]_{-1/2}^{1/2}=\frac{\pi}{2}.
+\]
+For the last claim take $c=1$ and $c=0$: the endpoint maps coincide, so the right side is
+$\varphi(0)=0$, while the left side is $\pi/2$.
+\end{proof}
+
+\begin{measurement}\label{meas:decouple}
+Forty-seven random systems in dimensions $3$ and $6$, coupling strength swept along arms
+satisfying (i)--(ii) and along arms violating them. On the satisfying arms the endpoint map moves
+by a median $3.17\times10^{-4}$ while $\mathcal F$ spans a median factor $2.23$, range
+$[2.14,2.41]$. On the violating arms the map moves by a median $6.35\times10^{-1}$ while
+$\mathcal F$ spans a median factor $1.23$, range $[1.07,1.99]$.
+\end{measurement}
+
+\begin{remark}\label{rem:floorread}
+The spread of $\mathcal F$ is therefore larger on the couplings that are provably equivalent at
+the endpoint than on those that are not. Ranking couplings by the value of the objective at its
+optimum orders them by a quantity that is not merely uninformative about $M$ but ordered against
+it. Reports that the coupling changes the attainable loss by orders of magnitude are consistent
+with Theorem~\ref{thm:pencil} and do not bear on it: by Proposition~\ref{prop:decouple} the two
+quantities are different functions of $C$, and only $M$ is realised at sampling time.
+\end{remark}
+
+\section{The sphere}\label{sec:sphere}
+
+\subsection{Symmetry}
+
+\begin{definition}\label{def:stab}
+Let $H_c:=\{R\in SO(d):Rc=c\}$, acting on $c^{\perp}\cong\R^{d-1}$ as $SO(d-1)$. For
+$z\notin\{\pm c\}$ let $H_{c,z}:=\{R\in H_c:Rz=z\}$, acting on $\{c,z\}^{\perp}\cong\R^{d-2}$ as
+$SO(d-2)$.
+\end{definition}
+
+\begin{lemma}\label{lem:invlaw}
+For every $R\in H_c$, $(Rz_0,Rz_1)\mid c\overset{d}{=}(z_0,z_1)\mid c$.
+\end{lemma}
+
+\begin{proof}
+$\law(\xi\mid c)$ is uniform on the unit sphere of $c^{\perp}$, which is $H_c$-invariant, so
+$R\xi\overset{d}{=}\xi$. Given $\xi$, $Rm=R(sc+\beta\xi)=sc+\beta R\xi$ since $Rc=c$. The vMF
+density at $z$ depends on $(z,m)$ only through $\langle z,m\rangle$ and
+$\langle Rz,Rm\rangle=\langle z,m\rangle$, so $Rz_1\sim\mathrm{vMF}(Rm,\kappa)$. Finally
+$Rz_0=\cos j\,c+\sin j\,R\xi$, so $(Rz_0,Rz_1)$ is generated by Definition~\ref{def:model} from
+$(c,R\xi)$.
+\end{proof}
+
+\begin{lemma}\label{lem:equiv}
+$u(Rz,t;c)=R\,u(z,t;c)$ for all $R\in H_c$.
+\end{lemma}
+
+\begin{proof}
+The interpolant is built from $\langle z_0,z_1\rangle$ and linear combinations of $z_0,z_1$, both
+$SO(d)$-equivariant, so $Rz_t(z_0,z_1)=z_t(Rz_0,Rz_1)$ and likewise for $\dot z_t$. Hence
+\[
+u(Rz,t;c)=\E[\dot z_t\mid z_t=Rz,c]=\E[R\dot z_t\mid Rz_t=Rz,c]=R\,\E[\dot z_t\mid z_t=z,c],
+\]
+the middle equality using Lemma~\ref{lem:invlaw}.
+\end{proof}
+
+\begin{proposition}\label{prop:2plane}
+Let $d\geq4$ and $z\notin\{\pm c\}$. Then $u(z,t;c)\in\spn\{z,c\}$.
+\end{proposition}
+
+\begin{proof}
+For $R\in H_{c,z}$, $Rz=z$, so Lemma~\ref{lem:equiv} gives $u(z,t;c)=R\,u(z,t;c)$; the vector is
+fixed by every element of $H_{c,z}$. Decompose $\R^{d}=\spn\{c,z\}\oplus\{c,z\}^{\perp}$. The
+group $H_{c,z}$ acts trivially on the first summand and as $SO(d-2)$ on the second; for
+$d-2\geq2$ the only vector of $\R^{d-2}$ fixed by all of $SO(d-2)$ is $0$. Hence
+$\Fix(H_{c,z})=\spn\{c,z\}$.
+\end{proof}
+
+\begin{corollary}\label{cor:azimuth}
+The trajectory of $\dot z=u(z,t;c)$ started at $z_0$ remains in $\Pi:=\spn\{c,z_0\}=\spn\{c,\xi\}$.
+Writing $z_t=\cos\varphi_t\,c+\sin\varphi_t\,\xi$ with $\varphi_0=j$, the direction $\xi$ is
+constant along the trajectory and only $\varphi_t$ evolves.
+\end{corollary}
+
+\begin{proof}
+By Proposition~\ref{prop:2plane}, $\dot z\in\spn\{z,c\}$; if $z\in\Pi$ and $c\in\Pi$ then
+$\dot z\in\Pi$, so $\Pi$ is invariant and $z_0\in\Pi$. With $\|z_t\|=1$ the trajectory lies on the
+great circle $\Pi\cap\Sph$, covered by the stated parameterisation while $\sin\varphi_t\neq0$.
+\end{proof}
+
+\begin{measurement}\label{meas:azimuth}
+Let $\Sigma:=\E\big[\langle x_\infty,c\rangle^{2}+\langle x_\infty,\xi\rangle^{2}\big]$, which
+equals $1$ if and only if $x_\infty\in\Pi$ almost surely. Over $40$ parameter settings
+$(\sigma,\rho)$ with $\sigma\in\{0,0.005,0.01,0.03,0.06,0.1,0.2,0.4\}$ and
+$\rho\in\{0,0.25,0.5,0.75,1\}$, the population field of Definition~\ref{def:flow} attains
+$\Sigma=1.000$ in all $40$ settings. A network trained on $\mathcal M_1$ attains
+$\Sigma=0.859$ at $\sigma=0$, decreasing to $0.609$ at $\sigma=0.4$.
+\end{measurement}
+
+\subsection{The landing law}
+
+\begin{lemma}\label{lem:polar}
+$\E[\langle z_1,c\rangle\mid c]=As$ exactly, and $\sd[\langle z_1,c\rangle\mid c]=O(d^{-1/2})$.
+\end{lemma}
+
+\begin{proof}
+The mean is \eqref{eq:m1} contracted with $c$. For the spread,
+$\langle z_1,c\rangle=s\langle z_1,m\rangle+\beta\langle z_1,\xi\rangle$ with $\langle m,c\rangle=s$
+deterministic; both $\langle z_1,m\rangle$ and the tangential components of a vMF variate
+concentrate at rate $d^{-1/2}$.
+\end{proof}
+
+\begin{proposition}\label{prop:polarland}
+$\law(\langle z_0,c\rangle\mid c)=\delta_{\cos j}$. By Corollary~\ref{cor:azimuth} the polar
+dynamics $\dot\varphi=f(\varphi,t)$ do not depend on $\xi$, so all trajectories from
+$\varphi_0=j$ solve the same scalar equation and $\law(\langle x_\infty,c\rangle\mid c)$ is a point
+mass. In the limit $\sd[\langle z_1,c\rangle\mid c]\to0$ that point is $As$.
+\end{proposition}
+
+\begin{proof}
+The first statement is immediate from Definition~\ref{def:model}. For the second, by
+Lemma~\ref{lem:equiv} the field is $H_c$-equivariant and by Corollary~\ref{cor:azimuth} it is
+confined to $\Pi$; all $\xi$ on the unit sphere of $c^{\perp}$ are related by elements of $H_c$,
+so the induced scalar dynamics on $\varphi$ are the same for every $\xi$. A deterministic scalar
+ODE from a fixed initial value has a single terminal value. The identification of that value with
+$As$ is the content of Proposition~\ref{prop:sigmean} in the limit $\sigma\downarrow0$, and is
+exact only in that limit.
+\end{proof}
+
+\begin{theorem}\label{thm:land}
+In the limit of Proposition~\ref{prop:polarland},
+\[
+x_\infty=(As)\,c+\sqrt{1-A^{2}s^{2}}\ \xi,
+\qquad
+\E\langle x_\infty,z_1\rangle=A\Big(As^{2}+\beta\sqrt{1-A^{2}s^{2}}\Big).
+\]
+\end{theorem}
+
+\begin{proof}
+By Corollary~\ref{cor:azimuth}, $x_\infty=a\,c+b\,\xi$ with $a^{2}+b^{2}=1$ and azimuth $\xi$. By
+Proposition~\ref{prop:polarland}, $a=As$, hence $b=\sqrt{1-A^{2}s^{2}}$ with the positive root
+since $\varphi_t$ does not cross $0$. By the tower rule and \eqref{eq:m1},
+\[
+\E\langle x_\infty,z_1\rangle=\big\langle x_\infty,A(sc+\beta\xi)\big\rangle
+=A\big(As^{2}+\beta\sqrt{1-A^{2}s^{2}}\big). \qedhere
+\]
+\end{proof}
+
+\begin{corollary}\label{cor:neither}
+The maximiser of $\E\langle\cdot,z_1\rangle$ given $c$ has $b=0$ (Remark~\ref{rem:whichopt}),
+whereas $x_\infty$ has $b=\sqrt{1-A^{2}s^{2}}$. A draw from $\law(z_1\mid c)$ has random azimuth
+and dispersed polar angle, whereas $x_\infty$ has azimuth determined by $z_0$ and a deterministic
+polar angle.
+\end{corollary}
+
+\begin{measurement}\label{meas:land}
+At $d=256$, $A=0.37$, $\beta=0.8$, $j=0.15$: Theorem~\ref{thm:land} predicts $0.3379$; the
+population field attains $0.3360$; a network trained on $\mathcal M_1$ attains $0.3184$. For the
+population field, $\E\langle x_\infty,c\rangle=0.1996$ against $As=0.2220$, and
+$\sd\langle x_\infty,c\rangle=7.4\times10^{-8}$ against
+$\sd\langle z_1,c\rangle=5.6\times10^{-2}$.
+\end{measurement}
+
+\begin{measurement}\label{meas:ring}
+Let $\Pi_{\mathrm{cos}}:=\E\langle x_\infty,x_\infty'\rangle$ for two outputs generated from
+independent draws of $\xi$ at fixed $c$. Corollary~\ref{cor:azimuth} and
+Proposition~\ref{prop:polarland} give $\Pi_{\mathrm{cos}}=\E\langle x_\infty,c\rangle^{2}$. For the
+population field, $\Pi_{\mathrm{cos}}=0.0400$ against $\E\langle x_\infty,c\rangle^{2}=0.0398$. For
+a network trained on $\mathcal M_1$, $\Pi_{\mathrm{cos}}=0.1850$ against $0.0594$.
+\end{measurement}
+
+\subsection{Non-transfer of the pencil criterion}
+
+\begin{proposition}\label{prop:codiag}
+Conditional on $c$, the second moments $\Sigma_{0\mid c}$, $\Sigma_{1\mid c}$ and $C_{\mid c}$ of
+the model of Definition~\ref{def:rho} lie in $\spn\{cc^{\T},P\}$ for every $\rho$. Consequently
+$C_{\mid c}=C_{\mid c}^{\T}$, and $S_{\mid c}\in\spn\{\Sigma_{0\mid c},\Sigma_{1\mid c}\}$ whenever
+that pencil is nondegenerate.
+\end{proposition}
+
+\begin{proof}
+By Lemma~\ref{lem:invlaw} the conditional law is $H_c$-invariant, so each of the three matrices
+commutes with the action of $H_c$. A symmetric matrix commuting with $SO(d-1)$ acting on
+$c^{\perp}$ is a linear combination of $cc^{\T}$ and $P$; the same argument applied to
+$C_{\mid c}+C_{\mid c}^{\T}$ and $C_{\mid c}-C_{\mid c}^{\T}$ shows the skew part is $H_c$-invariant
+and skew, hence $0$, since no nonzero skew matrix on $\R^{d}$ commutes with $SO(d-1)$ for
+$d\geq3$. Elements of $\spn\{cc^{\T},P\}$ commute pairwise, and three elements of a
+$2$-dimensional space are linearly dependent, giving the last statement.
+\end{proof}
+
+\begin{measurement}\label{meas:codiag}
+At the operating point, with $a:=\langle c,\Sigma c\rangle$ and $b:=\mathrm{tr}(P\Sigma)/(d-1)$,
+\[
+\|\Sigma_{0\mid c}-(acc^{\T}+bP)\|_{\max}=4.3\times10^{-6},
+\quad
+\|\Sigma_{1\mid c}-\cdot\|_{\max}=2.5\times10^{-4},
+\quad
+\|C_{\mid c}-\cdot\|_{\max}=3.8\times10^{-5},
+\]
+\[
+\|C_{\mid c}-C_{\mid c}^{\T}\|_{\max}=4.8\times10^{-5},
+\qquad
+\|\Sigma_{0\mid c}\Sigma_{1\mid c}-\Sigma_{1\mid c}\Sigma_{0\mid c}\|_{\max}=1.4\times10^{-7}.
+\]
+\end{measurement}
+
+\begin{remark}\label{rem:nottransfer}
+Proposition~\ref{prop:codiag} establishes the algebraic conditions (i) and (ii) for the
+conditional second moments. It does not establish the hypotheses of Theorem~\ref{thm:pencil},
+which are Assumption~\ref{ass:flat}: jointly Gaussian endpoints, the linear interpolant
+$x_t=(1-t)x_0+tx_1$, and $V(t)\succ0$ on $[0,1]$. The model of Definition~\ref{def:model} satisfies
+none of the three: $z_1$ is von Mises--Fisher, the interpolant is the geodesic of
+Definition~\ref{def:flow}, and by Lemma~\ref{lem:sigrank}, $\Var(\langle z_0,c\rangle\mid c)=0$.
+Theorem~\ref{thm:pencil} therefore does not apply, and its conclusion fails.
+\end{remark}
+
+\begin{measurement}\label{meas:nontransfer}
+Under the sweep of Definition~\ref{def:rho} with both conditional marginals fixed
+(Lemma~\ref{lem:rhomarg}, verified: $\max_\rho|\E\langle z_1,c\rangle-\text{const}|=5.8\times10^{-4}$),
+the population field's landing point moves. Values of $\E\langle x_\infty,c\rangle$:
+\begin{center}
+\begin{tabular}{cccccc}
+\toprule
+$\sigma\backslash\rho$ & $0$ & $0.25$ & $0.5$ & $0.75$ & $1$\\
+\midrule
+$0.005$ & $0.2237$ & $0.2199$ & $0.2198$ & $0.2066$ & $0.2019$\\
+$0.01$  & $0.2301$ & $0.2224$ & $0.2184$ & $0.2142$ & $0.1987$\\
+$0.10$  & $0.2671$ & $0.2619$ & $0.2560$ & $0.2549$ & $0.2515$\\
+\bottomrule
+\end{tabular}
+\end{center}
+Each row is strictly decreasing in $\rho$; under exchangeability a strict ordering of five values
+has probability $1/60$. The maximum spread over $\rho$ at fixed $\sigma$ is $3.4\times10^{-2}$,
+against a refit dispersion of $1.1\times10^{-2}$ measured from three independent refits at fixed
+$(\sigma,\rho)$.
+\end{measurement}
+
+\begin{measurement}\label{meas:gainsphere}
+Proposition~\ref{prop:sigmean} predicts
+$\sd\langle x_\infty,c\rangle=\sd\langle z_1,c\rangle$ for $\sigma>0$. Measured at $\rho=1$, the
+ratio $\sd\langle x_\infty,c\rangle/\sd\langle z_1,c\rangle$ has median $2.03$ over
+$\sigma\in\{0.005,\dots,0.4\}$, ranging from $0.66$ to $3.11$. The predicted constancy of
+$\E\langle x_\infty,c\rangle$ in $\sigma$ also fails: the value ranges from $0.1996$ at $\sigma=0$
+to $0.2924$ at $\sigma=0.2$, against $As=0.2220$.
+\end{measurement}
+
+\begin{remark}\label{rem:attribution}
+Measurements~\ref{meas:nontransfer} and \ref{meas:gainsphere} do not separate the contribution of
+curvature from that of vMF non-Gaussianity. A flat non-Gaussian control with the same conditional
+variance profile is required for that attribution and is not reported here.
+\end{remark}
+
+\section{The threshold}\label{sec:bstar}
+
+\begin{definition}\label{def:delta}
+$\Delta(\beta):=\E\langle x_\infty,z_1\rangle-\E\langle z_0,z_1\rangle$, i.e.\
+Theorem~\ref{thm:land} minus \eqref{eq:src}, at fixed $(A,j)$. Let $\beta^{\star}(A,j)$ be the
+first zero of $\Delta$ in $(0,1)$.
+\end{definition}
+
+\begin{proposition}\label{prop:bstar}
+$\Delta(\beta)=0$ is equivalent, after dividing by $A>0$ and substituting $s=\sqrt{1-\beta^{2}}$, to
+\begin{equation}\label{eq:bstar}
+A(1-\beta^{2})+\beta\sqrt{1-A^{2}(1-\beta^{2})}=\sqrt{1-\beta^{2}}\,\cos j+\beta\sin j.
+\end{equation}
+The dimension enters only through $A=A_d(\kappa)$, so $\beta^{\star}$ is a function of $(A,j)$ alone.
+\end{proposition}
+
+\begin{proposition}\label{prop:exist}
+$\Delta(0)=A(A-\cos j)$ and $\Delta(1)=A(1-\sin j)>0$ for $j\in[0,\pi/2)$. Hence
+\[
+\beta^{\star}\ \text{exists}\iff A<\cos j.
+\]
+\end{proposition}
+
+\begin{proof}
+At $\beta=0$, $s=1$: Theorem~\ref{thm:land} gives $A(A\cdot1+0)=A^{2}$ and \eqref{eq:src} gives
+$A(\cos j+0)=A\cos j$. At $\beta=1$, $s=0$: Theorem~\ref{thm:land} gives $A(0+\sqrt{1-0})=A$ and
+\eqref{eq:src} gives $A\sin j$. Since $\Delta$ is continuous with $\Delta(1)>0$, a zero in $(0,1)$
+exists if and only if $\Delta(0)<0$.
+\end{proof}
+
+\begin{center}
+\begin{tabular}{lcccccc}
+\toprule
+$\beta^{\star}$ & $j=0.00$ & $0.05$ & $0.15$ & $0.30$ & $0.50$ & $0.80$\\
+\midrule
+$A=0.15$ & 0.666 & 0.686 & 0.723 & 0.776 & 0.838 & 0.915\\
+$A=0.25$ & 0.635 & 0.656 & 0.696 & 0.753 & 0.821 & 0.905\\
+$A=0.37$ & 0.592 & 0.615 & 0.659 & 0.721 & 0.797 & 0.892\\
+$A=0.50$ & 0.538 & 0.562 & 0.611 & 0.680 & 0.765 & 0.874\\
+$A=0.70$ & 0.429 & 0.457 & 0.512 & 0.594 & 0.698 & ---\\
+$A=0.90$ & 0.255 & 0.286 & 0.352 & 0.453 & --- & ---\\
+\bottomrule
+\end{tabular}
+\end{center}
+Each ``---'' satisfies $A\geq\cos j$, as Proposition~\ref{prop:exist} requires.
+
+\begin{measurement}\label{meas:bstar}
+Over the $27$ pairs $(A,j)$ with $j>0$ and $A<\cos j$, the zero of $\Delta$ located by linear
+interpolation of the measured $\Delta$ on $\beta\in\{0,0.2,0.4,0.6,0.7,0.8,0.9,0.95\}$ agrees with
+\eqref{eq:bstar} to a maximum absolute error of $3.3\times10^{-2}$.
+\end{measurement}
+
+\begin{remark}\label{rem:jzero}
+At $j=0$ one has $z_0=c$ and $\Pi_{z_0}c=c-\langle c,c\rangle c=0$, so by
+Proposition~\ref{prop:2plane} the field vanishes at $z_0$ and the trajectory is stationary. Then
+$\Delta\equiv0$ and $\beta^{\star}$ is not identifiable from the flow, although \eqref{eq:bstar}
+returns a value. The column $j=0$ of the table is therefore formal.
+\end{remark}
+
+\section{Starting at $z_0$ versus conditioning on $z_0$}\label{sec:cond}
+
+\begin{proposition}\label{prop:det}
+For the flat interpolant and $t>0$ the map $(z_0,z_t)\mapsto z_1$ is well defined:
+\[
+z_t=(1-t)z_0+tz_1\quad\Longrightarrow\quad z_1=\frac{z_t-(1-t)z_0}{t}.
+\]
+\end{proposition}
+
+\begin{corollary}\label{cor:loss}
+$\Var(\dot z_t\mid z_t,t,c,z_0)=0$ and $\Var(\dot z_t\mid z_t,t,c)>0$. The irreducible losses of
+$\mathcal M_2$ and $\mathcal M_1$ are therefore $0$ and positive respectively, and the two
+objectives of Definition~\ref{def:flow} are not comparable in value.
+\end{corollary}
+
+\begin{proof}
+$\dot z_t=z_1-z_0$ is a deterministic function of $(z_0,z_t,t)$ by Proposition~\ref{prop:det};
+$z_1$ is not determined by $(z_t,t,c)$.
+\end{proof}
+
+\begin{proposition}\label{prop:amp}
+Let the auxiliary state be supplied at time $\alpha t$ with $\alpha\in[0,1)$. Then
+\[
+z_1=\Big(\frac{z_t}{1-t}-\frac{z_{\alpha t}}{1-\alpha t}\Big)\cdot\frac{(1-t)(1-\alpha t)}{t(1-\alpha)},
+\qquad
+\Big\|\frac{\partial z_1}{\partial z_t}\Big\|=\frac{1-\alpha t}{t(1-\alpha)}.
+\]
+\end{proposition}
+
+\begin{proof}
+From $z_t=(1-t)z_0+tz_1$ and $z_{\alpha t}=(1-\alpha t)z_0+\alpha t\,z_1$, divide by $(1-t)$ and
+$(1-\alpha t)$ respectively and subtract to eliminate $z_0$:
+\[
+\frac{z_t}{1-t}-\frac{z_{\alpha t}}{1-\alpha t}
+=z_1\Big(\frac{t}{1-t}-\frac{\alpha t}{1-\alpha t}\Big)
+=z_1\cdot\frac{t\big[(1-\alpha t)-\alpha(1-t)\big]}{(1-t)(1-\alpha t)}
+=z_1\cdot\frac{t(1-\alpha)}{(1-t)(1-\alpha t)},
+\]
+using $(1-\alpha t)-\alpha(1-t)=1-\alpha$. Solving for $z_1$ and differentiating in $z_t$ gives the
+coefficient $\tfrac{1}{1-t}\cdot\tfrac{(1-t)(1-\alpha t)}{t(1-\alpha)}$.
+\end{proof}
+
+\begin{corollary}\label{cor:amp}
+$\alpha=0$ gives $t^{-1}$, unbounded as $t\downarrow0$. At $(t,\alpha)=(0.05,0.9)$ the factor is
+$\tfrac{1-0.045}{0.05\cdot0.1}=191$. The map of Proposition~\ref{prop:amp} exists for every
+$\alpha<1$; the parameter $\alpha$ controls its conditioning, not its existence.
+\end{corollary}
+
+\begin{remark}\label{rem:origin}
+At $t=0$ every pair $(z_0,z_1)$ with the given $z_0$ has $z_t=z_0$, so
+Proposition~\ref{prop:det} fails and $\E[\dot z_0\mid z_0,c]$ averages over $z_1$. The population
+optimum of $\mathcal M_2$ satisfies $\dot y=(y-z_0)/t$ in exact arithmetic, whose general solution
+$y(t)=z_0+kt$ satisfies $y(0)=z_0$ for every constant $k$; the initial value problem at $t=0$ is
+not well posed.
+\end{remark}
+
+\begin{measurement}\label{meas:m2}
+At the operating point, networks trained to the two objectives of Definition~\ref{def:flow} at
+matched compute attain $\E\langle x_\infty,z_1\rangle=0.3184$ for $\mathcal M_1$ and $0.2167$ for
+$\mathcal M_2$, with terminal training losses $1.06\times10^{-3}$ and $5.19\times10^{-4}$. Under
+maximal-update parameterisation with the learning rate tuned at width $256$ and transferred, five
+seeds per cell, and checkpoint selection on a distributional criterion:
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+width & $\mathcal M_1$ & $\mathcal M_2$ & difference\\
+\midrule
+$256$  & $0.3138$ & $0.2153\ (\pm0.0127)$ & $0.0985$\\
+$2048$ & $0.2904$ & $0.1864\ (\pm0.0107)$ & $0.1040$\\
+\bottomrule
+\end{tabular}
+\end{center}
+Over the same range the terminal loss of $\mathcal M_2$ falls from $4.52\times10^{-4}$ to
+$2.56\times10^{-4}$ and its distributional error falls from $5.01\times10^{-2}$ to
+$3.68\times10^{-2}$.
+\end{measurement}
+
+\begin{remark}\label{rem:claimstrength}
+Proposition~\ref{prop:det} shows the coupling is recoverable on-path, so $\mathcal M_2$ is not
+information-deficient. Proposition~\ref{prop:amp} and Remark~\ref{rem:origin} identify the two
+defects: the recovery map is ill-conditioned as $t\downarrow0$, and the initial value problem is
+degenerate at $t=0$. Measurement~\ref{meas:m2} shows the difference between the two objectives
+does not decrease with capacity, while both the training loss and the distributional error of
+$\mathcal M_2$ decrease.
+\end{remark}
+
+\begin{measurement}\label{meas:remedy}
+Two interventions on $\mathcal M_2$ at the operating point. Truncating the integration to
+$[\epsilon,1]$: the terminal value increases monotonically with $\epsilon$ over
+$\epsilon\in\{0,0.01,0.02,0.05,0.1,0.2,0.35\}$, with Spearman correlation $0.96$ against
+$\int_{\epsilon}^{1}t^{-1}dt$. Perturbing the auxiliary input by an independent tangential
+rotation of magnitude $\sigma_{\mathrm{aux}}$ during training and sampling: the terminal value
+rises from $0.2195$ at $\sigma_{\mathrm{aux}}=0$ to $0.3122$ at $\sigma_{\mathrm{aux}}=1$, against
+$0.3195$ for $\mathcal M_1$.
+\end{measurement}
+
+\end{document}

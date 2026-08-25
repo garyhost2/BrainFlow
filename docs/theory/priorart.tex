@@ -1,0 +1,440 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,longtable,array}
+\usepackage{xcolor}
+\usepackage[colorlinks,linkcolor=blue!45!black,urlcolor=blue!45!black]{hyperref}
+
+\newcommand{\F}{\textsuperscript{F}}
+\newcommand{\Sec}{\textsuperscript{S}}
+\newcommand{\T}{\mathsf{T}}
+\newcommand{\R}{\mathbb{R}}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+
+\begin{document}
+
+References of the form ``Prop.~4.6'' point to the derivation document. Provenance of each
+evidence item is marked \F{} if the full text was retrieved and the quoted statement read
+directly, and \Sec{} if it rests on a secondary summary and has not been independently verified.
+Every \Sec{} item must be confirmed before it is relied on in a submission.
+
+\section{Summary}
+
+\begin{longtable}{@{}clll@{}}
+\toprule
+\# & Result & Closest prior & Verdict\\
+\midrule
+\endhead
+1 & Prop.~4.6, marginal field is linear & Hertrich et al., Thm.~3(i) & \textbf{Same}\\
+2 & Lem.~4.4, the identity & Tsimpos et al., Lem.~24, Rmk.~2 & \textbf{Partial}\\
+3 & Prop.~4.9, marginal matching, any $N$ & De Bortoli et al.; Wald--Steidl & \textbf{Partial}\\
+4 & Thm.~4.11, pencil criterion & none & \textbf{No prior found}\\
+5 & Cor.~4.13, commuting $\Rightarrow$ Brenier & Hertrich et al., Thm.~3(ii) & \textbf{Same}\\
+6 & Cor.~4.21, Rmk.~4.22, degenerate source & Tsimpos et al., Prop.~10, Rmk.~8 & \textbf{Partial}\\
+7 & Cor.~5.5, azimuth conservation & standard symmetry reduction & \textbf{Partial}\\
+8 & Thm.~5.9, spherical landing law & none & \textbf{No prior found}\\
+9 & Prop.~6.3, $\beta^\star$ exists iff $A<\cos j$ & none & \textbf{No prior found}\\
+10 & \S7, the model $\mathcal M_2$ & De Bortoli et al., Eq.~(10) & \textbf{Same construction}\\
+11 & Prop.~7.3, Rmk.~7.5, degeneracy at $t=0$ & Wang et al., Thms.~1--2 & \textbf{Partial}\\
+12 & Meas.~7.6, $\mathcal M_1$--$\mathcal M_2$ inversion & none & \textbf{No prior found}\\
+13 & Cor.~3.3, cosine rewards means & Blau \& Michaeli 2018 & \textbf{Same}\\
+14 & Stability law refining Thm.~4.11 & none & \textbf{No prior found}\\
+15 & Super-resolution as an instance & Delbracio \& Milanfar; Blau \& Michaeli & \textbf{Partial}\\
+16 & Prop.~4.33, loss floor does not determine $M$ & Zhang et al., App.~K & \textbf{Partial}\\
+\bottomrule
+\end{longtable}
+
+\section{Detail}
+
+\subsection*{1. Prop.~4.6 --- Same}
+
+\textbf{Prior.} J.~Hertrich, A.~Chambolle, J.~Delon, \emph{On the Relation between Rectified Flows
+and Optimal Transport}, arXiv:2505.19712, Theorem~3(i).\F
+
+\textbf{Statement quoted.} ``The minimizer $v_t=\arg\min_{w_t}\mathcal L(w_t|X_0,X_1)$ of the loss
+function (1) is given by
+$v_t(x)=\frac{1}{1-t}\big(((1-t)\Sigma_{01}+t\Sigma_1)\Sigma_t^{-1}-\mathrm{Id}\big)x$, where
+$\Sigma_t=\mathrm{Cov}(X_t)=(1-t)^2\Sigma_0+(1-t)t(\Sigma_{01}+\Sigma_{10})+t^2\Sigma_1$.''
+No independence is assumed; the formula holds for arbitrary cross-covariance.
+
+\textbf{Identification.} Expanding $(1-t)\Sigma_{01}+t\Sigma_1-\Sigma_t$ and factoring $(1-t)$,
+\[
+v_t=\big[(1-t)(\Sigma_{01}-\Sigma_0)+t(\Sigma_1-\Sigma_{10})\big]\Sigma_t^{-1},
+\]
+which is $K(t)=G(t)V(t)^{-1}$ of Prop.~4.6 under their block convention
+$\Sigma_{01}=C^{\T}$, $\Sigma_{10}=C$, with $\Sigma_t=V(t)$ identically.
+
+\textbf{Action.} Cite as the starting point. Prop.~4.6 becomes a restatement, not a derivation.
+
+\subsection*{2. Lem.~4.4 --- Partial}
+
+\textbf{Prior.} P.~Tsimpos, N.~Sharp, Y.~Marzouk, \emph{One-Shot Generative Flows: Existence and
+Obstructions}, arXiv:2604.15439, Remark~2 with Lemma~24.\Sec
+
+\textbf{Statement reported.} ``Define $\Sigma_t:=\mathrm{Var}(X_t)$ and by Lemma 24 note that we
+have $\dot\Sigma_t=\mathrm{Cov}(\dot X_t,X_t)+\mathrm{Cov}(X_t,\dot X_t)$.''
+
+\textbf{Difference.} Their lemma gives the symmetric part of $\mathrm{Cov}(\dot X_t,X_t)$ as
+$\tfrac12\dot\Sigma_t$. Lem.~4.4 identifies the antisymmetric complement as $\tfrac12(C^{\T}-C)$,
+constant in $t$. For the linear interpolant this follows in two lines from their lemma.
+
+\textbf{Action.} Demote Lem.~4.4 to a remark citing Lemma~24. Do not defend it as a contribution.
+
+\subsection*{3. Prop.~4.9 --- Partial}
+
+\textbf{Prior.} V.~De Bortoli, G.~Deligiannidis, et al., \emph{Augmented Bridge Matching},
+arXiv:2311.06978.\F{} C.~Wald, G.~Steidl, \emph{Flow Matching: Markov Kernels, Stochastic
+Processes and Transport Plans}, arXiv:2501.16839, Example~4.9.\F
+
+\textbf{Statement quoted.} De Bortoli et al.: ``flow and bridge matching processes preserve the
+information of the marginal distributions.'' Wald--Steidl, Ex.~4.9: ``both vector fields generate
+the same curves $\mu_t$ but in (d) mass is rotated unnecessarily, which makes the trajectories of
+single particles longer than for the vector field in (c).''
+
+\textbf{Difference.} Marginal preservation under arbitrary coupling is stated as background in
+both. Prop.~4.9 is its Gaussian linear-map specialisation. What is not in either is the
+identification (Rmk.~4.8) of the skew part $N$ as the divergence-free carrier: writing
+$\Lambda(t)=V(t)^{-1}NV(t)^{-1}$ one has $\Lambda^{\T}=-\Lambda$ and $NV^{-1}=V\Lambda$, so the
+$N$-term preserves every marginal while altering the endpoint map.
+
+\subsection*{4. Thm.~4.11 --- No prior found}
+
+Three independent sources state the general negative --- that different couplings with the same
+marginals give different fields --- and none states a criterion for when the endpoint map is
+nevertheless invariant.
+
+\textbf{(a) De Bortoli et al., Proposition~2.}\F{} Quoted:
+``$\mathbb P^{0,1}_M=\Pi_{0,1}$ if and only if $\Pi_{0,1}=\Pi^{0,1}_*$.''
+This is an iff, but about a different object: it characterises when the Markovian projection
+\emph{preserves the training coupling}, the answer being that the coupling must already be the
+static Schr\"odinger bridge. Theorem~4.11 characterises when the \emph{endpoint map} is
+independent of the coupling. Their Gaussian result (Proposition~5,
+$\alpha^*=\frac{\sigma^2}{2}(\sqrt{1+4/\sigma^4}-1)$) is the Schr\"odinger-bridge correlation, not
+a map-invariance criterion. Retrieved text states that no closed-form characterisation is given
+for when different couplings induce identical transport maps.
+
+\textbf{(b) Hertrich et al., Theorem~3(ii).}\F{} Quoted: ``Let $\Sigma_{01}=\Sigma_{10}=0$ and
+assume that $\Sigma_0$ and $\Sigma_1$ can be jointly diagonalized.'' The only place they integrate
+the field of 3(i) assumes both independence and commuting marginals. No matrix pencil, Frobenius
+integrability, zero-curvature argument or time-ordered exponential occurs anywhere in the paper.
+
+\textbf{(c) Tsimpos et al., \S5, open problems.}\Sec{} Quoted: ``Understand intermediate regimes
+between independence and determinism. \dots\ It would be very interesting to understand what
+becomes possible when the coupling is only partial.'' Theorem~4.11 answers a case of this.
+
+\textbf{Nearest conceptual neighbour.} Wald--Steidl, Corollary~4.8\F{} characterises when
+$v_t$ lies in the Wasserstein tangent space, a different property that a reader may conflate with
+invariance. The two are independent, and this should be stated in \S4:
+
+For Gaussians a tangent (gradient) field means $K$ symmetric; since $K^{\T}=\tfrac12V^{-1}V'$
+under hypothesis (i), $K$ is symmetric iff $[V,V']=0$. Under hypothesis (ii),
+$V=p\Sigma_0+q\Sigma_1$ and $V'=p'\Sigma_0+q'\Sigma_1$, so
+\[
+[V,V']=(pq'-p'q)\,[\Sigma_0,\Sigma_1],
+\]
+with $pq'-p'q=(2+\sigma+\tau)/4\neq0$ at $t=\tfrac12$ for admissible $(\sigma,\tau)$. Hence under
+(i)--(ii) the field is tangent iff $[\Sigma_0,\Sigma_1]=0$. Example~4.18(b) realises invariance
+without tangency: endpoint-map drift $6.3\times10^{-5}$ with $\|M-M^{\T}\|=0.165$.
+
+\subsection*{5. Cor.~4.13 --- Same}
+
+\textbf{Prior.} Hertrich et al., Theorem~3(ii).\F{} Under independence and joint
+diagonalisability the rectified map is the optimal transport map. Cor.~4.13 is this statement.
+
+\textbf{Action.} Cite. Claim only that Thm.~4.11 shows the hypothesis $[\Sigma_0,\Sigma_1]=0$ is
+separate from, and not required for, coupling-invariance (Rmk.~4.12).
+
+\subsection*{6. Cor.~4.21, Rmk.~4.22 --- Partial}
+
+\textbf{Prior.} Tsimpos et al., Proposition~10 with Remark~8.\Sec{} Reported: a field
+$v_t(x)=x/(t-\tau)$ with Lipschitz constant $1/|t-\tau|$ diverging as $t\to\tau$, and a process
+that ``collapses all points to the origin at time $t=\tau$ and then re-expands them.''
+
+\textbf{Difference.} Their collapse is at an interior time and arises from a rank-deficient
+schedule. Cor.~4.21 and Rmk.~4.22 concern collapse at $t=0$ arising from the source law having
+strictly smaller support dimension than the target's. The pairing of a non-Lipschitz field with
+collapse is theirs; the dimension-counting argument is not stated there.
+
+\subsection*{7. Cor.~5.5 --- Partial}
+
+No specific prior located. Reduction to an invariant $2$-plane by a stabiliser-fixed-point
+argument is standard technique in Riemannian flow matching. Present as a lemma, not as a finding.
+
+\subsection*{8. Thm.~5.9 --- No prior found}
+
+No spherical or von Mises--Fisher conditional-flow endpoint law located. Searches run: spherical
+flow matching endpoint laws; Riemannian flow matching on $\mathbb S^{d-1}$ with vMF targets;
+conditional flow landing point closed form. Negative rests on absence, not on a cleared candidate.
+
+\subsection*{9. Prop.~6.3 --- No prior found}
+
+No prior located on when a conditional flow does or does not improve on returning the source
+unchanged. Prop.~6.3 gives the exact criterion $A<\cos j$ and Prop.~6.2 the defining equation.
+This and item~12 are the least contested results in the document.
+
+\subsection*{10. \S7, the model $\mathcal M_2$ --- Same construction, opposite conclusion}
+
+\textbf{Prior.} De Bortoli et al., arXiv:2311.06978.\F
+
+\textbf{Statement quoted.} Abstract: they ``augment the velocity field (or drift) with the
+information of the initial sample point,'' losing the Markov property but preserving coupling
+information. Augmented drift, Eq.~(10):
+$d\mathbf X_t=\{b_t(\mathbf X_t)+\sigma_t^2\,\mathbb E[\nabla\log
+\mathbb Q_{1|t}(\mathbf X_1|\mathbf X_t)\,|\,\mathbf X_0,\mathbf X_t]\}dt+\sigma_t d\mathbf B_t$,
+with sampling initialised at $\mathbf X_0\sim\Pi_0$.
+
+\textbf{Identification.} This is $\mathcal M_2$ of Def.~2.6: the field depends on both the initial
+sample and the current state, and sampling starts at the initial sample.
+
+\textbf{Difference.} Their setting is a stochastic bridge with $\sigma_t>0$ and their metric is
+coupling recovery; Figure~4 reports improved marginal and coupling scores, and Appendix~E reports
+failure only as the pairing becomes increasingly entropic. No fidelity degradation is demonstrated
+numerically. The present document studies the deterministic probability-flow ODE with an
+informative source and reports the augmentation costing roughly a third of the terminal fidelity
+(Meas.~7.6).
+
+\textbf{Action.} Attribute the construction. The contribution is the sign of the effect and its
+scaling behaviour, and the paper must be framed against their positive result.
+
+\subsection*{11. Prop.~7.3, Rmk.~7.5 --- Partial}
+
+\textbf{Prior.} Wang et al., arXiv:2412.19992, Theorems~1--2.\Sec{} Reported: ``the limited
+performance of pure ODE samplers in diffusion bridge models arises from the singular behavior of
+the PF-ODE at the start of the generative process''; Theorem~2, ``At $t=T$, the non-linear drift
+term in the PF-ODE (9) becomes singular,'' with the reverse SDE drift remaining well defined. The
+mechanism is the Dirac initial condition $q_{T|y}(X_T|y)=\delta(X_T-y)$.
+
+\textbf{Difference.} Prop.~7.3's amplification factor $(1-\alpha t)/(t(1-\alpha))$ and the
+non-uniqueness of $\dot y=y/t$ at $y(0)=0$ are sharper statements of a published theorem, not new
+ones. Retrieve and read the full text before writing \S7.
+
+\textbf{Adjacent.} Gao et al., arXiv:2605.28962, ``endpoint underfitting'' as $t\to0$;\Sec{}
+Zeng \& Yan, arXiv:2509.20952, ``the condition number of the learning problem to diverge'' as
+noise levels approach zero, in the noise-source setting.\Sec
+
+\subsection*{12. Meas.~7.6 --- No prior found}
+
+No head-to-head comparison of the two models on a fidelity metric located, and no report of the
+inversion. The measured statement is: under maximal-update parameterisation with the learning rate
+tuned at width $256$ and transferred, five seeds per cell, and checkpoint selection on a
+distributional criterion, the difference is $0.0985$ at width $256$ and $0.1040$ at width $2048$,
+while the terminal loss of $\mathcal M_2$ falls from $4.52\times10^{-4}$ to $2.56\times10^{-4}$
+and its distributional error from $5.01\times10^{-2}$ to $3.68\times10^{-2}$.
+
+\textbf{Open.} The learning-rate transfer check did not resolve a unique optimum: the
+distributional criterion is flat between $10^{-4}$ and $10^{-3}$ at both widths. The sweep should
+be repeated at a second learning rate before this is submitted.
+
+\subsection*{13. Cor.~3.3, Rmk.~3.2 --- Same}
+
+\textbf{Prior.} Y.~Blau, T.~Michaeli, \emph{The Perception-Distortion Tradeoff}, CVPR 2018.\Sec
+
+\textbf{Action.} Cite. Claim only the closed-form quantification, Prop.~3.1 and Cor.~3.3, not the
+qualitative statement.
+
+\subsection*{14. Stability law refining Thm.~4.11 --- No prior found}
+
+\textbf{Status.} Proved as Proposition~4.28 with Corollary~4.29, measured as Measurement~4.30.
+The proposition gives analytic dependence of the endpoint map on the coupling, an explicit
+first-order response operator $\mathcal D$, and the fact that $\mathcal D$ annihilates exactly the
+directions permitted by hypotheses (i) and (ii); the corollary is the resulting linear law. The
+response formula was checked against finite differences of the integrated map: agreement to
+$2.4\times10^{-6}$ on a symmetric off-span direction and $5.4\times10^{-6}$ on a skew direction,
+with $\|\mathcal D\|$ at the integrator floor $2\times10^{-7}$ on a permitted direction.
+
+\textbf{Design.} Dimensions $n\in\{2,4,8,16,32,64\}$, six independent systems per dimension,
+$2048$ random systems per cell, thirty-six coupling configurations per system, all in float64 with
+a Heun integrator at $2000$ steps. The clean cell therefore contains $73{,}728$ systems. For each
+system a clean coupling is built inside the criterion, then perturbed out of the span of
+$\{\Sigma_0,\Sigma_1\}$ by $\varepsilon_{\mathrm{off}}$ and out of symmetry by
+$\varepsilon_{\mathrm{skew}}$, each rescaled to keep the joint positive semidefinite.
+
+\textbf{Separation.} The relative displacement of the endpoint map has $90$th percentile
+$4.06\times10^{-8}$ across every system satisfying the criterion, against a median of at least
+$9.78\times10^{-3}$ once either hypothesis is violated at relative size $0.1$ or above: a
+separation of $2.4\times10^{5}$. Marginal matching holds for every coupling tested, violated or
+not, at $1.53\times10^{-7}$, confirming Prop.~4.9 carries no hypothesis on the skew part.
+Invariance is unaffected by whether the marginals commute, holding at commutator up to $0.199$;
+this is the direct refutation of the reading that symmetry of $C$ alone decides the question.
+
+\textbf{The law.} Regressing $\log_{10}$ displacement on $\log_{10}$ violation, $180$ points per
+family:
+\[
+\text{span: slope } 0.9828,\ \text{intercept } -1.0078,\ \text{rms residual } 0.0349;\qquad
+\text{skew: slope } 0.9419,\ \text{intercept } -0.1892,\ \text{rms residual } 0.0563.
+\]
+Both slopes are $1$ to within the fit: the displacement is \emph{linear} in the size of the
+violation. Thm.~4.11 is therefore a stability statement, not only a binary criterion, and the two
+hypotheses are not interchangeable. At unit relative violation a skew violation displaces the map
+by $0.647$ and a span violation by $0.0982$, a ratio of $6.585$.
+
+\textbf{Contradicted prediction.} The register carried the prediction that the two hypotheses are
+comparably fragile. It is contradicted and recorded as such. The asymmetry reproduces: an earlier
+independent run at smaller scale gave $6.75$.
+
+\textbf{Prior.} No dedicated search was run for a quantitative stability statement of this form.
+The criterion it refines has no prior (item~4), so a prior for the refinement is unlikely but not
+excluded. Carried in Open.
+
+\subsection*{15. Super-resolution as an instance --- Partial}
+
+\textbf{Status.} New. The identification is exact, not an analogy, and the degenerate-source
+hypothesis is measured rather than assumed.
+
+\textbf{The instance.} $c$ is the class label, $z_1$ the high-resolution image, and
+$z_0=\mathsf{P}z_1$ with $\mathsf{P}=\mathsf{U}\mathsf{D}$, $\mathsf{D}$ average pooling by $f$ and
+$\mathsf{U}$ nearest-neighbour upsampling. $\mathsf{P}$ is an exact projection: measured
+null-space energy of the identity arm is $7.5\times10^{-15}$ relative, confirming
+$\mathsf{P}^2=\mathsf{P}$ numerically.
+
+\textbf{Why the endpoints stay dependent given $c$.} Conditioned on $c$, $z_0$ is a deterministic
+function of $z_1$. The pair is maximally dependent, not independent, which is what Def.~2.1
+requires and what an independent-source setting excludes. Conditioning on $c$ removes none of this
+dependence, since $c$ is a label and $\mathsf{P}$ acts on the image.
+
+\textbf{Where degeneracy enters.} $\operatorname{rank}\operatorname{Cov}(z_0\mid c)\le
+r=3(\mathrm{res}/f)^2$. Measured on STL-10 at $f=4$, job 381593, with strictly more samples than
+the bound at every resolution so no estimate is sample-limited:
+
+\begin{center}
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+res & ambient & bound $r$ & measured rank $z_0$ & samples\\
+\midrule
+$32$ & $3072$ & $192$ & $192$ & $1024$\\
+$48$ & $6912$ & $432$ & $432$ & $1984$\\
+$96$ & $27648$ & $1728$ & $1728$ & $3072$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Exact equality at all three, against target ranks $1023$, $1983$, $3071$, each sample-limited
+full. Hence $\dim\operatorname{supp}(z_0\mid c)<\dim\operatorname{supp}(z_1\mid c)$ strictly, and
+Cor.~4.21 applies: a Lipschitz map cannot raise Hausdorff dimension, so a deterministic flow
+started at $z_0$ cannot cover the target and collapses to the conditional mean. The measured
+null-space energy of the flow confirms the consequence: it restores $0.371$ to $0.433$ of the
+target high-frequency energy, and $\mathcal M_1$ lands closer to the least-squares regression
+answer than to the target at every resolution.
+
+\textbf{What does not transfer.} The ordering of $\mathcal M_1$ and $\mathcal M_2$ reverses here.
+$\mathcal M_2$ scores higher in PSNR at all three resolutions, by $0.114$, $0.062$ and $0.017$,
+the last inside one standard error, while restoring $17.5\%$, $12.3\%$ and $11.2\%$ less
+high-frequency energy. Between two arms of identical capacity and training that differ only in
+whether the network receives $z_0$, higher score with less restored detail is the mean-seeking
+inversion of \S~13 rather than a better model. This is reported as a third instance of that
+inversion and not as support for the $\mathcal M_1$--$\mathcal M_2$ ordering, which must be
+scoped to the sphere.
+
+\textbf{Prior.} M.~Delbracio, P.~Milanfar, \emph{Inversion by Direct Iteration}, TMLR 2023.\Sec{}
+Regression to the mean in deterministic restoration is their stated motivation, and Blau \&
+Michaeli give the perception-distortion form. \textbf{Shared:} the phenomenon.
+\textbf{Not shared:} the identification of super-resolution as an exact instance of Def.~2.1 with
+the rank bound stated and measured, and the dimension-theoretic obstruction as the mechanism
+rather than an MMSE argument.
+
+\textbf{Action.} Claim the instance and the measured rank equality. Do not claim the phenomenon.
+
+\subsection*{16. Prop.~4.33 --- Partial}
+
+\textbf{Status.} Proved as Proposition~4.33 with Definition~4.31 and Lemma~4.32, measured as
+Measurement~4.34, read in Remark~4.35.
+
+\textbf{Statement.} The value of the flow-matching objective at its population optimum is not a
+function of the endpoint map. The witness is explicit and one-dimensional: for $n=1$ and
+$\Sigma_0=\Sigma_1=1$ every cross-covariance $c\in[-1,1]$ satisfies both hypotheses of
+Thm.~4.11 and gives $M=1$, while the loss floor runs from $\mathcal F(1)=0$ to
+$\mathcal F(0)=\pi/2$. Hence no modulus of continuity in $\|M(C_1)-M(C_2)\|$ can bound
+$|\mathcal F(C_1)-\mathcal F(C_2)|$.
+
+\textbf{Prior.} Y.~Zhang et al., \emph{Bridge Graphical Models}, arXiv:2608.19144, Appendix~K.\F{}
+\textbf{Shared:} the object. Their Markovization gap
+$\mathfrak G(\mathsf Q)=\int_0^1\mathbb E[\operatorname{Tr}\operatorname{Var}(U_t\mid X_t)]dt$
+is Definition~4.31, and
+they report the coupling moving it by two orders of magnitude. \textbf{Not shared:} that this
+quantity is decoupled from the endpoint map, which requires Thm.~4.11 and has no prior. The
+measurement sharpens it: on couplings that are provably equivalent at the endpoint the floor
+spans a median factor $2.23$, while on couplings that move the map by a median $63\%$ it spans
+only $1.23$. The floor is ordered against the map, not merely uninformative about it.
+
+\textbf{Action.} Cite Zhang et al. for the object and for the two-orders-of-magnitude report.
+Claim the decoupling and the ordering. This row also discharges the obligation recorded under
+that entry in \S~Checked and cleared, that their result be distinguished explicitly so a reader
+does not take it as a contradiction.
+
+\section{Checked and cleared}
+
+\textbf{Cheng \& Schwing, C2OT, ICCV 2025, arXiv:2503.10636.}\F{} The source is a Gaussian prior
+throughout; the training objective is
+$\mathbb E_{t,(x_0,x_1,c)\sim\pi}\|v_{\theta,c}(t,x_t)-u(x_t|x_0,x_1)\|^2$, so the network never
+receives $x_0$. Their formal content (Eqs.~7--9) is that minibatch optimal transport skews
+$q(x_0|c)\neq q(x_0)$ at training while test-time sampling is unbiased. No analysis of
+ill-conditioning, determinacy, or degeneracy at $t=0$. Different setting and different mechanism.
+
+\textbf{Tsimpos et al., arXiv:2604.15439, main result.}\Sec{} The object is straightness of the
+flow under endpoint independence, characterised as requiring a deterministic coupling. Not
+endpoint-map invariance. Cleared as the main result; \emph{not} cleared on Rmk.~2, Lem.~24,
+Thm.~9, Rmk.~5, Prop.~10, Rmk.~8, which appear above.
+
+\textbf{Zhang et al., \emph{Bridge Graphical Models}, arXiv:2608.19144.}\F{} Verified to exist via
+the arXiv API, dated 2026-06-16; full text retrieved. The object is the Markovization gap
+$\mathfrak G(\mathsf Q)=\int_0^1\mathbb E[\mathrm{Tr}\,\mathrm{Var}(U_t|X_t)]dt$, the irreducible
+floor of the flow-matching loss, not the endpoint map. Their Appendix~K reports the coupling
+changing that gap by two orders of magnitude; this is consistent with Thm.~4.11 and must be
+distinguished explicitly in the text, since a reader may take it as a contradiction. Their
+Theorem~2, $W_2(\rho_1^\theta,\rho_1)\le e^L\epsilon$, is a candidate scaffold for a bound in
+\S7, subject to regularity assumptions that fail in the present setting.
+
+\textbf{Lim, arXiv:2512.16768.}\F{} Studies flow matching through finite-sample plug-in
+estimation. Proposition~5.5 parameterises flux-null corrections by antisymmetric matrices
+$A_i(t)^{\T}=-A_i(t)$ and requires each $\Sigma_i(t)$ symmetric positive definite, excluding
+degenerate sources. Equivalence is by probability-flux divergence, not by coupling. Relevant to
+Rmk.~4.8 as the general form of the $N$-term; not a prior for Thm.~4.11.
+
+\textbf{Wald \& Steidl, arXiv:2501.16839.}\F{} A survey. Example~2.7 gives the Gaussian optimal
+transport map; Proposition~4.11 treats the independent coupling with standard Gaussian source. No
+general-coupling covariance computation of the endpoint map, no matrix pencil, no conditioning of
+the velocity network on the initial sample. Example~4.10 treats Dirac data and mass-splitting at a
+crossing time, not lower-dimensional source support.
+
+\textbf{Pooladian et al., Multisample Flow Matching, PMLR v202.}\Sec{} Coupling design to
+straighten flows while preserving marginals. Different object.
+
+\section{Open}
+
+\begin{enumerate}\itemsep2pt
+\item Wang et al., arXiv:2412.19992: retrieve the full text and read Theorems~1--2 before writing
+\S7. Item~11 rests on a secondary summary.
+\item Tsimpos et al.: retrieve Lemma~24, Remark~2, Theorem~9, Remark~5, Proposition~10 and
+Remark~8 directly. Items~2 and 6 rest on secondary summaries.
+\item Tong et al., arXiv:2302.00482, and Tong et al., \emph{Simulation-Free Schr\"odinger Bridges
+via Score and Flow Matching}, PMLR v238: not checked. The general statement that any coupling with
+correct marginals yields a valid probability path is likely to be located in the former, which
+bears on item~3.
+\item Blau \& Michaeli: confirm the citation directly.
+\item Guidance behaviour and the discrete-diffusion threshold: not searched. Report both as
+observations without a priority claim, or search before claiming novelty.
+\item Image-to-image bridge literature (I2SB, DDBM, InDI, Direct Diffusion Bridges,
+stochastic interpolants, Doob $h$-transform): not swept individually. This is where an empirical
+report of the item~10 effect is most likely to exist.
+\item Item~12: repeat the width sweep at a second learning rate.
+\item Item~14: the numbered statement is written, Prop.~4.28 and Cor.~4.29. Still owed: one
+targeted search for quantitative perturbation bounds on Gaussian rectified-flow endpoint maps
+before the phrase ``no prior found'' is used in the submission.
+\item Item~16: the $47$-system measurement is at $n\in\{3,6\}$ with the loss floor evaluated in
+closed form rather than trained. The dimension sweep of Meas.~4.30 would extend it to $n=64$ at
+small cost, since the same random-system machinery applies.
+\item Item~15: retrieve Delbracio \& Milanfar in full and determine whether a dimension or
+Lipschitz obstruction is stated there, or only the conditional-mean argument. The verdict Partial
+depends on this.
+\item Item~15: closed. The rank equality is now exact at $\mathrm{res}=32$, $48$ and $96$, none
+sample-limited.
+\item Item~15: the null-space energy ratio is not a collapse index on its own. The regression arm
+records the \emph{highest} ratio, $0.68$ to $0.78$, together with the lowest PSNR of the learned
+arms, so the statistic also counts incorrect high-frequency energy. The comparison is sound only
+between arms of matched capacity and training, which is why it is drawn for
+$\mathcal M_1$ against $\mathcal M_2$ and for nothing else. A distributional metric on the
+restoration outputs would settle the ordering; none was run.
+\end{enumerate}
+
+\end{document}

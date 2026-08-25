@@ -1,0 +1,799 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,longtable,array}
+\usepackage{xcolor}
+\usepackage[colorlinks,linkcolor=blue!45!black,urlcolor=blue!45!black]{hyperref}
+
+\newcommand{\T}{\mathsf{T}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Sph}{\mathbb{S}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\PASS}{\textsc{pass}}
+\newcommand{\WARN}{\textsc{warn}}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+
+\begin{document}
+
+\section{Scope}
+
+Three runs, one seed policy, one register discipline. Every quantity below is either a
+specification of the program or a number the program printed. Ninety-one predictions were
+registered before execution with their expected outcome recorded in the source; sixty-seven hold
+and twenty-four are contradicted. No \texttt{predicts} string was edited after seeing a result.
+
+\begin{center}
+\begin{tabular}{@{}llrrl@{}}
+\toprule
+Run & Platform & Registered & Contradicted & Wall clock\\
+\midrule
+synthetic programme, \S\ref{sec:results} & Tesla T4 & $64$ & $20$ & $552.09$ min\\
+criterion at scale, \S\ref{sec:thmscale} & A100 80GB & $6$ & $1$ & $89.7$ min\\
+super-resolution, \S\ref{sec:srscale} & A100 80GB & $21$ & $3$ & $553.0$ min\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+PyTorch $2.10.0{+}\mathrm{cu}128$ on the T4; $2.1.0{+}\mathrm{cu}121$ on the A100 nodes.
+Section~\ref{sec:reg} lists the twenty contradictions of the synthetic programme and separates
+those that support the central claim from those that constrain it; the four cluster
+contradictions are discussed where they arise.
+
+\section{Generative model}
+
+Everything lives on the unit sphere $\Sph^{d-1}\subset\R^{d}$, $d=256$. Write
+$\Pi_z v=v-\langle v,z\rangle z$ for the tangent projection at $z$ and
+$\exp_z(w)=\cos\|w\|\,z+\sin\|w\|\,w/\|w\|$ for the exponential map, applied to $w\leftarrow\Pi_zw$
+and returning $z$ when $\|w\|<10^{-6}$.
+
+Four scalars parameterise the world: the resultant $A=0.37$, the private-factor weight
+$\beta=0.8$, the source tilt $j=0.15$ rad, and the coupling $\rho=1$. Write $s=\sqrt{1-\beta^2}=0.6$.
+
+One draw is produced as follows.
+\begin{enumerate}\itemsep1pt
+\item $c\sim\mathrm{Unif}(\Sph^{d-1})$.
+\item $\xi_s$ a uniform unit vector in the tangent space at $c$.
+\item $\xi_t=\xi_s$ when $\rho=1$; otherwise
+$\xi_t=\Pi_c\big(\rho\,\xi_s+\sqrt{1-\rho^2}\,\xi'\big)$ normalised, with $\xi'$ an independent
+uniform unit tangent vector. Both conditional marginals are invariant in $\rho$; only the
+dependence between the source-side and target-side private factors changes. Measured drift of the
+target mean over the whole $\rho$ sweep: $2.86\times10^{-4}$.
+\item $m=\big(s\,c+\beta\,\xi_t\big)/\|\cdot\|$.
+\item $z_1\sim\mathrm{vMF}(m,\kappa)$.
+\item $\varphi=j+\sigma_{\mathrm{pol}}\,\varepsilon$, $\varepsilon\sim\mathcal N(0,1)$, clamped to
+$(10^{-3},\pi-10^{-3})$; $z_0=\big(\cos\varphi\,c+\sin\varphi\,\xi_s\big)/\|\cdot\|$.
+\item Optionally $z_0\leftarrow\mathrm{slerp}(u,z_0,\lambda)$ with $u$ uniform on the sphere. This
+is the noise-to-informative dial $\lambda$ used only in the guidance stage.
+\end{enumerate}
+
+$\sigma_{\mathrm{pol}}=0$ is the default and makes $z_0$ a deterministic function of $(c,\xi_s)$.
+This is the degenerate source: the conditional law of $z_0$ given $c$ is supported on a
+$(d-2)$-sphere of radius $\sin j$, one dimension short of the target support.
+
+\subsection*{Concentration}
+
+$\kappa$ is solved from $A$ through $A_d(\kappa)=I_{d/2}(\kappa)/I_{d/2-1}(\kappa)$, evaluated by
+a backward continued fraction with $\max(500,\lceil 2.2\kappa+100\rceil)$ levels and inverted by
+$140$ bisection steps on a bracket doubled until it contains the root. At $d=256$, $A=0.37$ this
+gives $\kappa=109.64$.
+
+Sampling uses Wood's rejection method. The acceptance test is evaluated in float64. To keep the
+sampler free of host-device synchronisation the implementation draws $4B$ proposals in one shot
+and selects $B$ of them by \texttt{topk} on the acceptance indicator perturbed by
+$10^{-3}\mathcal U$, rather than looping until $B$ are accepted; the loop variant requires reading
+an accepted count back to the host every iteration. Verification at the operating point: target
+$A=0.37$, measured $\hat A=0.3707$ over $2\times10^{4}$ draws.
+
+\section{Reference levels}
+
+Closed forms, computed before any network is trained, at $(A,\beta,j)=(0.37,0.8,0.15)$:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Level & Expression & Value\\
+\midrule
+source & $A(s\cos j+\beta\sin j)$ & $0.26374$\\
+estimate from $c$ & $As$ & $0.22200$\\
+estimate from $m$ & $A$ & $0.37000$\\
+sampler, conditional & $A^2s^2$ & $0.049284$\\
+sampler, augmented & $A^2$ & $0.13690$\\
+marginal-field law & $A\big(As^2+\beta\sqrt{1-A^2s^2}\big)$ & $0.33790$\\
+threshold & $\beta^\star$ solving law $=$ source & $0.65892$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+$\beta^\star$ is obtained by $200$ bisection steps and exists if and only if $A<\cos j$.
+
+\section{Architecture}
+
+\subsection*{Velocity field}
+
+\texttt{FieldNet}, used in every continuous stage.
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Component & Specification & Initialisation\\
+\midrule
+time embedding & $64$ features, $\omega_k=\exp\!\big(\tfrac{k}{31}\log 200\big)$, $k=0..31$,
+  output $[\sin(t\omega),\cos(t\omega)]$ & fixed buffer\\
+time projection & $\mathrm{Linear}(64,W)$ & default\\
+input & $\mathrm{Linear}(d\cdot n_{\mathrm{in}},W)$, $n_{\mathrm{in}}\in\{2,3\}$ & default\\
+trunk & $3\times$ residual block, below & --\\
+output & $\mathrm{Linear}(W,d)$ & zeros\\
+null condition & one learned vector in $\R^{d}$ & zeros\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+$n_{\mathrm{in}}=2$ concatenates $(z_t,c)$; $n_{\mathrm{in}}=3$ concatenates $(z_t,c,a)$ where $a$
+is the auxiliary input defined in Section~\ref{sec:aux}. Default width $W=512$; the width sweep
+uses $W\in\{256,512,1024,2048\}$.
+
+Each residual block is adaptive-LayerNorm-zero:
+\[
+h\ \leftarrow\ h+g\odot\mathrm{MLP}\big(\mathrm{LN}(h)\odot(1+s_c)+s_h\big),\qquad
+(s_h,s_c,g)=\mathrm{Linear}(W,3W)\big(\mathrm{SiLU}(e)\big),
+\]
+with $\mathrm{LN}$ a LayerNorm without learnable affine parameters, $\mathrm{MLP}=
+\mathrm{Linear}(W,4W)\to\mathrm{SiLU}\to\mathrm{Linear}(4W,W)$, and $e$ the projected time
+embedding. The modulation layer is zero-initialised, so at step zero every block is the identity
+and the network output is exactly zero.
+
+Classifier-free guidance replaces $c$ by the learned null vector on a Bernoulli($p$) subset of the
+batch, $p=0.1$ where used, and samples with
+$v=v_\varnothing+w\,(v_c-v_\varnothing)$.
+
+\subsection*{Maximal-update parameterisation}
+
+Parameters are split into three groups with $\mathrm{mult}=W/256$:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Group & Learning rate\\
+\midrule
+input layer, time projection & $\eta$\\
+trunk & $\eta/\mathrm{mult}$\\
+output layer & $\eta/\mathrm{mult}$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The standard-parameterisation control assigns $\eta$ to every parameter. Both are run.
+
+\subsection*{Population-field oracle}
+
+\texttt{OraNet}, a $2\to96\to96\to1$ MLP with SiLU activations, consumed as
+$v(z,t)=\mathrm{OraNet}(\langle z,c\rangle,t)\,\Pi_z c$. This is the exact functional form of the
+marginal field under azimuth conservation, so it isolates the population field from any
+approximation error in a general network. Trained $3500$ steps, batch $2048$, AdamW at
+$2\times10^{-3}$; $1800$ steps and batch $1024$ inside the two sweeps.
+
+\subsection*{Masked-diffusion denoiser}
+
+For the discrete stage. Tokens $L=16$, vocabulary $V=12$ plus one mask symbol, $K=8$ conditions,
+$M=32$ private variants per condition, per-token corruption $\eta=0.05$, extra source corruption
+$\gamma=0.35$, and a fraction $\beta_d$ of positions carrying the private factor. The denoiser is
+a $3$-layer MLP of width $256$ on one-hot inputs, predicting all $L$ token distributions.
+
+\section{Optimizer and training}
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Setting & Value\\
+\midrule
+optimizer & AdamW, PyTorch defaults for $(\beta_1,\beta_2,\epsilon)$ and weight decay\\
+base learning rate & $3\times10^{-4}$ default; $10^{-4}$ and $10^{-3}$ in the transfer study\\
+schedule & constant\\
+gradient clipping & global norm $1.0$\\
+batch size & $256$ ($512$ discrete, $2048$ oracle)\\
+steps & $3000$ default, $12000$ long, $1500$ in the learning-rate screen\\
+$t$ sampling & $t\sim\mathrm{Unif}(0,1)$, one draw per example\\
+interpolant & $z_t=\mathrm{slerp}(z_0,z_1,t)$\\
+regression target & $\dot{\mathrm{slerp}}(z_0,z_1,t)$, in closed form\\
+loss & mean squared error between $\Pi_{z_t}f_\theta(z_t,t,c,a)$ and the target\\
+reported loss & exponential moving average, decay $0.95$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The prediction is tangent-projected before the loss, so the network is never penalised for its
+normal component and the objective is the conditional flow-matching loss on the manifold.
+
+\subsection*{Checkpoint selection}
+
+Selecting on the training loss is invalid here: the loss and sampled quality move in opposite
+directions along every knob swept (Spearman $+0.943$ between terminal loss and fidelity across the
+$\alpha$ family). Where early stopping is enabled, checkpoints are scored every
+$\max(200,\lfloor\text{steps}/8\rfloor)$ steps by a sampled distributional criterion --- the
+one-dimensional Wasserstein distance of the polar coordinate against a fresh draw from the true
+conditional, at $6$ conditions $\times$ $64$ samples, fixed evaluation seed $99$ --- and the best
+is restored. Selection and reporting use disjoint seeds ($99$ against $1234$).
+
+\subsection*{Auxiliary input}
+\label{sec:aux}
+
+Three settings of $a$ for the source-conditioned model, all with the sampler started at $z_0$:
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Setting & Training & Sampling\\
+\midrule
+exact & $a=z_0$ & $a=z_0$\\
+$\alpha$-family & $a=\mathrm{slerp}(z_0,z_1,\alpha t)$ & $a=$ state cached at time $\alpha t$\\
+noised & $a=\exp_{z_0}\!\big(\sigma_a\,u\big)$, $u$ uniform unit tangent & same law\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The $\alpha$-family interpolates between the marginal model ($\alpha=0$, auxiliary input frozen at
+$z_0$) and full knowledge of the trajectory. It is the construction of augmented bridge matching.
+
+\section{Integration solver}
+
+Heun, second order, intrinsic to the sphere. With a uniform grid $t_0<\dots<t_K$ on $[t_\ast,1]$
+and $\Delta=t_{i+1}-t_i$:
+\[
+v_1=f(z,t_i),\quad
+\tilde z=\exp_z(\Delta v_1),\quad
+v_2=\Pi_z f(\tilde z,t_{i+1}),\quad
+z\leftarrow\exp_z\!\big(\tfrac{\Delta}{2}(v_1+v_2)\big).
+\]
+The corrector velocity is transported back to $z$ before averaging, so both slopes are added in
+one tangent space. Default $K=32$; the step sweep uses $K\in\{1,2,4,8,16,32,64\}$.
+
+Two solver-level knobs are exposed. Churn adds $\exp_z\!\big(\zeta\sqrt{\Delta}\,u\big)$ after each
+step with $u$ a uniform unit tangent vector, $\zeta\in\{0,0.05,0.15\}$. Truncation starts the
+integration at $t_\ast>0$ instead of $0$, which is the direct probe of the $1/t$ amplification:
+the predicted error scales with $\int_{t_\ast}^{1}dt/t$, and the measured endpoint error tracks
+that integral at Spearman $0.964$.
+
+The flat-space endpoint map of Section~\ref{sec:flat} is integrated separately, in float64, by the
+same Heun rule applied to the matrix ODE $\dot M=K(t)M$, $M(0)=I$, with $2000$ steps and
+$K(t)=G(t)V(t)^{-1}$ obtained by a linear solve rather than an explicit inverse. Euler at the same
+step count leaves a discretisation floor of $3.4\times10^{-5}$, which is larger than the effect
+being measured; Heun lowers it to $1.2\times10^{-7}$.
+
+\section{Evaluation protocol}
+\label{sec:proto}
+
+Two disjoint instruments, because they disagree and the disagreement is a result.
+
+\emph{Fidelity.} $768$ conditions, $6$ samples each. Reports mean cosine to a matched target draw,
+alignments to $c$, $\xi_s$, $\xi_t$, $m$, the in-plane energy
+$\E[\langle z,c\rangle^2+\langle z,\xi_s\rangle^2]$, the output polar spread, and the mean
+off-diagonal pairwise cosine among the $6$ samples sharing a condition.
+
+\emph{Distributional.} $16$ conditions, $128$ samples each, evaluation seed $1234$. Reports the
+one-dimensional Wasserstein distance of the polar coordinate, the energy distance, and $5$-nearest-
+neighbour coverage, each against a fresh draw from the true conditional. A second independent
+draw supplies a null for all three, so every number has a floor attached: the polar Wasserstein
+null is $0.00967$.
+
+Cosine to a single target is a mean-seeking score and ranks a correct sampler last. Measured: the
+true posterior scores $0.0500$, below returning the source unchanged ($0.2624$), below the constant
+map $z\mapsto c$ ($0.2221$), and below every trained model. This is reported as a property of the
+metric, not of the models, and it is why no claim in this work rests on cosine alone.
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Flat endpoint map}
+\label{sec:flat}
+
+Five couplings at $d\le 3$, each swept over six strengths, testing the two hypotheses of the
+criterion independently. Hypothesis (i) is $C=C^{\T}$; hypothesis (ii) is
+$C+C^{\T}\in\mathrm{span}\{\Sigma_0,\Sigma_1\}$.
+
+\begin{center}
+\begin{tabular}{@{}lccr@{}}
+\toprule
+Arm & (i) & (ii) & Max relative drift\\
+\midrule
+symmetric, in span, commuting marginals & yes & yes & $6.34\times10^{-5}$\\
+symmetric, in span, non-commuting marginals & yes & yes & $6.34\times10^{-5}$\\
+symmetric, out of span & yes & --- & $7.62\times10^{-3}$\\
+skew, in span & --- & yes & $9.52\times10^{-1}$\\
+skew, out of span & --- & --- & $1.01$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both hypotheses are necessary and neither is implied by the other. Marginal commutation is
+irrelevant to invariance: the commuting and non-commuting invariant arms agree to five decimal
+places, while the non-commuting arm departs from the Brenier map by $0.0632$ and carries map
+asymmetry $0.229$. The exact identity
+$G(t)-\tfrac12V'(t)=\tfrac12(C^{\T}-C)$ holds to $3.55\times10^{-15}$ over $300$ random joints.
+Marginal matching holds for every coupling regardless of the skew part, at
+$1.16\times10^{-4}$.
+
+\subsection{Degenerate source, restored}
+
+Sweeping $\sigma_{\mathrm{pol}}$ from $0$ to $0.4$ at $d=256$ with $1.2\times10^{5}$ samples per
+setting. At $\sigma_{\mathrm{pol}}=0$ the source variance along $c$ is $7.08\times10^{-24}$,
+numerically rank-deficient; any $\sigma_{\mathrm{pol}}>0$ restores it, the smallest tested giving
+$5.58\times10^{-7}$. The polar gain matches the ratio of target to source polar spreads to within
+$0.71\%$ across the sweep and diverges as $\sigma_{\mathrm{pol}}\to0$, reaching $73.6$ at
+$\sigma_{\mathrm{pol}}=0.005$. The mean polar landing is $As$ to within $4.07\times10^{-4}$ at
+every $\sigma_{\mathrm{pol}}$, so the singular limit identifies the collapse point rather than
+destroying it. The pencil determinant is nonzero throughout and changes sign inside the sweep,
+between $\sigma_{\mathrm{pol}}=0.03$ and $0.06$.
+
+\subsection{Reference ladder}
+
+\begin{center}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Estimator & cosine & align $c$ & in-plane & pairwise & polar $W_1$\\
+\midrule
+identity & $0.2624$ & $0.9888$ & $1.000$ & $0.9777$ & $0.7667$\\
+constant $c$ & $0.2221$ & $1.0000$ & $1.000$ & $1.0000$ & $0.7780$\\
+Bayes $m$ & $0.3702$ & $0.6000$ & $1.000$ & $0.3599$ & $0.3780$\\
+population field & $0.3340$ & $0.2023$ & $1.000$ & $0.0414$ & $0.0480$\\
+marginal model & $0.3188$ & $0.2402$ & $0.858$ & $0.1835$ & $0.0327$\\
+source-conditioned & $0.2169$ & $0.2254$ & $0.367$ & $0.6559$ & $0.0367$\\
+true posterior & $0.0500$ & $0.2220$ & $0.056$ & $0.0487$ & $0.0097$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The population field lands on the closed-form law to $0.0039$. Azimuth conservation is exact for
+it (in-plane energy $1.000$) and broken by training ($0.858$); that leakage is the whole fidelity
+gap. The population image is a ring, verified by pairwise cosine equalling $\mathrm{align}_c^2$ to
+$4.7\times10^{-4}$; the trained image is not, the same comparison differing by $0.126$. With a
+deterministic source the output polar spread collapses to $6.8\times10^{-8}$ against a true
+spread of $0.0562$.
+
+\subsection{Width and learning rate}
+
+Five seeds per cell, maximal-update parameterisation, checkpoint selection on the distributional
+criterion. $\mathcal M_1$ is the marginal model; $\mathcal M_2$ additionally receives $z_0$ and
+starts there.
+
+\begin{center}
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+$\eta$ & width & $\mathcal M_1$ & $\mathcal M_2$ & gap & gap$/\sigma$\\
+\midrule
+$10^{-4}$ & $256$ & $0.31758\pm0.00234$ & $0.27503\pm0.00127$ & $0.04256$ & $36$\\
+$10^{-4}$ & $512$ & $0.31962\pm0.00099$ & $0.26559\pm0.00144$ & $0.05403$ & $69$\\
+$10^{-4}$ & $1024$ & $0.31765\pm0.00047$ & $0.26200\pm0.00070$ & $0.05565$ & $147$\\
+$10^{-4}$ & $2048$ & $0.31330\pm0.00038$ & $0.25187\pm0.00243$ & $0.06143$ & $56$\\
+\midrule
+$10^{-3}$ & $256$ & $0.31379\pm0.00131$ & $0.21938\pm0.00799$ & $0.09441$ & $26$\\
+$10^{-3}$ & $512$ & $0.31125\pm0.00123$ & $0.20566\pm0.00725$ & $0.10559$ & $32$\\
+$10^{-3}$ & $1024$ & $0.29600\pm0.00445$ & $0.19604\pm0.01308$ & $0.09996$ & $16$\\
+$10^{-3}$ & $2048$ & $0.28874\pm0.00603$ & $0.18993\pm0.01314$ & $0.09881$ & $15$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Three statements, of which two survive and one does not.
+
+\emph{Survives.} The sign is the same in all eight cells, at $15$ to $147$ standard errors.
+
+\emph{Survives.} Capacity does not close the gap at either learning rate. At $\eta=10^{-3}$ the
+change from width $256$ to $2048$ is $+0.0044$ against a two-standard-error tolerance of $0.0129$,
+that is, flat. At $\eta=10^{-4}$ it is $+0.0189$ against a tolerance of $0.0024$: the gap
+significantly \emph{widens} with capacity. Over the same range the training loss falls
+($-3.45\times10^{-4}$ and $-2.03\times10^{-4}$) and the distributional error falls ($-0.0422$ and
+$-0.0098$). The model is better optimised and distributionally better at larger width while the
+gap does not close. This is the form of the argument that the difference is not estimation error,
+and it is the only form of it that the data support.
+
+\emph{Does not survive.} The gap is not independent of the learning rate. It is $1.6$ to $2.2$
+times larger at $\eta=10^{-3}$ than at $\eta=10^{-4}$, far outside the standard errors. The
+registered prediction that the magnitude is a tuning-independent constant is contradicted. What
+may be claimed is the sign and the failure to close; the effect size must be reported per
+learning rate.
+
+Maximal-update transfer is unresolved. The distributional criterion selects $10^{-3}$ at width
+$256$ and $10^{-4}$ at width $2048$; the criterion is nearly flat, at $[0.0744,0.0458]$ and
+$[0.0322,0.0360]$ respectively, so the selection is weak rather than a clean failure. The standard-
+parameterisation control behaves worse on every axis --- loss rises with width, distributional
+error rises with width, and the width effect falls inside seed noise --- which is why maximal-
+update parameterisation is used for the headline numbers.
+
+\subsection{Mechanism and remedies}
+
+The deficit is attacked at the singularity. Truncating the integration at $t_\ast$ recovers most of
+it, $0.2166\to0.2997$ at $t_\ast=0.2$, and the recovery tracks the amplification integral at
+Spearman $0.964$. Auxiliary noise recovers it fully, $0.2149\to0.3105$ at $\sigma_a=1$, reaching
+the marginal model's $0.3180$ to within $0.008$. Churn does not help, which distinguishes an
+ill-conditioned recovery map from a variance problem. Along the $\alpha$ family the terminal loss
+and the sampled fidelity move together at Spearman $0.943$ --- the loss rises as quality rises.
+
+\subsection{Threshold}
+
+$\beta^\star$ predicted from $(A,j)$ alone against $\beta^\star$ measured by bisecting the
+crossing of the flow against the do-nothing baseline, over $36$ cells. Maximum absolute error
+$0.0334$ on the $27$ cells where both exist.
+
+\subsection{Guidance}
+
+Sliding $\lambda$ from a pure-noise start to a fully informative one flips the sign of the
+guidance gain at $w=3$: $+0.0770\pm0.0004$ at $\lambda=0$ and $-0.4905\pm0.0039$ at $\lambda=1$,
+where the output becomes anti-correlated with the target. Guidance is specific to starting from
+noise.
+
+\subsection{Real embeddings}
+
+OpenCLIP ViT-B-32, \texttt{laion2b\_s34b\_b79k}, on $6000$ CIFAR-10 images; source is the
+embedding of a Gaussian-blurred image (kernel $9$, $\sigma\in[0.8,3.0]$), condition is the
+normalised class-mean embedding, $80/20$ split, width $512$, $\eta=10^{-4}$, $3000$ steps.
+
+\begin{center}
+\begin{tabular}{@{}lr@{}}
+\toprule
+Level & cosine to clean embedding\\
+\midrule
+random pair & $0.4815$\\
+blurred source & $0.5517$\\
+marginal model & $0.7586$\\
+source-conditioned & $0.7507$\\
+class prototype & $0.7930$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Estimated from the embeddings, $\hat A=0.7923$, $\hat\beta=0.6010$, $\hat\jmath=0.2817$, so the
+predicted threshold is $0.5291$ and $\hat\beta$ sits above it. The registered prediction that the
+flow beats the source is therefore made in advance and holds, at $89\%$ of the range between the
+random-pair floor and the prototype. The ordering of the two models also transfers.
+
+\section{Cluster experiments}
+
+Two further runs on NVIDIA A100 80GB nodes, PyTorch $2.1.0{+}\mathrm{cu}121$. Job $381574$
+carries the criterion to dimension $64$; job $381593$, a three-task array, carries the degenerate
+source to real images at three resolutions. Both completed.
+
+\subsection{The criterion at scale}
+\label{sec:thmscale}
+
+\subsubsection*{Design}
+
+Random systems rather than hand-built ones. For each dimension $n\in\{2,4,8,16,32,64\}$ and each
+of six independent repetitions, $2048$ pairs of marginals are drawn as
+$\Sigma=AA^{\T}/n+0.35\,I$ with $A$ standard normal, and thirty-six coupling configurations are
+built on each pair, all in float64.
+
+A clean coupling is $C_0=\tfrac12(\sigma\Sigma_0+\tau\Sigma_1)$ with
+$\sigma,\tau\sim\mathrm{Unif}(0.30,0.55)$, which satisfies both hypotheses by construction. It is
+then perturbed in two independent directions:
+\[
+S=\tfrac12(C+C^{\T})\ \leftarrow\ S_{\mathrm{clean}}+\varepsilon_{\mathrm{off}}R,\qquad
+C\ \leftarrow\ \tfrac12 S+\varepsilon_{\mathrm{skew}}W,
+\]
+with $R$ symmetric and Gram--Schmidt projected out of $\mathrm{span}\{\Sigma_0,\Sigma_1\}$ in the
+Frobenius inner product, $W$ skew, both rescaled to $\|S_{\mathrm{clean}}\|_F$. Each
+$\varepsilon$ ranges over $\{0,0.01,0.03,0.1,0.3,1.0\}$. Joint positive semidefiniteness is
+enforced by shrinking $C$ until $\|\Sigma_0^{-1/2}C\Sigma_1^{-1/2}\|_2\le0.92$.
+
+The endpoint map is integrated as in \S\ref{sec:flat}, Heun at $2000$ steps with a linear solve
+in place of an explicit inverse. The integrator floor is measured rather than assumed: the clean
+coupling is rebuilt at shrink margin $0.55$ instead of $0.92$ and the resulting map displacement
+is recorded. At $n=64$ that floor is $1.6\times10^{-8}$ and marginal matching holds at
+$1.5\times10^{-7}$.
+
+\subsubsection*{Separation}
+
+\begin{center}
+\begin{tabular}{@{}lr@{}}
+\toprule
+Quantity & Value\\
+\midrule
+systems satisfying the criterion & $73{,}728$\\
+their relative map displacement, $90$th percentile & $4.06\times10^{-8}$\\
+minimum median displacement once a hypothesis is violated at $0.1$ or above & $9.78\times10^{-3}$\\
+separation & $2.4\times10^{5}$\\
+marginal matching, worst case over every coupling & $1.53\times10^{-7}$\\
+largest normalised commutator among invariant systems & $0.199$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The last line is the one that settles the reading that symmetry of $C$ alone decides the question.
+Invariance holds to $4\times10^{-8}$ across systems whose marginals fail to commute by up to
+$0.199$, so marginal commutation is irrelevant to it. Marginal matching holds for every coupling
+tested, violated or not, confirming that the corresponding proposition carries no hypothesis on
+the skew part.
+
+\subsubsection*{The displacement is linear in the violation}
+
+Regressing $\log_{10}$ relative displacement on $\log_{10}$ relative violation, $180$ points per
+family:
+
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Violated hypothesis & slope & intercept & rms residual & $n$\\
+\midrule
+(ii), out of span & $0.9828$ & $-1.0078$ & $0.0349$ & $180$\\
+(i), skew part & $0.9419$ & $-0.1892$ & $0.0563$ & $180$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both slopes are $1$ to within the fit. The criterion is therefore a stability statement and not
+only a binary condition: a coupling that misses it by a little induces an endpoint map that
+misses by proportionally little.
+
+The two hypotheses are not interchangeable. At unit relative violation a skew violation displaces
+the map by $10^{-0.1892}=0.647$ and a span violation by $10^{-1.0078}=0.0982$, a ratio of
+$6.585$. The register carried the prediction that the two are comparably fragile; it is
+contradicted, and this is the one contradiction of the six. The asymmetry reproduces --- an
+earlier independent run at smaller scale gave $6.75$.
+
+\subsection{Super-resolution as an instance}
+\label{sec:srscale}
+
+\subsubsection*{The instance}
+
+$c$ is the class label, $z_1$ the image, and $z_0=\mathsf P z_1$ with $\mathsf P=\mathsf{UD}$,
+$\mathsf D$ average pooling by $f=4$ and $\mathsf U$ nearest-neighbour upsampling. $\mathsf P$ is
+an exact projection, verified numerically: the identity arm carries relative null-space energy
+$7.5\times10^{-15}$. Conditioned on $c$ the source is a deterministic function of the target, so
+the endpoints are maximally dependent, which is what the setting requires and what an independent
+source excludes.
+
+STL-10, $5000$ training and $1024$ test images, resized and centre-cropped to each resolution and
+normalised to $[-1,1]$. Backbone is a compact UNet: channel multipliers $(1,2,2)$ on base $64$,
+two residual blocks per level, GroupNorm with $8$ groups, time and class embeddings combined into
+a per-block scale and shift, and a zero-initialised output convolution. Input channels are three
+for the marginal model and six for the source-conditioned and regression arms. AdamW at
+$2\times10^{-4}$ with one-cycle schedule, $20{,}000$ steps, batch $64$, gradient clipping at
+$1.0$, bfloat16 autocast, three seeds. Sampling is Heun at $32$ steps on the linear interpolant.
+
+\subsubsection*{The degenerate source, measured}
+
+$\operatorname{rank}\operatorname{Cov}(z_0\mid c)\le r=3(\mathrm{res}/f)^2$. Rank is estimated
+from the Gram matrix in float64 with strictly more samples than the bound, so no figure is
+sample-limited.
+
+\begin{center}
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+res & ambient & bound $r$ & measured rank $z_0$ & measured rank $z_1$ & samples\\
+\midrule
+$32$ & $3072$ & $192$ & $192$ & $1023$ & $1024$\\
+$48$ & $6912$ & $432$ & $432$ & $1983$ & $1984$\\
+$96$ & $27648$ & $1728$ & $1728$ & $3071$ & $3072$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Exact equality with the bound at every resolution, against target ranks that are sample-limited
+full. The source support therefore has strictly smaller dimension than the target support, a
+Lipschitz map cannot raise Hausdorff dimension, and a deterministic flow started at $z_0$ cannot
+cover the target.
+
+\subsubsection*{Restoration}
+
+\begin{center}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+& \multicolumn{2}{c}{res $32$} & \multicolumn{2}{c}{res $48$} & \multicolumn{2}{c}{res $96$}\\
+Arm & PSNR & null & PSNR & null & PSNR & null\\
+\midrule
+identity & $19.7421$ & $0.0000$ & $20.7718$ & $0.0000$ & $21.0806$ & $0.0000$\\
+regression & $20.5088$ & $0.6804$ & $21.7859$ & $0.7492$ & $21.7051$ & $0.7846$\\
+$\mathcal M_1$ & $21.4671$ & $0.4013$ & $23.0294$ & $0.4329$ & $23.1889$ & $0.3709$\\
+$\mathcal M_2$ & $21.5806$ & $0.3309$ & $23.0913$ & $0.3797$ & $23.2060$ & $0.3294$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+``null'' is restored high-frequency energy as a fraction of the target's. The flow beats the
+identity at every resolution. It restores only $0.371$ to $0.433$ of the target's high-frequency
+energy, and it lands closer to the least-squares regression answer than to the target at every
+resolution --- $52.3$ against $101.7$, $92.3$ against $161.1$, $422.6$ against $635.5$. Both are
+the predicted consequences of a degenerate source.
+
+\subsubsection*{What does not transfer}
+
+The ordering of the two models reverses here, and the three contradictions of this run are all
+this prediction. $\mathcal M_2$ scores higher at every resolution, by $0.114$, $0.062$ and
+$0.017$, the last inside one standard error, while restoring $17.5\%$, $12.3\%$ and $11.2\%$ less
+high-frequency energy. The two gaps move oppositely with resolution: the score gap collapses
+while the energy gap does not.
+
+Between two arms of identical capacity and training that differ only in whether the network
+receives $z_0$, a higher score with less restored detail is the mean-seeking inversion of
+\S\ref{sec:proto}, not a better model. It is reported as a third instance of that inversion and
+not as support for the ordering, which is scoped to the sphere.
+
+One limit on that reading. The restored-energy fraction is not a collapse index on its own: the
+regression arm records the highest fraction, $0.68$ to $0.78$, together with the lowest score of
+the three learned arms, so the statistic also counts incorrect high-frequency energy. The
+comparison is sound between arms of matched capacity and training, which is why it is drawn for
+$\mathcal M_1$ against $\mathcal M_2$ and for nothing else. A distributional metric on the
+restoration outputs would settle the ordering. None was run.
+
+\subsection{The loss floor and the endpoint map decouple}
+
+A closed-form computation, not a cluster run, reported here because it is the consequence the
+criterion carries for practice. For jointly Gaussian endpoints under the linear interpolant the
+irreducible flow-matching loss is available in closed form,
+\[
+\mathcal F=\int_0^1\operatorname{Tr}\Big(\operatorname{Var}(z_1-z_0)-G(t)V(t)^{-1}G(t)^{\T}\Big)dt,
+\]
+with $V$ and $G$ as in \S\ref{sec:flat}. This is the same object reported elsewhere as the
+Markovization gap. Sweeping coupling strength along arms that satisfy the criterion and along
+arms that violate it, over $47$ random systems in dimensions $3$ and $6$:
+
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+& map displacement, median & loss floor ratio, median\\
+\midrule
+criterion satisfied & $3.17\times10^{-4}$ & $2.23\times$ \quad $[2.14,\,2.41]$\\
+criterion violated & $6.35\times10^{-1}$ & $1.23\times$ \quad $[1.07,\,1.99]$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The couplings that are provably equivalent at the endpoint produce the larger spread in training
+loss; the couplings that move the endpoint map by a median $63\%$ produce the smaller. The
+training loss is therefore not merely uninformative about the endpoint map, it is ordered against
+it, and it cannot be used to select a coupling. This is consistent with, and independent of, the
+measured anti-correlation between terminal loss and sampled quality on the sphere.
+
+\section{The register}
+\label{sec:reg}
+
+Forty-four of sixty-four hold. The twenty contradictions are not interchangeable and are separated
+here by what they do to the argument.
+
+\subsection*{Contradictions that support the central claim (3)}
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Prediction & Observed\\
+\midrule
+capacity closes the gap, standard param. & gap $0.0944\to0.0998$, does not close\\
+capacity closes the gap, maximal-update param. & gap $0.0944\to0.0988$, does not close\\
+gap flat in width at both rates & flat at $10^{-3}$; \emph{widens} at $10^{-4}$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Each of these was registered in the form ``if the difference is estimation error then $X$''. Their
+contradiction is the evidence that it is not.
+
+\subsection*{Control arm failing, which is why it is a control (3)}
+
+Standard parameterisation: the width effect falls inside seed noise, the loss rises with width,
+and the distributional error rises with width. Maximal-update parameterisation passes all three.
+
+\subsection*{Genuine falsifications, which constrain what may be claimed (10)}
+
+\begin{center}
+\begin{tabular}{@{}p{0.42\textwidth}p{0.52\textwidth}@{}}
+\toprule
+Prediction & Observed\\
+\midrule
+the flat criterion transfers to the sphere &
+spread over the coupling sweep $0.0344$ against a refit range of $0.0134$; it does not transfer at
+the measured tolerance\\
+spread is refit noise, so not monotone in $\rho$ &
+$2$ of $8$ rows monotone\\
+polar gain law holds on the sphere &
+median relative error $0.842$\\
+mean polar landing stays at $As$ &
+maximum deviation $0.0755$\\
+distributional error monotone in $\alpha$ &
+minimum at $\alpha=0.25$, not at an endpoint; the $\alpha=0$ endpoint is affected by the
+integrator defect below and this entry is provisional\\
+$\beta^\star$ exists iff $A<\cos j$ &
+$27$ of $30$; the three failures are all at large $(A,j)$ where the bisection finds a crossing the
+criterion forbids\\
+source-as-start hurts in masked diffusion &
+it helps, mean $+0.0107$\\
+maximal-update transfers the learning rate &
+$10^{-3}$ at width $256$, $3\times10^{-4}$ at $2048$\\
+transfer resolved with five seeds &
+$10^{-3}$ narrow, $10^{-4}$ wide; criterion nearly flat\\
+the gap is learning-rate independent &
+$1.6$ to $2.2$ times larger at $10^{-3}$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The first four constrain the reach of the flat criterion and are treated in \S\ref{sec:reg} of
+the prior-art record. The last three are the width and learning-rate entries already discussed in
+\S8.4.
+
+\subsection*{Withdrawn on re-examination: instrumentation, not findings (4)}
+
+Four entries recorded as contradictions do not measure what their \texttt{predicts} string
+asserts. They are listed here rather than deleted, because the register is a record of what was
+run.
+
+\begin{center}
+\begin{tabular}{@{}p{0.30\textwidth}p{0.64\textwidth}@{}}
+\toprule
+Entry & Defect\\
+\midrule
+the two auxiliary families trace one curve &
+The two families were sampled with different integrators: the $\alpha$ family advances with a
+single field evaluation per step, the auxiliary-noise family with a predictor and a corrector. At
+$\alpha=0$ and $\sigma_a=0$ the auxiliary input is $z_0$ in both branches, so the two share one
+trained model --- terminal losses $4.9116\times10^{-4}$ and $4.9046\times10^{-4}$ --- yet report
+distributional errors $0.0782$ and $0.0367$. The reported cross-family distance is therefore not
+attributable to the auxiliary law. The comparison must be rerun under one integrator.\\
+\addlinespace
+the two metrics invert across estimators &
+Spearman $0.310$ against a registered threshold of $0.400$ at $n=8$, where the standard error of
+the statistic is roughly $0.38$. The test cannot resolve the hypothesis in either direction.\\
+\addlinespace
+more unmasking steps trade accuracy for diversity &
+The sweep was run on the arm that starts from the mask without the source, which at
+$\beta_d=0.7$ scores $0.355$ against the do-nothing baseline's $0.613$. A step-count trade-off
+read off a model that loses to doing nothing is not interpretable, and accuracy in fact varies by
+$0.004$ across a sixteen-fold range of steps.\\
+\addlinespace
+the private residual carries no label information &
+The linear probe was trained and scored on the same $6000$ embeddings. With a $512$-dimensional
+feature and ten classes the probe carries $5130$ parameters against $6000$ samples, so the
+reported $0.386$ is an in-sample figure and is not an estimate of label content. A held-out split
+is required before any claim is made here.\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The consequence for the argument is confined. None of the four touches a result that is computed
+rather than fitted: the criterion at scale, the stability law, the loss-floor decoupling and the
+rank measurements involve no trained model and no sampler. What the four do is inflate the
+apparent contradiction count of the synthetic programme, and one of them --- the probe --- was
+carried in an earlier draft as the sharpest limit on the synthetic model. It is not evidence for
+that limit and has been withdrawn.
+
+\section{Compute}
+
+\begin{center}
+\begin{tabular}{@{}lr@{}lr@{}}
+\toprule
+Stage & Minutes & \quad Stage & Minutes\\
+\midrule
+flat endpoint map & $0.09$ & \quad metric ordering & $0.78$\\
+degenerate source & $0.51$ & \quad threshold & $32.23$\\
+reference ladder & $8.10$ & \quad guidance & $7.49$\\
+coupling grid & $16.58$ & \quad masked diffusion & $2.14$\\
+auxiliary families & $14.06$ & \quad width sweep & $234.96$\\
+remedies & $3.16$ & \quad second learning rate & $203.22$\\
+ & & \quad real embeddings & $28.77$\\
+\midrule
+\multicolumn{3}{@{}l}{Total} & $552.09$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The two scaling stages are $79\%$ of the budget. Both are dominated by the width-$2048$ cells,
+which cost roughly $400$ seconds per run against $22$ at width $256$.
+
+On the A100 nodes, in wall clock:
+
+\begin{center}
+\begin{tabular}{@{}llr@{}}
+\toprule
+Job & Content & Elapsed\\
+\midrule
+$381574$ & criterion at scale, six dimensions to $64$ & $1$:$29$:$39$\\
+$381593\_0$ & super-resolution, res $32$ & $2$:$23$:$08$\\
+$381593\_1$ & super-resolution, res $48$ & $2$:$26$:$42$\\
+$381593\_2$ & super-resolution, res $96$ & $4$:$23$:$10$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The three super-resolution tasks are independent and were submitted as an array; a two-GPU quota
+serialised part of it, so the elapsed figures exceed the critical path. Each task trains nine
+models, three arms at three seeds.
+
+\end{document}
