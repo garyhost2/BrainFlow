@@ -21,7 +21,7 @@ except Exception:
     pass
 
 P = argparse.ArgumentParser()
-P.add_argument("--part", default="both", choices=["theorem", "sr", "both"])
+P.add_argument("--part", default="both", choices=["theorem", "sr", "srthresh", "both"])
 P.add_argument("--out", default="runs/cluster")
 P.add_argument("--wandb", default="1")
 P.add_argument("--wandb_project", default="coupling-ledger")
@@ -32,6 +32,7 @@ P.add_argument("--thm_reps", type=int, default=4)
 P.add_argument("--thm_steps", type=int, default=2000)
 P.add_argument("--sr_res", default="32,48,96")
 P.add_argument("--sr_factor", type=int, default=4)
+P.add_argument("--sr_factors", default="2,3,4,6,8,12")
 P.add_argument("--sr_steps", type=int, default=20000)
 P.add_argument("--sr_batch", type=int, default=64)
 P.add_argument("--sr_base", type=int, default=64)
@@ -631,6 +632,129 @@ if ARGS.part in ("sr", "both"):
             a.legend(fontsize=7)
         save_fig("C2_sr.png")
     tock("sr")
+    flush_reg()
+
+
+if ARGS.part == "srthresh":
+    tick("srthresh")
+    FACS = [int(x) for x in ARGS.sr_factors.split(",")]
+    SEEDS = [int(x) for x in ARGS.sr_seeds.split(",")]
+    res = int(ARGS.sr_res.split(",")[0])
+    rows = []
+    (Xtr, Ytr), (Xte, Yte), nc = load_sr(res, ARGS.sr_root, ARGS.sr_data)
+    Xtr, Ytr = Xtr.to(DEV), Ytr.to(DEV)
+    Xte, Yte = Xte.to(DEV), Yte.to(DEV)
+
+    def _rank(M):
+        Mc = (M - M.mean(0, keepdim=True)).flatten(1).double()
+        ev = torch.linalg.eigvalsh(Mc @ Mc.T)
+        return int((ev > ev[-1] * 1e-10).sum())
+
+    for fac in FACS:
+        if res % fac != 0:
+            log(skipped_factor=fac, res=res, reason="res_not_divisible")
+            continue
+        r_pix = 3 * (res // fac) * (res // fac)
+        Z0te = down_up(Xte, fac)
+        null_t = float(((Xte - Z0te) ** 2).flatten(1).sum(1).mean())
+        id_psnr = psnr(Z0te, Xte)
+        n_rk = min(Xtr.shape[0], 4 * r_pix + 256, 3072)
+        rk = _rank(down_up(Xtr[:n_rk], fac))
+        log(factor=fac, res=res, r_pix=r_pix, measured_rank_z0=rk, rank_samples=n_rk,
+            measurable=int((n_rk - 1) > r_pix), identity_psnr=id_psnr,
+            null_energy_target=null_t, retained_fraction=1.0 / (fac * fac))
+        for seed in SEEDS:
+            nets = {}
+            for mode in ["reg", "m1", "m2"]:
+                nets[mode] = sr_train(mode, Xtr, Ytr, fac, ARGS.sr_steps, ARGS.sr_batch,
+                                      ARGS.sr_base, nc, seed, res)
+                nets[mode].eval()
+            with torch.no_grad():
+                outs = {"identity": Z0te}
+                outs["reg"] = torch.cat([
+                    nets["reg"](torch.cat([Z0te[i:i + 128], Z0te[i:i + 128]], 1),
+                                torch.zeros(min(128, Z0te.shape[0] - i), device=DEV),
+                                Yte[i:i + 128]) for i in range(0, Z0te.shape[0], 128)])
+                for mode in ["m1", "m2"]:
+                    outs[mode] = torch.cat([
+                        sr_sample(nets[mode], Z0te[i:i + 128], Yte[i:i + 128],
+                                  ARGS.sr_ode_k, mode == "m2")
+                        for i in range(0, Z0te.shape[0], 128)])
+            for nm, o in outs.items():
+                nrg = float(((o - down_up(o, fac)) ** 2).flatten(1).sum(1).mean())
+                pv = psnr(o, Xte)
+                rows.append(dict(res=res, factor=fac, retained=1.0 / (fac * fac), seed=seed,
+                                 arm=nm, psnr=pv, gain_over_identity=pv - id_psnr,
+                                 identity_psnr=id_psnr, null_ratio=nrg / max(null_t, 1e-12),
+                                 dist_to_target=float(((o - Xte) ** 2).flatten(1).sum(1).mean()),
+                                 rank_z0=rk, r_pix=r_pix))
+                log(factor=fac, seed=seed, arm=nm, psnr=pv,
+                    gain=rows[-1]["gain_over_identity"], null_ratio=rows[-1]["null_ratio"])
+            save_csv("sr_threshold.csv", rows)
+            flush_reg()
+    save_csv("sr_threshold.csv", rows)
+
+    FACD = sorted({r["factor"] for r in rows})
+
+    def tagg(fac, arm, key="psnr"):
+        v = [r[key] for r in rows if r["factor"] == fac and r["arm"] == arm]
+        return (float(np.mean(v)), float(np.std(v))) if v else (float("nan"), float("nan"))
+
+    gains, m1m2 = [], []
+    for fac in FACD:
+        g, gs = tagg(fac, "m1", "gain_over_identity")
+        d1 = tagg(fac, "m1")[0]
+        d2 = tagg(fac, "m2")[0]
+        gains.append(g)
+        m1m2.append(d1 - d2)
+        log(factor=fac, retained=1.0 / (fac * fac), identity=tagg(fac, "identity")[0],
+            reg=tagg(fac, "reg")[0], m1=d1, m2=d2, m1_gain=g, m1_gain_sd=gs,
+            m1_minus_m2=d1 - d2, m1_null=tagg(fac, "m1", "null_ratio")[0])
+        reg(f"srthresh_flow_beats_identity_f{fac}", g > 2 * max(gs, 1e-9),
+            "transporting an informative super-resolution source improves on retaining it "
+            "unchanged, which is the question the threshold answers in the synthetic setting",
+            gain=g, gain_sd=gs, factor=fac, retained=1.0 / (fac * fac))
+
+    if len(FACD) > 2:
+        mono = all(gains[i] <= gains[i + 1] for i in range(len(gains) - 1))
+        reg("srthresh_gain_grows_as_source_degrades", mono,
+            "the benefit of transporting the source grows as the source retains less of the "
+            "target, so source informativeness is the axis that decides whether the flow helps",
+            gains=str([round(x, 4) for x in gains]), factors=str(FACD))
+        crossed = [fac for fac, g in zip(FACD, gains) if g <= 0]
+        reg("srthresh_crossing_located", len(crossed) > 0,
+            "there is a source informative enough that transporting it no longer beats leaving "
+            "it alone, which is the super-resolution image of the threshold",
+            factors_without_benefit=str(crossed), all_factors=str(FACD),
+            smallest_gain=min(gains), at_factor=FACD[int(np.argmin(gains))])
+        reg("srthresh_m1_m2_sign_constant",
+            all(x > 0 for x in m1m2) or all(x < 0 for x in m1m2),
+            "the sign of the difference between starting at the source with and without "
+            "conditioning on it does not depend on how informative the source is",
+            gaps=str([round(x, 4) for x in m1m2]), factors=str(FACD))
+
+    if HAVE_MPL:
+      fig, ax = plt.subplots(1, 3, figsize=(14.5, 4.0))
+      for arm in ["identity", "reg", "m1", "m2"]:
+        mu = [tagg(fc, arm)[0] for fc in FACD]
+        sd = [tagg(fc, arm)[1] for fc in FACD]
+        ax[0].errorbar(FACD, mu, yerr=sd, fmt="o-", capsize=3, label=arm)
+        ax[1].plot(FACD, [tagg(fc, arm, "null_ratio")[0] for fc in FACD], "o-", label=arm)
+      ax[2].axhline(0, c="k", lw=0.8)
+      ax[2].errorbar(FACD, gains,
+                     yerr=[tagg(fc, "m1", "gain_over_identity")[1] for fc in FACD],
+                     fmt="o-", capsize=3, label="m1 - identity")
+      ax[2].plot(FACD, m1m2, "s--", label="m1 - m2")
+      ax[0].set_ylabel("PSNR")
+      ax[1].set_ylabel("null-space energy / target")
+      ax[1].axhline(1.0, ls="--", c="k", lw=1)
+      ax[2].set_ylabel("PSNR difference")
+      for a in ax:
+        a.set_xlabel("downsample factor (source degrades to the right)")
+        a.set_xscale("log", base=2)
+        a.legend(fontsize=7)
+      save_fig("C3_sr_threshold.png")
+    tock("srthresh")
     flush_reg()
 
 # %% [code]
