@@ -41,7 +41,7 @@ P.add_argument("--sr_seeds", default="0,1,2")
 P.add_argument("--sr_ode_k", type=int, default=32)
 P.add_argument("--sr_data", default="stl10", choices=["stl10","cifar10","synth"])
 P.add_argument("--sr_root", default="./data")
-P.add_argument("--os_model", default="runwayml/stable-diffusion-v1-5")
+P.add_argument("--os_model", default="sd-legacy/stable-diffusion-v1-5")
 P.add_argument("--os_clip", default="ViT-B-32")
 P.add_argument("--os_clip_ckpt", default="laion2b_s34b_b79k")
 P.add_argument("--os_n", type=int, default=64)
@@ -854,9 +854,25 @@ if ARGS.part == "offshelf":
         def degrade(p, f):
             return p.resize((R // f, R // f), Image.BICUBIC).resize((R, R), Image.NEAREST)
 
-        pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
-            ARGS.os_model, torch_dtype=torch.float16, safety_checker=None,
-            requires_safety_checker=False).to(DEV)
+        pipe = None
+        for mid in [ARGS.os_model, "stable-diffusion-v1-5/stable-diffusion-v1-5",
+                    "CompVis/stable-diffusion-v1-4"]:
+            try:
+                try:
+                    pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
+                        mid, torch_dtype=torch.float16, variant="fp16",
+                        safety_checker=None, requires_safety_checker=False)
+                except Exception:
+                    pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
+                        mid, torch_dtype=torch.float16,
+                        safety_checker=None, requires_safety_checker=False)
+                log(model_loaded=mid)
+                break
+            except Exception as e:
+                log(model_failed=mid, err=repr(e)[:150])
+        if pipe is None:
+            raise RuntimeError("no img2img checkpoint reachable from this node")
+        pipe = pipe.to(DEV)
         pipe.set_progress_bar_config(disable=True)
 
         rows = []

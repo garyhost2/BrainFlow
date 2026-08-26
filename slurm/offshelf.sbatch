@@ -18,11 +18,25 @@ source slurm/_env.sh
 
 echo "Node: $(hostname)"; nvidia-smi --query-gpu=name,memory.total --format=csv || true
 
-for pkg in diffusers transformers accelerate safetensors open_clip_torch; do
-    python -c "import ${pkg/open_clip_torch/open_clip}" 2>/dev/null && continue
-    echo "installing $pkg"
-    pip install -q "$pkg" || echo "WARN: $pkg install failed"
-done
+if ! python - <<'PYV'
+import sys
+try:
+    import diffusers, transformers, accelerate
+    ok = (diffusers.__version__.startswith("0.27")
+          and transformers.__version__.startswith("4.38")
+          and accelerate.__version__.startswith("0.27"))
+except Exception:
+    ok = False
+sys.exit(0 if ok else 1)
+PYV
+then
+    echo "pinning the diffusers stack to versions built for torch 2.1"
+    pip install -q "diffusers==0.27.2" "transformers==4.38.2" "accelerate==0.27.2" \
+        "huggingface_hub==0.23.5" "safetensors>=0.4.2" || echo "WARN: pin install failed"
+fi
+python -c "import open_clip" 2>/dev/null || pip install -q open_clip_torch
+python -c "import wandb" 2>/dev/null || pip install -q wandb || true
+python -c "import diffusers, transformers, accelerate; print('diffusers', diffusers.__version__, 'transformers', transformers.__version__, 'accelerate', accelerate.__version__)"
 
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 
@@ -35,4 +49,4 @@ python scripts/cluster_job.py --part offshelf \
     --wandb 1 --wandb_project coupling-ledger
 
 echo "offshelf done. results in runs/offshelf/results"
-grep -h '^reg=' logs/offshelf_${SLURM_JOB_ID}.out || true
+grep -h '^reg=\|^factor=\|model_' logs/offshelf_${SLURM_JOB_ID}.out || true
