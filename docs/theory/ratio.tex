@@ -1,0 +1,190 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,booktabs}
+\usepackage[colorlinks,linkcolor=blue!45!black]{hyperref}
+
+\newcommand{\T}{\mathsf{T}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\spn}{\operatorname{span}}
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+\newtheorem{measurement}{Measurement}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+
+\begin{document}
+
+\section*{Why the skew condition is the stiff one}
+
+Measurement~4.30 of the derivation document reports that at unit relative violation the
+endpoint map responds to a skew violation of hypothesis (i) by $0.647$ and to a symmetric
+off-span violation of hypothesis (ii) by $0.0982$, a ratio of $6.585$, and records the value as
+measured, not predicted. This note derives the mechanism, computes the constants in closed form
+in two tractable regimes, and shows that the ratio is not a universal constant: it diverges as
+the marginals homogenize, and its value for the sampled ensemble is set by the ensemble's own
+marginal separation.
+
+Throughout, $V(t)=(1-t)^2\Sigma_0+t(1-t)(C+C^{\T})+t^2\Sigma_1$,
+$G(t)=(1-t)(C^{\T}-\Sigma_0)+t(\Sigma_1-C)$, $K=GV^{-1}$, $\dot M=KM$, $M(0)=I$, and
+$\mathcal D(E)=M_0\int_0^1\Phi(t)^{-1}K_E(t)\Phi(t)\,dt$ is the first-order response of
+Proposition~4.28, with
+$K_E(t)=[(1-t)E^{\T}-tE]V_0(t)^{-1}-G_0(t)V_0(t)^{-1}[t(1-t)(E+E^{\T})]V_0(t)^{-1}$.
+Write $E=S_E+N_E$ for the symmetric and skew parts. The expansion point is any admissible
+symmetric coupling; hypotheses (i)--(ii) of Theorem~4.11 are not needed for the response formula.
+
+\begin{lemma}\label{lem:gv}
+For any symmetric coupling $C_0$, $\,G_0(t)=\tfrac12 V_0'(t)$.
+\end{lemma}
+
+\begin{proof}
+$V_0'=-2(1-t)\Sigma_0+2(1-2t)C_0+2t\Sigma_1
+=2\big[(1-t)(C_0-\Sigma_0)+t(\Sigma_1-C_0)\big]=2G_0$.
+\end{proof}
+
+\begin{proposition}[homogeneous marginals]\label{prop:homog}
+Let $\Sigma_0=\Sigma_1=\Sigma$ and $C_0=\kappa\Sigma$ with $\kappa$ admissible. Then $M_0=I$ and,
+for every perturbation $E$,
+\[
+\mathcal D(S_E)=0,
+\qquad
+\mathcal D(N_E)=-I_\kappa\,N_E\Sigma^{-1},
+\qquad
+I_\kappa=\int_0^1\frac{dt}{\omega_\kappa(t)},
+\quad
+\omega_\kappa(t)=1-2(1-\kappa)t(1-t),
+\]
+and for $\kappa<1$, with $\mu=2(1-\kappa)$,
+$I_\kappa=\tfrac{4}{\sqrt{\mu(4-\mu)}}\arctan\sqrt{\tfrac{\mu}{4-\mu}}\ \ge1$.
+In particular the symmetric response vanishes for \emph{every} symmetric direction, in or out of
+$\spn\{\Sigma_0,\Sigma_1\}$, while every skew direction responds at a rate bounded below by
+$\|N_E\Sigma^{-1}\|$.
+\end{proposition}
+
+\begin{proof}
+$V_0=\omega_\kappa\Sigma$ and, by Lemma~\ref{lem:gv}, $G_0=\tfrac12\omega_\kappa'\Sigma$, so
+$K_0=\tfrac12(\log\omega_\kappa)'\,I$ is scalar and $\Phi$ is a scalar multiple of the identity;
+$\int_0^1(\log\omega_\kappa)'=0$ gives $M_0=I$, and the conjugation by $\Phi$ in $\mathcal D$
+cancels, leaving $\mathcal D(E)=\int_0^1K_E\,dt$. For symmetric $E$,
+\[
+K_E=\Big[\frac{1-2t}{\omega_\kappa}
++(1-\kappa)\frac{2t(1-t)(1-2t)}{\omega_\kappa^{2}}\Big]\,E\Sigma^{-1},
+\]
+and both coefficients are odd under $t\mapsto1-t$ while $\omega_\kappa$ is even, so the integral
+vanishes. For skew $E=N$, $(1-t)E^{\T}-tE=-N$ and $E+E^{\T}=0$, so
+$K_E=-N\Sigma^{-1}/\omega_\kappa$ and the second statement follows. The closed form is the
+standard integral of the reciprocal quadratic.
+\end{proof}
+
+\begin{proposition}[commuting model, pairwise action]\label{prop:pair}
+Let $\Sigma_0=\mathrm{diag}(a)$, $\Sigma_1=\mathrm{diag}(b)$, and $C_0=\mathrm{diag}(s)$
+admissible, and write $v_i(t)=(1-t)^2a_i+2t(1-t)s_i+t^2b_i$. Then
+$\Phi(t)=\mathrm{diag}\sqrt{v_i(t)/a_i}$, $M_0=\mathrm{diag}\sqrt{b_i/a_i}$, and for any
+perturbation with pairwise parts $p_{ij}=\tfrac12(E_{ij}+E_{ji})$,
+$q_{ij}=\tfrac12(E_{ij}-E_{ji})$,
+\[
+\mathcal D(E)_{ij}
+=\sqrt{\tfrac{b_i}{a_j}}\,\big(p_{ij}\,\mathcal A_{ij}-q_{ij}\,\mathcal B_{ij}\big),
+\qquad
+\mathcal B_{ij}=\int_0^1\frac{dt}{\sqrt{v_iv_j}}\;>0,
+\]
+\[
+\mathcal A_{ij}
+=\int_0^1\frac{(1-2t)-t(1-t)(\log v_i)'}{\sqrt{v_iv_j}}\,dt
+\;=\;-\frac12\int_0^1 t(1-t)\,\big(\log\tfrac{v_i}{v_j}\big)'(t)\,
+\frac{dt}{\sqrt{v_iv_j}}.
+\]
+\end{proposition}
+
+\begin{proof}
+Lemma~\ref{lem:gv} gives $K_0=\tfrac12 V_0'V_0^{-1}$, diagonal, so
+$\varphi_i=\sqrt{v_i/a_i}$ and $M_0$ as stated. Entrywise, with $V_0,G_0$ diagonal,
+\[
+K_E(t)_{ij}
+=\frac{(1-t)E_{ji}-tE_{ij}}{v_j}
+-\frac{v_i'}{2v_i}\cdot\frac{2t(1-t)\,p_{ij}}{v_j}
+=\Big[(1-2t)-t(1-t)(\log v_i)'\Big]\frac{p_{ij}}{v_j}-\frac{q_{ij}}{v_j},
+\]
+and $(\Phi^{-1}K_E\Phi)_{ij}=K_{E,ij}\,\varphi_j/\varphi_i$ with
+$\varphi_j/\varphi_i=\sqrt{a_iv_j/(a_jv_i)}$; multiplying by $(M_0)_i$ gives the display. For the
+second form of $\mathcal A_{ij}$, note
+$\big[(1-2t)-t(1-t)(\log v_i)'\big]/v_i=\tfrac{d}{dt}\big[t(1-t)/v_i\big]$, so the first form is
+$\int_0^1\sqrt{v_i/v_j}\;\tfrac{d}{dt}\big[t(1-t)/v_i\big]dt$; integrate by parts, the boundary
+term vanishes at both ends, and
+$\tfrac{d}{dt}\sqrt{v_i/v_j}=\tfrac12\sqrt{v_i/v_j}\,(\log(v_i/v_j))'$.
+\end{proof}
+
+\begin{corollary}\label{cor:supp}
+$\mathcal A_{ij}=0$ whenever $v_i\equiv\lambda v_j$ for a constant $\lambda$ --- in particular on
+the diagonal $i=j$, for homogeneous marginals, and for any pair with
+$(b_i,s_i)/a_i=(b_j,s_j)/a_j$. In general
+\[
+|\mathcal A_{ij}|\;\le\;\frac18\,\sup_{t}\big|\big(\log\tfrac{v_i}{v_j}\big)'(t)\big|\;
+\mathcal B_{ij},
+\qquad\text{hence}\qquad
+\frac{\mathcal B_{ij}}{|\mathcal A_{ij}|}\;\ge\;
+\frac{8}{\sup_t\big|\big(\log\tfrac{v_i}{v_j}\big)'\big|}.
+\]
+\end{corollary}
+
+\begin{remark}\label{rem:mech}
+The mechanism is now visible. The skew response integrates the kernel $1/\sqrt{v_iv_j}$, which is
+strictly positive on all of $[0,1]$: no cancellation is possible. The symmetric response
+integrates the same kernel multiplied by two suppression factors: the window $t(1-t)\le\tfrac14$,
+vanishing at both endpoints, and the rate at which the two interpolant variances separate,
+$(\log(v_i/v_j))'$, which vanishes identically when the marginals are homogeneous. A symmetric
+perturbation moves the endpoint map only through the \emph{variance} channel, which the parity of
+the clean flow cancels except insofar as coordinates traverse different variance profiles; a skew
+perturbation enters the \emph{drift} directly. The ratio of the two responses is therefore of
+order $8/\delta$ with $\delta$ the typical log-variance mismatch rate, which for independent
+Wishart marginals is order one --- giving a ratio of several, not of orders of magnitude, and not
+a universal constant.
+\end{remark}
+
+\begin{measurement}\label{meas:ratio}
+All checks in float64 against the same second-order integrator as Measurement~4.30
+(\texttt{notebooks/ratio\_proof.py}, register \texttt{runs/ratio/results}).
+(1)~The pairwise formulas of Proposition~\ref{prop:pair} match the finite-differenced endpoint
+map over $33$ random pair perturbations to maximum relative error $1.3\times10^{-6}$; the two
+forms of $\mathcal A_{ij}$ agree to $2.8\times10^{-17}$. (2)~On engineered pairs with
+proportional variance profiles the measured symmetric response is below $9.1\times10^{-9}$, as
+Corollary~\ref{cor:supp} requires, including off-span directions. (3)~With homogeneous
+non-commuting marginals the response to a random symmetric perturbation is $3.5\times10^{-10}$
+while the skew response in the same setup is $1.54$, matching
+$-I_\kappa N\Sigma^{-1}$ to relative error $3.2\times10^{-9}$ ($\kappa=0.85$,
+$I_\kappa=1.0532$). (4)~Interpolating the second marginal toward the first,
+$\Sigma_1(\delta)=\Sigma_0+\delta(\Sigma_1-\Sigma_0)$ on the paper's ensemble ($n=16$, $64$
+systems, median response per unit violation at relative violation $0.05$):
+\begin{center}
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+$\delta$ & $0.05$ & $0.1$ & $0.2$ & $0.4$ & $0.7$ & $1.0$\\
+\midrule
+skew/span ratio & $76.8$ & $42.0$ & $24.2$ & $14.6$ & $10.1$ & $7.8$\\
+\bottomrule
+\end{tabular}
+\end{center}
+The fitted log-log slope is $-0.756$ with rms residual $0.017$; the first-order prediction for
+the $\delta\to0$ limit is slope $-1$ (span response linear in $\delta$, skew response $O(1)$),
+and the milder measured slope over this window reflects the slow decline of the skew constant
+itself with separation ($1.37$ at $\delta=0.05$ to $0.82$ at $\delta=1$). At the ensemble's own
+separation ($\delta=1$) the sweep gives $7.8$, against $6.585$ from the regression-intercept
+estimator of Measurement~4.30 at dimensions $2$--$64$.
+\end{measurement}
+
+\begin{remark}
+Consequences. First, the sentence ``measured, not predicted'' should be replaced: the ratio is
+the quotient of two response constants whose structure is given by
+Propositions~\ref{prop:homog}--\ref{prop:pair}, the span response carrying the double suppression
+of Corollary~\ref{cor:supp} and the skew response none. Second, the value $6.585$ is a property
+of the sampled ensemble at its own marginal separation; it grows without bound as the marginals
+homogenize, so no universal constant should be claimed, and the registered contradiction ``skew
+and span equally fragile'' is thereby explained rather than merely recorded. Third, in the
+near-homogeneous regime the operative content of Theorem~4.11 is the skew condition alone: the
+span condition is soft there, failing only at second order in the marginal mismatch.
+\end{remark}
+
+\end{document}
