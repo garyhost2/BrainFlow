@@ -22,8 +22,10 @@ OUT = "/kaggle/working/ledger6" if os.path.isdir("/kaggle/working") else "runs/l
 os.makedirs(os.path.join(OUT, "figures"), exist_ok=True)
 os.makedirs(os.path.join(OUT, "results"), exist_ok=True)
 
-STAGES = ["flat", "sigflat", "core", "grid", "noise", "fix", "metric",
-          "threshold", "guidance", "discrete", "scaling", "lr2", "real"]
+STAGES = os.environ.get(
+    "LEDGER_STAGES",
+    "flat,sigflat,core,grid,noise,fix,metric,threshold,guidance,discrete,scaling,lr2,real"
+).split(",")
 
 D_OP, A_OP, BETA_OP, J_OP = 256, 0.37, 0.8, 0.15
 STEPS = 600 if FAST else 3000
