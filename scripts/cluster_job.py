@@ -21,7 +21,8 @@ except Exception:
     pass
 
 P = argparse.ArgumentParser()
-P.add_argument("--part", default="both", choices=["theorem", "sr", "srthresh", "both"])
+P.add_argument("--part", default="both",
+               choices=["theorem", "sr", "srthresh", "offshelf", "both"])
 P.add_argument("--out", default="runs/cluster")
 P.add_argument("--wandb", default="1")
 P.add_argument("--wandb_project", default="coupling-ledger")
@@ -40,6 +41,16 @@ P.add_argument("--sr_seeds", default="0,1,2")
 P.add_argument("--sr_ode_k", type=int, default=32)
 P.add_argument("--sr_data", default="stl10", choices=["stl10","cifar10","synth"])
 P.add_argument("--sr_root", default="./data")
+P.add_argument("--os_model", default="runwayml/stable-diffusion-v1-5")
+P.add_argument("--os_clip", default="ViT-B-32")
+P.add_argument("--os_clip_ckpt", default="laion2b_s34b_b79k")
+P.add_argument("--os_n", type=int, default=64)
+P.add_argument("--os_factors", default="2,4,8,16")
+P.add_argument("--os_strengths", default="0.1,0.2,0.3,0.4,0.5,0.6,0.8")
+P.add_argument("--os_steps", type=int, default=30)
+P.add_argument("--os_batch", type=int, default=16)
+P.add_argument("--os_res", type=int, default=512)
+P.add_argument("--os_seeds", default="0,1,2")
 ARGS = P.parse_args() if len(sys.argv) > 1 else P.parse_args([])
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -811,6 +822,143 @@ if ARGS.part == "srthresh":
         a.legend(fontsize=7)
       save_fig("C3_sr_threshold.png")
     tock("srthresh")
+    flush_reg()
+
+# %% [code]
+if ARGS.part == "offshelf":
+    tick("offshelf")
+    try:
+        import torchvision
+        from torchvision import transforms as T
+        from diffusers import StableDiffusionImg2ImgPipeline
+        import open_clip
+        from PIL import Image
+
+        FACS = [int(x) for x in ARGS.os_factors.split(",")]
+        STR = [float(x) for x in ARGS.os_strengths.split(",")]
+        SEEDS = [int(x) for x in ARGS.os_seeds.split(",")]
+        R = ARGS.os_res
+
+        clip_m, _, clip_pre = open_clip.create_model_and_transforms(
+            ARGS.os_clip, pretrained=ARGS.os_clip_ckpt)
+        clip_m = clip_m.to(DEV).eval()
+
+        @torch.no_grad()
+        def emb(pils):
+            out = []
+            for i in range(0, len(pils), 64):
+                x = torch.stack([clip_pre(p) for p in pils[i:i + 64]]).to(DEV)
+                out.append(F.normalize(clip_m.encode_image(x).float(), dim=-1))
+            return torch.cat(out)
+
+        ds = torchvision.datasets.STL10(root=ARGS.sr_root, split="test", download=True)
+        names = ["airplane", "bird", "car", "cat", "deer", "dog", "horse", "monkey",
+                 "ship", "truck"]
+        idx = np.random.default_rng(0).choice(len(ds), ARGS.os_n, replace=False)
+        clean = [ds[int(i)][0].convert("RGB").resize((R, R), Image.BICUBIC) for i in idx]
+        labels = [int(ds[int(i)][1]) for i in idx]
+        prompts = [f"a photo of a {names[y]}" for y in labels]
+        Zc = emb(clean)
+
+        def degrade(p, f):
+            return p.resize((R // f, R // f), Image.BICUBIC).resize((R, R), Image.NEAREST)
+
+        pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
+            ARGS.os_model, torch_dtype=torch.float16, safety_checker=None,
+            requires_safety_checker=False).to(DEV)
+        pipe.set_progress_bar_config(disable=True)
+
+        rows = []
+        for f in FACS:
+            src = [degrade(p, f) for p in clean]
+            base = float((emb(src) * Zc).sum(-1).mean())
+            log(factor=f, do_nothing=base, retained=1.0 / (f * f))
+            rows.append(dict(factor=f, strength=0.0, seed=-1, arm="do_nothing",
+                             align=base, do_nothing=base, gain=0.0))
+            for s in STR:
+                for sd in SEEDS:
+                    outs = []
+                    for i in range(0, len(src), ARGS.os_batch):
+                        g = torch.Generator(device=DEV).manual_seed(1000 * sd + i)
+                        outs += pipe(prompt=prompts[i:i + ARGS.os_batch],
+                                     image=src[i:i + ARGS.os_batch],
+                                     strength=s, guidance_scale=7.5,
+                                     num_inference_steps=ARGS.os_steps,
+                                     generator=g).images
+                    a = float((emb(outs) * Zc).sum(-1).mean())
+                    rows.append(dict(factor=f, strength=s, seed=sd, arm="sdedit",
+                                     align=a, do_nothing=base, gain=a - base))
+                    log(factor=f, strength=s, seed=sd, align=a, gain=a - base)
+                save_csv("offshelf.csv", rows)
+                flush_reg()
+        save_csv("offshelf.csv", rows)
+
+        def oagg(f, s):
+            v = [r["gain"] for r in rows if r["factor"] == f and r["strength"] == s
+                 and r["arm"] == "sdedit"]
+            return (float(np.mean(v)), float(np.std(v)) / math.sqrt(max(len(v), 1))) if v \
+                else (float("nan"), float("nan"))
+
+        cross = {}
+        for f in FACS:
+            xs = [0.0] + STR
+            ys = [0.0] + [oagg(f, s)[0] for s in STR]
+            c = float("nan")
+            for i in range(1, len(xs)):
+                if ys[i - 1] <= 0 < ys[i]:
+                    c = xs[i - 1] + (xs[i] - xs[i - 1]) * (-ys[i - 1]) / (ys[i] - ys[i - 1])
+                    break
+            cross[f] = c
+            log(factor=f, crossing_strength=c,
+                best_gain=max(oagg(f, s)[0] for s in STR))
+
+        for f in FACS:
+            g_hi, se_hi = oagg(f, STR[-1])
+            reg(f"offshelf_transport_helps_at_f{f}", g_hi > 2 * max(se_hi, 1e-9),
+                "on a pretrained image-to-image system we did not train, running the transport "
+                "beats returning the degraded source once the source is uninformative enough",
+                factor=f, gain=g_hi, gain_se=se_hi, strength=STR[-1],
+                do_nothing=[r for r in rows if r["factor"] == f
+                            and r["arm"] == "do_nothing"][0]["align"])
+
+        mild, harsh = FACS[0], FACS[-1]
+        gm = max(oagg(mild, s)[0] for s in STR)
+        sem = max(oagg(mild, s)[1] for s in STR)
+        reg("offshelf_do_nothing_regime_exists", gm < 2 * max(sem, 1e-9),
+            "at the mildest degradation no tested transport strength beats leaving the source "
+            "alone, so the do-nothing regime is reachable in a deployed system and not an "
+            "artefact of the synthetic model",
+            factor=mild, best_gain=gm, best_gain_se=sem)
+
+        fin = [(f, cross[f]) for f in FACS if np.isfinite(cross[f])]
+        mono = all(fin[i][1] >= fin[i + 1][1] for i in range(len(fin) - 1))
+        reg("offshelf_crossing_moves_with_informativeness", len(fin) > 1 and mono,
+            "the strength at which transport starts to pay decreases as the source carries less "
+            "of the target, which is the direction the threshold predicts",
+            crossings=str({k: round(v, 3) for k, v in cross.items()}),
+            n_finite=len(fin))
+
+        if HAVE_MPL:
+            fig, ax = plt.subplots(1, 2, figsize=(11.0, 4.0))
+            for f in FACS:
+                mu = [oagg(f, s)[0] for s in STR]
+                se = [oagg(f, s)[1] for s in STR]
+                ax[0].errorbar(STR, mu, yerr=se, fmt="o-", capsize=3, label=f"factor {f}")
+            ax[0].axhline(0, c="k", lw=0.8)
+            ax[0].set_xlabel("SDEdit strength (transport applied)")
+            ax[0].set_ylabel("CLIP alignment gain over doing nothing")
+            ax[0].legend(fontsize=7)
+            fin_f = [f for f in FACS if np.isfinite(cross[f])]
+            ax[1].plot(fin_f, [cross[f] for f in fin_f], "o-")
+            ax[1].set_xlabel("downsample factor (source degrades to the right)")
+            ax[1].set_ylabel("strength where transport starts to pay")
+            ax[1].set_xscale("log", base=2)
+            save_fig("C4_offshelf.png")
+    except Exception as e:
+        reg("offshelf_ran", False,
+            "diffusers, open_clip and the pretrained checkpoint are reachable on the node",
+            err=repr(e)[:300])
+    tock("offshelf")
     flush_reg()
 
 # %% [code]
