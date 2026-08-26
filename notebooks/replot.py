@@ -29,6 +29,9 @@ def load(name):
     rows = list(csv.DictReader(open(p)))
     for r in rows:
         for k, v in list(r.items()):
+            if v is None or v == "":
+                r[k] = float("nan")
+                continue
             try:
                 r[k] = float(v)
             except (TypeError, ValueError):
@@ -81,9 +84,13 @@ def beta_star(A, j):
 
 
 def crossing(xs, ys):
-    for i in range(1, len(xs)):
-        if ys[i - 1] <= 0 < ys[i]:
-            return xs[i - 1] + (xs[i] - xs[i - 1]) * (-ys[i - 1]) / (ys[i] - ys[i - 1])
+    pts = [(x, y) for x, y in zip(xs, ys)
+           if isinstance(x, (int, float)) and isinstance(y, (int, float))
+           and np.isfinite(x) and np.isfinite(y)]
+    for i in range(1, len(pts)):
+        (x0, y0), (x1, y1) = pts[i - 1], pts[i]
+        if y0 <= 0 < y1:
+            return x0 + (x1 - x0) * (-y0) / (y1 - y0)
     return float("nan")
 
 
