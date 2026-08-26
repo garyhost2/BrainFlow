@@ -443,29 +443,21 @@ def energy_dist(x, y):
                  - torch.cdist(y, y).sum() / max(1, ny * (ny - 1)))
 
 
-def knn_cov(real, fake, k=5):
-    k = min(k, real.shape[0] - 1)
-    dr = torch.cdist(real, real)
-    dr.fill_diagonal_(float("inf"))
-    rad = dr.topk(k, largest=False).values[:, -1]
-    return float((torch.cdist(real, fake) < rad[:, None]).any(1).float().mean())
 
 
 @torch.no_grad()
 def sr_dist(o, Xte, f):
     def hf(x):
         return ((x - down_up(x, f)) ** 2).flatten(1).sum(1)
-    fo = F.adaptive_avg_pool2d(o, 8).flatten(1).double()
-    ft = F.adaptive_avg_pool2d(Xte, 8).flatten(1).double()
+    ro = (o - down_up(o, f)).flatten(1).float()
+    rt = (Xte - down_up(Xte, f)).flatten(1).float()
     g = torch.Generator().manual_seed(0)
     p = torch.randperm(Xte.shape[0], generator=g).to(Xte.device)
     a, b = p[: p.shape[0] // 2], p[p.shape[0] // 2:]
     return dict(w1_hf=w1_sorted(hf(o), hf(Xte)),
                 w1_hf_null=w1_sorted(hf(Xte[a]), hf(Xte[b])),
-                energy8=energy_dist(fo, ft),
-                energy8_null=energy_dist(ft[a], ft[b]),
-                cov8=knn_cov(ft, fo),
-                cov8_null=knn_cov(ft[a], ft[b]))
+                energy_r=energy_dist(ro, rt),
+                energy_r_null=energy_dist(rt[a], rt[b]))
 
 
 def load_sr(res, root, name):
@@ -617,7 +609,7 @@ if ARGS.part in ("sr", "both"):
                                  **sr_dist(o, Xte, f)))
                 log(res=res, seed=seed, arm=nm, psnr=rows[-1]["psnr"],
                     null_ratio=rows[-1]["null_ratio"], dist_to_reg=d_reg, dist_to_target=d_tgt,
-                    energy8=rows[-1]["energy8"], cov8=rows[-1]["cov8"],
+                    energy_r=rows[-1]["energy_r"], energy_r_null=rows[-1]["energy_r_null"],
                     w1_hf=rows[-1]["w1_hf"])
             save_csv("sr.csv", rows)
             flush_reg()
@@ -660,22 +652,21 @@ if ARGS.part in ("sr", "both"):
             "conditioning on the source while also starting there is harmful in the flat "
             "restoration setting, as the amplification argument predicts",
             m1=m1p, m1_sd=m1s, m2=m2p, m2_sd=m2s, res=res)
-        e1, e1s = sagg(res, "m1", "energy8")
-        e2, e2s = sagg(res, "m2", "energy8")
-        c1v = sagg(res, "m1", "cov8")[0]
-        c2v = sagg(res, "m2", "cov8")[0]
-        en = sagg(res, "m1", "energy8_null")[0]
-        cn = sagg(res, "m1", "cov8_null")[0]
-        log(res=res, m1_energy8=e1, m2_energy8=e2, m1_cov8=c1v, m2_cov8=c2v,
-            energy8_null=en, cov8_null=cn,
-            m1_w1_hf=sagg(res, "m1", "w1_hf")[0], m2_w1_hf=sagg(res, "m2", "w1_hf")[0],
-            w1_hf_null=sagg(res, "m1", "w1_hf_null")[0])
-        reg(f"sr_dist_ordering_res{res}", e1 < e2 - max(e1s, e2s) and c1v > c2v,
+        e1, e1s = sagg(res, "m1", "energy_r")
+        e2, e2s = sagg(res, "m2", "energy_r")
+        en = sagg(res, "m1", "energy_r_null")[0]
+        w1m1, w1s1 = sagg(res, "m1", "w1_hf")
+        w1m2, w1s2 = sagg(res, "m2", "w1_hf")
+        log(res=res, m1_energy_r=e1, m2_energy_r=e2, energy_r_null=en,
+            m1_w1_hf=w1m1, m2_w1_hf=w1m2, w1_hf_null=sagg(res, "m1", "w1_hf_null")[0],
+            identity_energy_r=sagg(res, "identity", "energy_r")[0])
+        reg(f"sr_dist_ordering_res{res}",
+            e1 < e2 - max(e1s, e2s) and w1m1 < w1m2 - max(w1s1, w1s2),
             "where the source-conditioned arm scores higher on the single-target metric it fits "
-            "the restoration distribution worse, so the score reversal is the mean-seeking "
+            "the distribution of restored detail worse, so the score reversal is the mean-seeking "
             "inversion of the metric and not a better restoration",
-            m1_energy8=e1, m2_energy8=e2, m1_cov8=c1v, m2_cov8=c2v,
-            energy8_null=en, cov8_null=cn, res=res)
+            m1_energy_r=e1, m2_energy_r=e2, energy_r_null=en,
+            m1_w1_hf=w1m1, m2_w1_hf=w1m2, res=res)
     signs = [sagg(r, "m1")[0] - sagg(r, "m2")[0] for r in RESL]
     reg("sr_effect_persists_across_resolution",
         all(s > 0 for s in signs) or all(s < 0 for s in signs),
