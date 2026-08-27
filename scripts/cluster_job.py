@@ -110,7 +110,8 @@ def save_fig(name):
     if not HAVE_MPL:
         return
     p = os.path.join(OUT, "figures", name)
-    plt.savefig(p, dpi=150, bbox_inches="tight")
+    plt.savefig(p, dpi=200, bbox_inches="tight")
+    plt.savefig(os.path.splitext(p)[0] + ".pdf", bbox_inches="tight")
     plt.close()
     if WB is not None:
         try:
