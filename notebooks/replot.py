@@ -123,56 +123,72 @@ if bs and gd and cap:
                 key=lambda r: r["beta"])
     bgrid = [r["beta"] for r in op]
     bfine = np.linspace(0, 0.95, 200)
-    ax[0].plot(bfine, [law_markov(A_OP, b) for b in bfine], "-", lw=1.5,
-               label="population landing (analytic)")
-    ax[0].plot(bfine, [ladder_src(A_OP, b, J_OP) for b in bfine], "--", lw=1.5,
-               label="do nothing (analytic)")
-    ax[0].plot(bgrid, [r["flow"] for r in op], "o", ms=5,
-               label="population field (measured)")
-    ax[0].plot(bgrid, [r["identity"] for r in op], "s", ms=5, label="do nothing (measured)")
     bst = beta_star(A_OP, J_OP)
-    ax[0].axvline(bst, c="k", lw=0.8, ls=":")
-    ax[0].annotate(f"$\\beta^\\star={bst:.3f}$", xy=(bst, law_markov(A_OP, bst)),
-                   xytext=(bst - 0.30, 0.335), fontsize=8.5,
-                   arrowprops=dict(arrowstyle="-", lw=0.7, color="k",
-                                   shrinkA=0, shrinkB=4))
-    ax[0].set_xlabel("$\\beta$")
-    ax[0].set_ylabel("expected target alignment")
-    ax[0].legend(fontsize=6.5)
     emp = crossing(bgrid, [r["delta"] for r in op])
     ANSWERS["operating_point_threshold"] = dict(analytic=bst, empirical=emp)
-
-    for lr, m in zip(LRS, ["o", "s", "^"]):
-        gaps, ses = [], []
-        for w in WIDTHS:
-            m1, s1, _ = cagg(lr, "c1", w)
-            m2, s2, _ = cagg(lr, "c2", w)
-            gaps.append(m1 - m2)
-            ses.append(math.sqrt(s1 ** 2 + s2 ** 2))
-        ax[1].errorbar(WIDTHS, gaps, yerr=ses, fmt=m + "-", capsize=3, label=f"$\\eta$={lr:g}")
-    ax[1].axhline(0, c="k", lw=0.8)
-    ax[1].set_xscale("log", base=2)
-    ax[1].set_xlabel("width")
-    ax[1].set_ylabel("marginal $-$ source-conditioned")
-    ax[1].legend(fontsize=7)
-
     lams = sorted({r["lam"] for r in gd})
-    for w in [2.0, 3.0]:
-        mus = [float(np.mean([r["dfid"] for r in gd if r["lam"] == l and r["w"] == w]))
-               for l in lams]
-        sds = [float(np.std([r["dfid"] for r in gd if r["lam"] == l and r["w"] == w]))
-               for l in lams]
-        ax[2].errorbar(lams, mus, yerr=sds, fmt="o-", capsize=3, label=f"w={w:g}")
-        if w == 3.0:
-            lam0 = crossing(lams, [-m for m in mus])
-            ANSWERS["guidance_zero_crossing_lambda_w3"] = lam0
-            ax[2].axvline(lam0, c="k", lw=0.8, ls=":")
-            ax[2].annotate(f"$\\lambda_0$={lam0:.2f}", (lam0, 0.02), fontsize=8)
-    ax[2].axhline(0, c="k", lw=0.8)
-    ax[2].set_xlabel("source informativeness $\\lambda$")
-    ax[2].set_ylabel("guidance gain in target cosine")
-    ax[2].legend(fontsize=7)
+    mus3 = [float(np.mean([r["dfid"] for r in gd if r["lam"] == l and r["w"] == 3.0]))
+            for l in lams]
+    lam0 = crossing(lams, [-m for m in mus3])
+    ANSWERS["guidance_zero_crossing_lambda_w3"] = lam0
+
+    # each panel is drawn by its own function so the three can be emitted standalone as
+    # well as composed; fs scales the text when a panel is used on its own
+    def panel_a(a, fs=0):
+        a.plot(bfine, [law_markov(A_OP, b) for b in bfine], "-", lw=1.5,
+               label="population landing (analytic)")
+        a.plot(bfine, [ladder_src(A_OP, b, J_OP) for b in bfine], "--", lw=1.5,
+               label="do nothing (analytic)")
+        a.plot(bgrid, [r["flow"] for r in op], "o", ms=5,
+               label="population field (measured)")
+        a.plot(bgrid, [r["identity"] for r in op], "s", ms=5, label="do nothing (measured)")
+        a.axvline(bst, c="k", lw=0.8, ls=":")
+        a.annotate(f"$\\beta^\\star={bst:.3f}$", xy=(bst, law_markov(A_OP, bst)),
+                   xytext=(bst - 0.30, 0.335), fontsize=8.5 + fs,
+                   arrowprops=dict(arrowstyle="-", lw=0.7, color="k", shrinkA=0, shrinkB=4))
+        a.set_xlabel("$\\beta$", fontsize=10 + fs)
+        a.set_ylabel("expected target alignment", fontsize=10 + fs)
+        a.legend(fontsize=6.5 + fs)
+
+    def panel_b(a, fs=0):
+        for lr, m in zip(LRS, ["o", "s", "^"]):
+            gaps, ses = [], []
+            for w in WIDTHS:
+                m1, s1, _ = cagg(lr, "c1", w)
+                m2, s2, _ = cagg(lr, "c2", w)
+                gaps.append(m1 - m2)
+                ses.append(math.sqrt(s1 ** 2 + s2 ** 2))
+            a.errorbar(WIDTHS, gaps, yerr=ses, fmt=m + "-", capsize=3, label=f"$\\eta$={lr:g}")
+        a.axhline(0, c="k", lw=0.8)
+        a.set_xscale("log", base=2)
+        a.set_xlabel("width", fontsize=10 + fs)
+        a.set_ylabel("marginal $-$ source-conditioned", fontsize=10 + fs)
+        a.legend(fontsize=7 + fs)
+
+    def panel_c(a, fs=0):
+        for w in [2.0, 3.0]:
+            mus = [float(np.mean([r["dfid"] for r in gd if r["lam"] == l and r["w"] == w]))
+                   for l in lams]
+            sds = [float(np.std([r["dfid"] for r in gd if r["lam"] == l and r["w"] == w]))
+                   for l in lams]
+            a.errorbar(lams, mus, yerr=sds, fmt="o-", capsize=3, label=f"w={w:g}")
+        a.axvline(lam0, c="k", lw=0.8, ls=":")
+        a.annotate(f"$\\lambda_0$={lam0:.2f}", (lam0, 0.02), fontsize=8 + fs)
+        a.axhline(0, c="k", lw=0.8)
+        a.set_xlabel("source informativeness $\\lambda$", fontsize=10 + fs)
+        a.set_ylabel("guidance gain in target cosine", fontsize=10 + fs)
+        a.legend(fontsize=7 + fs)
+
+    for fn, aa in zip((panel_a, panel_b, panel_c), ax):
+        fn(aa)
     save("fig1_main")
+
+    for nm, fn in [("fig1a_threshold", panel_a), ("fig1b_capacity", panel_b),
+                   ("fig1c_guidance", panel_c)]:
+        fg, aa = plt.subplots(figsize=(4.8, 3.7))
+        fn(aa, fs=1)
+        fg.tight_layout()
+        save(nm)
 
 # %% [code]
 if bs:
