@@ -131,8 +131,10 @@ if bs and gd and cap:
     ax[0].plot(bgrid, [r["identity"] for r in op], "s", ms=5, label="do nothing (measured)")
     bst = beta_star(A_OP, J_OP)
     ax[0].axvline(bst, c="k", lw=0.8, ls=":")
-    ax[0].annotate(f"$\\beta^\\star$={bst:.3f}", (bst, ax[0].get_ylim()[0]),
-                   xytext=(bst + 0.02, 0.30), fontsize=8)
+    ax[0].annotate(f"$\\beta^\\star={bst:.3f}$", xy=(bst, law_markov(A_OP, bst)),
+                   xytext=(bst - 0.30, 0.335), fontsize=8.5,
+                   arrowprops=dict(arrowstyle="-", lw=0.7, color="k",
+                                   shrinkA=0, shrinkB=4))
     ax[0].set_xlabel("$\\beta$")
     ax[0].set_ylabel("expected target alignment")
     ax[0].legend(fontsize=6.5)
