@@ -274,7 +274,11 @@ if gd:
                                       dfid=r["dfid"], fid=r["fid"]) for r in gd]
 
 # %% [code]
-with open(os.path.join(OUT, "answers.json"), "w") as f:
-    json.dump(ANSWERS, f, indent=1, default=float)
-print(f"\nanswers.json + figures -> {OUT}")
-print("send: fig1_main.pdf, fig_threshold_map.pdf, fig_diversity.pdf, answers.json")
+if ANSWERS:
+    with open(os.path.join(OUT, "answers.json"), "w") as f:
+        json.dump(ANSWERS, f, indent=1, default=float)
+    print(f"\nanswers.json + figures -> {OUT}")
+    print("send: fig1_main.pdf, fig_threshold_map.pdf, fig_diversity.pdf, answers.json")
+else:
+    print("\nnothing was produced: none of the input csvs were found, so no answers.json "
+          "is written. point this at a directory containing the ledger6 results.")
