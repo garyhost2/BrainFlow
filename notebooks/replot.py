@@ -127,7 +127,8 @@ if bs and gd and cap:
                label="population landing (analytic)")
     ax[0].plot(bfine, [ladder_src(A_OP, b, J_OP) for b in bfine], "--", lw=1.5,
                label="do nothing (analytic)")
-    ax[0].plot(bgrid, [r["flow"] for r in op], "o", ms=5, label="flow (measured)")
+    ax[0].plot(bgrid, [r["flow"] for r in op], "o", ms=5,
+               label="population field (measured)")
     ax[0].plot(bgrid, [r["identity"] for r in op], "s", ms=5, label="do nothing (measured)")
     bst = beta_star(A_OP, J_OP)
     ax[0].axvline(bst, c="k", lw=0.8, ls=":")
@@ -200,11 +201,20 @@ if bs:
     print(f"max abs err over {len(both)} cells with j>0: "
           f"{ANSWERS['threshold_max_abs_err']:.4f}")
 
+    sgn = [t["meas"] - t["pred"] for t in both]
+    ANSWERS["threshold_mean_signed_error"] = float(np.mean(sgn))
+    ANSWERS["threshold_cells_measured_above"] = int(sum(1 for s in sgn if s > 0))
+    print(f"measured above analytic in {ANSWERS['threshold_cells_measured_above']}"
+          f"/{len(sgn)} cells; mean signed error {np.mean(sgn):+.4f}")
+
     fig, ax = plt.subplots(figsize=(6.2, 3.9))
     for j in J_G:
         Afine = np.linspace(min(A_G), max(A_G), 200)
         ax.plot(Afine, [beta_star(A, j) for A in Afine], "-", lw=1.2)
-        pts = [t for t in tab if t["j"] == j and np.isfinite(t["meas"])]
+        # only cells where the criterion says a threshold exists; the interpolator
+        # also returns a crossing where A >= cos j, which Prop 6.3 forbids
+        pts = [t for t in tab if t["j"] == j and np.isfinite(t["meas"])
+               and np.isfinite(t["pred"])]
         ax.plot([t["A"] for t in pts], [t["meas"] for t in pts], "o", ms=4, label=f"j={j:g}")
     ax.set_xlabel("A")
     ax.set_ylabel("$\\beta^\\star$")

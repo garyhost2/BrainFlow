@@ -172,7 +172,16 @@ is measured over $\beta\in\{0,0.2,0.4,0.6,0.7,0.8,0.9,0.95\}$, with $\widehat\be
 off by linear interpolation at the sign change of $\Delta(\beta)$. The per-cell table
 (predicted, measured, error) is in \texttt{answers.json} under \texttt{threshold\_grid}, and
 \texttt{beta\_star.csv} carries every raw $\Delta(\beta)$ in its \texttt{delta} column. Maximum
-absolute error over the $27$ cells: $0.0334$.}
+absolute error over the $27$ cells: $0.0334$.
+
+Two points the accompanying figure needs. First, the error is \emph{one-sided}: the measured
+threshold exceeds the analytic one in $22$ of the $27$ cells, mean signed error $+0.0099$, sign
+test $p=1.5\times10^{-3}$. Reporting only a maximum absolute error hides a systematic offset that
+a reader will see immediately in the plot, so it should be reported as a bias with its sign and
+size. Second, the bisection returns a crossing in three cells where the criterion says none can
+exist ($A=0.70,\,j=0.80$ and $A=0.90,\,j=0.50,\,0.80$, all with $A\ge\cos j$). Those must be
+excluded from the figure, not just from the count; the plot has been corrected to draw only the
+$27$ cells where a threshold is predicted.}
 \end{todoitem}
 
 % ------------------------------------------------------------------
@@ -234,6 +243,13 @@ $400$-point trapezoid, which returns $7.304$ rather than the analytic $\ln 10^{3
 $1/t$ is steep near the floor. Spearman is rank-based, so any floor below the smallest positive
 tested $\varepsilon$ leaves the correlation unchanged.
 
+\textbf{The sweep is not monotone, and the current text says it is.} Terminal cosine rises to
+$0.2997$ at $\varepsilon=0.20$ and then falls to $0.2945$ at $\varepsilon=0.35$. The Spearman
+value states this exactly: $0.9643=1-6\cdot 2/(7\cdot 48)$ is one adjacent rank inversion among
+seven points, and a monotone sweep would give $1.000$. The sentence ``terminal fidelity improves
+monotonically as $\varepsilon$ increases'' should read ``improves up to $\varepsilon\approx0.2$
+and then flattens and slightly reverses''.
+
 The full table also shows that truncation is a probe, not a remedy: over the same sweep the
 cosine improves while $W_1$ rises from $0.0367$ to $0.6939$ and the pairwise cosine from $0.656$
 to $0.903$ --- most of the way back to the do-nothing baseline ($0.7667$ and $0.978$). The word
@@ -266,9 +282,24 @@ $1.00$ & $0.3105$ & $0.0354$ & $0.2076$\\
 \end{center}
 
 These five values are the ones the run used; a constant listing eight values at the head of the
-notebook was not the list this stage iterated over. Unlike truncation, this intervention improves
-all three columns at once, reaching the marginal model on every axis: cosine $0.3105$ against
-$\approx0.318$, $W_1$ $0.0354$ against $0.0327$, pairwise $0.208$ against $0.183$.}
+notebook was not the list this stage iterated over.
+
+Comparing the endpoints, the intervention reaches the marginal model on every axis: cosine
+$0.3105$ against $\approx0.318$, $W_1$ $0.0354$ against $0.0327$, pairwise cosine $0.208$ against
+$0.183$. The path there is not monotone on every axis, and the text should say so: $W_1$ first
+\emph{rises} from $0.0367$ to $0.0453$ at $\sigma_{\mathrm{aux}}=0.30$ before falling to
+$0.0354$, so at intermediate noise the model is distributionally worse than the unnoised one
+while its cosine and its diversity are already improving. The claim to make is that the endpoint
+recovers the marginal model on all three instruments, not that every step of the sweep does.
+
+The $\sigma_{\mathrm{aux}}=0$ row also fixes an evaluation-noise floor that is worth stating once
+in the paper. That row and the $\varepsilon=0$ row of item~10 are the \emph{same trained network}
+--- retraining at $\sigma_{\mathrm{aux}}=0$ with the default seed reproduces it exactly, as their
+byte-identical $W_1$ ($0.036684$) and energy distance ($0.537162$) confirm. Their cosines
+nevertheless differ by $0.0016$ ($0.2166$ against $0.2149$), because the distributional report
+fixes its evaluation seed while the fidelity report does not. Differences below roughly $0.002$
+in any reported cosine or pairwise cosine are therefore evaluation noise; every gap claimed in
+this document is between $0.04$ and $0.12$, that is forty to seventy times larger.}
 \end{todoitem}
 
 % ------------------------------------------------------------------
