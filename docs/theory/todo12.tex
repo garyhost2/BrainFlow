@@ -93,8 +93,9 @@ its low PSNR shows that the fraction counts incorrect detail as well as correct 
 \ask{Specify how the seven transport strengths are parameterised in the Stable Diffusion v1.5
 pipeline, and define operationally what is meant by retaining the source versus transporting it.}
 
-\resp The strength is the image-to-image pipeline's own \texttt{strength} argument,
-$s\in\{0.1,0.2,0.3,0.4,0.5,0.6,0.8\}$. Operationally: the degraded image is encoded to a latent,
+\resp The strength is the image-to-image pipeline's own \texttt{strength} argument $s$, taking
+the seven values $0.1$, $0.2$, $0.3$, $0.4$, $0.5$, $0.6$ and $0.8$. Operationally: the degraded
+image is encoded to a latent,
 noised to the timestep a fraction $s$ of the way along the schedule, and denoised from there to
 the end. With a $30$-step schedule, $\lceil 30 s\rceil$ steps are actually executed. $s$ is
 therefore the fraction of the generative trajectory that is run: at $s\to0$ the pipeline returns
