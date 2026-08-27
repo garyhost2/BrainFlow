@@ -164,6 +164,52 @@ if sr_rows:
     save("fig_sr_inversion")
 
 # %% [code]
+th = load_all("sr_threshold.csv")
+if th:
+    FAC = sorted({int(r["factor"]) for r in th})
+
+    def tagg(f, arm, key):
+        v = [r[key] for r in th if int(r["factor"]) == f and r["arm"] == arm
+             and isinstance(r.get(key), (int, float)) and np.isfinite(r[key])]
+        return (float(np.mean(v)), float(np.std(v)) / math.sqrt(max(len(v), 1))) if v \
+            else (float("nan"), float("nan"))
+
+    fig, ax = plt.subplots(1, 2, figsize=(10.6, 3.9))
+    for arm, col, lab in [("m1", "#2b6cb0", "$\\mathcal{M}_1$ marginal"),
+                          ("m2", "#b0421f", "$\\mathcal{M}_2$ source-conditioned"),
+                          ("reg", "#6b6b78", "regression")]:
+        mu = [tagg(f, arm, "gain_over_identity")[0] for f in FAC]
+        se = [tagg(f, arm, "gain_over_identity")[1] for f in FAC]
+        ax[0].errorbar(FAC, mu, yerr=se, fmt="o-", capsize=3, color=col, label=lab)
+    ax[0].axhline(0, c="k", lw=0.9)
+    ax[0].set_xscale("log", base=2)
+    ax[0].set_xlabel("downsample factor (source degrades to the right)")
+    ax[0].set_ylabel("PSNR gain over doing nothing")
+    ax[0].legend(fontsize=7.5)
+    ax[0].set_title("A purpose-trained flow beats doing nothing at every level",
+                    fontsize=9.5)
+
+    pred = [tagg(f, "m1", "r_pix")[0] for f in FAC]
+    meas = [tagg(f, "m1", "rank_z0")[0] for f in FAC]
+    lim = [min(pred) * 0.6, max(pred) * 1.7]
+    ax[1].plot(lim, lim, "-", c="#999", lw=1, zorder=0)
+    ax[1].plot(pred, meas, "o", ms=8, color="#2b6cb0")
+    for f, p, m in zip(FAC, pred, meas):
+        ax[1].annotate(f"${f}\\times$", (p, m), textcoords="offset points",
+                       xytext=(7, -3), fontsize=7.5)
+    ax[1].set_xscale("log")
+    ax[1].set_yscale("log")
+    ax[1].set_xlim(*lim)
+    ax[1].set_ylim(*lim)
+    ax[1].set_xlabel("predicted rank bound  $3(\\mathrm{res}/f)^2$")
+    ax[1].set_ylabel("measured rank of the source")
+    ax[1].set_title(f"Exact on all {len(FAC)} factors", fontsize=9.5)
+    NOTE["srthresh_rank_exact"] = int(sum(1 for p, m in zip(pred, meas) if abs(p - m) < 0.5))
+    NOTE["srthresh_gain_by_factor"] = {int(f): tagg(f, "m1", "gain_over_identity")[0]
+                                       for f in FAC}
+    save("fig_sr_threshold")
+
+# %% [code]
 ans = load_json("answers.json")
 fx = load_all("fixes.csv")
 tr = sorted([r for r in fx if r.get("remedy") == "truncation"], key=lambda r: r["knob"]) \
