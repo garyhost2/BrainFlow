@@ -1076,8 +1076,10 @@ if ARGS.part == "offshelf":
                                        figsize=(1.75 * cols, 1.8 * len(FACS)))
                 ax = np.atleast_2d(ax)
                 for r, f in enumerate(FACS):
-                    panels = [("clean", clean[e]), (f"retained ${f}\\times$",
-                                                    gallery[("source", f, e)])]
+                    dn = [x for x in rows
+                          if x["factor"] == f and x["arm"] == "do_nothing"][0]["align"]
+                    panels = [("clean target", clean[e]),
+                              ("retained source", gallery[("source", f, e)])]
                     panels += [(f"$s={s}$", gallery.get(("out", f, s, e))) for s in SHOW]
                     for c, (ttl, im) in enumerate(panels):
                         a = ax[r][c]
@@ -1085,16 +1087,30 @@ if ARGS.part == "offshelf":
                         a.set_yticks([])
                         if im is not None:
                             a.imshow(im)
+                        # the degradation varies down the rows, so it is labelled per row;
+                        # column titles are the same for every row
                         if r == 0:
                             a.set_title(ttl, fontsize=8)
-                        if c == 1:
-                            a.set_ylabel(f"align {[x for x in rows if x['factor'] == f and x['arm'] == 'do_nothing'][0]['align']:.2f}",
-                                         fontsize=7)
-                fig.suptitle("Transporting an already-informative source destroys it; "
-                             "the gain only turns positive once the source is far degraded",
+                        if c == 0:
+                            a.set_ylabel(f"${f}\\times$, source align {dn:.2f}", fontsize=7.5)
+                fig.suptitle("Transporting an already-informative source replaces it; the gain "
+                             "turns positive only once the source is far degraded",
                              fontsize=9)
                 fig.tight_layout()
                 save_fig(f"C5_offshelf_examples_{e}.png")
+            # keep the raw examples too, so the panel can be recomposed or relabelled without
+            # regenerating anything
+            exdir = os.path.join(OUT, "examples")
+            os.makedirs(exdir, exist_ok=True)
+            for key, im in gallery.items():
+                if im is None:
+                    continue
+                nm = ("source_f%d_i%d" % (key[1], key[2])) if key[0] == "source" \
+                    else ("out_f%d_s%s_i%d" % (key[1], str(key[2]).replace(".", "p"), key[3]))
+                im.save(os.path.join(exdir, nm + ".png"))
+            for e in EX:
+                clean[e].save(os.path.join(exdir, "clean_i%d.png" % e))
+            log(examples_saved=len(os.listdir(exdir)), dir=exdir)
 
         if HAVE_MPL:
             fig, ax = plt.subplots(1, 2, figsize=(11.0, 4.0))
@@ -1112,6 +1128,30 @@ if ARGS.part == "offshelf":
             ax[1].set_ylabel("strength where transport starts to pay")
             ax[1].set_xscale("log", base=2)
             save_fig("C4_offshelf.png")
+
+            # the two instruments disagree in the middle of the range, and that disagreement
+            # is itself the result, so plot them side by side rather than choosing one
+            fig, ax = plt.subplots(1, 2, figsize=(11.0, 3.9))
+            cl = plt.cm.viridis(np.linspace(0.12, 0.88, len(FACS)))
+            for f, c in zip(FACS, cl):
+                ax[0].plot(STR, [row(f, s)["gain"] for s in STR], "o-", color=c,
+                           label=f"${f}\\times$")
+                ax[1].plot(STR, [row(f, s)["energy_gain"] for s in STR], "o-", color=c,
+                           label=f"${f}\\times$")
+            nullf = row(FACS[0], STR[0])["energy_null"]
+            for a, ttl, yl in [(ax[0], "single-target cosine", "gain over doing nothing"),
+                               (ax[1], "distributional (energy distance)",
+                                "improvement over doing nothing")]:
+                a.axhline(0, c="k", lw=0.9)
+                a.set_xlabel("transport strength")
+                a.set_ylabel(yl, fontsize=9)
+                a.set_title(ttl, fontsize=10)
+                a.legend(fontsize=7, title="degradation", title_fontsize=7)
+            ax[1].axhspan(-nullf, nullf, color="k", alpha=0.10, lw=0)
+            ax[1].annotate("null floor", (STR[0], nullf), fontsize=7,
+                           textcoords="offset points", xytext=(2, 3))
+            fig.tight_layout()
+            save_fig("C7_offshelf_two_metrics.png")
     except Exception as e:
         reg("offshelf_ran", False,
             "diffusers, open_clip and the pretrained checkpoint are reachable on the node",
