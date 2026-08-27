@@ -1,0 +1,522 @@
+\documentclass[11pt]{article}
+\usepackage[margin=0.95in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,array}
+\usepackage{xcolor}
+
+\newcommand{\M}{\mathcal M}
+\newcommand{\T}{\mathsf{T}}
+
+\newenvironment{item12}[1]{%
+  \par\medskip\noindent\rule{\textwidth}{0.7pt}\par\nobreak\smallskip
+  \noindent\textbf{\large #1}\par\nobreak\smallskip
+}{\par\medskip}
+
+\newcommand{\ask}[1]{\noindent\emph{Asked.}\ #1\par\smallskip}
+\newcommand{\resp}{\noindent\textbf{Response.}\ }
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+
+\title{Responses to the twelve items}
+\author{}
+\date{27 August 2026}
+
+\begin{document}
+\maketitle
+
+Answered in the order given. Items 6 and 11 contain corrections rather than confirmations, and
+both are flagged at the point they arise. All numbers below are from completed runs; nothing in
+this document is pending.
+
+% =================================================================
+\begin{item12}{1. Super-resolution distributional comparison: sample count, seeds, setup, and
+the $96\times96$ results}
+\ask{Confirm the evaluation sample count and number of seeds, confirm whether the preprocessing
+and train/test setup match the dimensionality experiment, and add the $96\times96$ results.}
+
+\resp Every arm is evaluated on the full STL-10 test split, $1{,}024$ images, with three
+training seeds per arm ($0,1,2$); the numbers below are means over those three seeds, with the
+seed standard deviation given for PSNR.
+
+The setup is not merely matched to the dimensionality experiment, it is the same code path: both
+call one loader that returns $5{,}000$ training and $1{,}024$ test images, resized to the target
+resolution, centre-cropped, and normalised to $[-1,1]$. The dimensionality measurement is taken
+inside the same loop, before any training, so no discrepancy is possible.
+
+The $96\times96$ arm has completed. All three resolutions:
+
+\begin{center}
+\small
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+res & arm & PSNR $\uparrow$ & energy $\downarrow$ & $W_1^{\mathrm{hf}}$ $\downarrow$ &
+restored detail\\
+\midrule
+$32$ & identity            & $19.7421$ & $6.7433$ & $154.02$ & $0.000$\\
+     & regression          & $20.5045$ & $0.1200$ & $49.37$  & $0.680$\\
+     & $\M_1$ marginal     & $21.4927$ & $0.7335$ & $92.82$  & $0.397$\\
+     & $\M_2$ source-cond. & $21.5575$ & $1.0168$ & $104.09$ & $0.324$\\
+     & \emph{null floor}   &           & $-0.0029$ & $7.04$  & \\
+\midrule
+$48$ & identity            & $20.7718$ & $8.9424$ & $270.13$ & $0.000$\\
+     & regression          & $21.7829$ & $0.0799$ & $67.69$  & $0.750$\\
+     & $\M_1$ marginal     & $22.9923$ & $0.8259$ & $154.89$ & $0.427$\\
+     & $\M_2$ source-cond. & $23.0912$ & $0.9595$ & $164.48$ & $0.391$\\
+     & \emph{null floor}   &           & $0.0012$ & $12.32$  & \\
+\midrule
+$96$ & identity            & $21.0806$ & $17.1672$ & $998.74$ & $0.000$\\
+     & regression          & $21.7075$ & $0.1023$  & $215.45$ & $0.784$\\
+     & $\M_1$ marginal     & $23.1984$ & $1.8884$  & $623.56$ & $0.376$\\
+     & $\M_2$ source-cond. & $23.1984$ & $2.2222$  & $659.37$ & $0.340$\\
+     & \emph{null floor}   &           & $0.0010$  & $17.63$  & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+``Energy'' is the energy distance between the distribution of null-space residuals --- the
+detail the low-resolution source does not determine --- of the outputs and of the targets.
+$W_1^{\mathrm{hf}}$ is the one-dimensional Wasserstein distance between the distributions of
+high-frequency energy. The null floor for both is obtained by splitting the target set in half
+and comparing the halves, so each column has its own zero.
+
+At every resolution $\M_2$ attains the higher or equal PSNR and the worse value on both
+distributional columns, in each of the three seeds separately. At $96\times96$ the two models are
+indistinguishable on PSNR to four decimals ($23.1984$ against $23.1984$, seed spreads $0.018$ and
+$0.052$) while $\M_2$ remains $18\%$ worse on the energy distance. The comparison is drawn
+between $\M_1$ and $\M_2$, which are matched in architecture, capacity and training budget; the
+regression arm is included for reference only, and its high restored-detail fraction alongside
+its low PSNR shows that the fraction counts incorrect detail as well as correct detail.
+\end{item12}
+
+% =================================================================
+\begin{item12}{2. Parameterisation of the transport strengths, and what ``retaining'' and
+``transporting'' mean}
+\ask{Specify how the seven transport strengths are parameterised in the Stable Diffusion v1.5
+pipeline, and define operationally what is meant by retaining the source versus transporting it.}
+
+\resp The strength is the image-to-image pipeline's own \texttt{strength} argument,
+$s\in\{0.1,0.2,0.3,0.4,0.5,0.6,0.8\}$. Operationally: the degraded image is encoded to a latent,
+noised to the timestep a fraction $s$ of the way along the schedule, and denoised from there to
+the end. With a $30$-step schedule, $\lceil 30 s\rceil$ steps are actually executed. $s$ is
+therefore the fraction of the generative trajectory that is run: at $s\to0$ the pipeline returns
+its input, at $s=1$ it discards the input and samples from noise. Guidance scale is $7.5$ and the
+prompt is ``a photo of a \{class\}'' throughout.
+
+\emph{Retaining the source} means returning the degraded image itself, unmodified. It is the
+baseline row, and its gain is zero by definition.
+\emph{Transporting} means returning the pipeline output at strength $s$.
+
+Both are scored the same way: the CLIP cosine between the embedding of the returned image and the
+embedding of the clean original. The reported gain is the transported score minus the retained
+score, so a negative gain means the pipeline made the image less like its own original than
+leaving it alone would have.
+
+Degradation is downsample-then-upsample by a factor $f\in\{2,4,8,16\}$ on $64$ STL-10 photographs
+resized to $512\times512$. The retained scores are $0.997$, $0.853$, $0.733$ and $0.430$ for
+$f=2,4,8,16$. The best gain achievable over the seven strengths is $-0.189$, $-0.061$, $-0.051$
+and $+0.115$ respectively: at the three milder degradations no tested strength beats leaving the
+image alone, and transport only begins to pay between $f=8$ and $f=16$, that is once the source's
+alignment with its target falls below about $0.64$.
+
+One scope note that belongs with these numbers: the metric is a single-target cosine, which is
+the family the paper argues elsewhere should not by itself decide questions of this kind. The
+experiment is reported as a targeted test on one checkpoint, one degradation family and $64$
+images, not as a distributional validation.
+\end{item12}
+
+% =================================================================
+\begin{item12}{3 and 4. The marginal-separation parameter, the regression, and the asymptotic
+slope}
+\ask{Specify the marginal-similarity parameter corresponding to the ratio sequence, provide the
+exact regression giving slope $-0.756$, and insert the derivation of the asymptotic slope $-1$.
+Send \texttt{ratio.tex}.}
+
+\resp \texttt{ratio.tex} is attached. The sweep interpolates the second marginal toward the
+first, $\Sigma_1(\delta)=\Sigma_0+\delta(\Sigma_1-\Sigma_0)$, so $\delta$ is the fraction of the
+original separation retained; $\delta=1$ is the ensemble as drawn and $\delta\to0$ is the
+homogeneous limit. Ensemble: dimension $16$, $64$ systems, relative violation $0.05$, median
+response per unit violation, float64, second-order integration at $1{,}500$ steps.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+$\delta$ & $0.05$ & $0.1$ & $0.2$ & $0.4$ & $0.7$ & $1.0$\\
+$\|\Sigma_1-\Sigma_0\|_F/\|\Sigma_0\|_F$ & $0.043$ & $0.087$ & $0.173$ & $0.347$ & $0.607$ &
+$0.867$\\
+skew/span ratio & $76.8$ & $42.0$ & $24.2$ & $14.6$ & $10.1$ & $7.8$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The regression is ordinary least squares of $\log_{10}(\text{ratio})$ on $\log_{10}\delta$ over
+these six points, giving slope $-0.756$ with rms residual $0.0166$.
+
+\emph{The asymptotic slope.} Two facts give $-1$. The span response carries the factor
+$\sup_t|(\log v_i/v_j)'|$ from the suppression bound in \texttt{ratio.tex}; that factor is
+$O(\delta)$ when the marginals differ by $\delta$, so the span response vanishes linearly. The
+skew response has no such factor and tends to the finite non-zero limit given in closed form by
+the homogeneous-marginal proposition, so it is $O(1)$. The ratio is therefore $O(1/\delta)$ and
+the log--log slope tends to $-1$.
+
+The measured $-0.756$ is milder than $-1$ because the tested window is not yet asymptotic. The
+ratio slope is identically the skew slope minus the span slope, an identity that holds in the
+data to $10^{-15}$, so the discrepancy can be attributed exactly. Extending the sweep a decade
+below the window above:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+window & span exponent & skew exponent & ratio slope\\
+\midrule
+$\delta\in[0.05,1]$     & $0.573$ & $-0.159$ & $-0.732$\\
+$\delta\in[0.005,0.05]$ & $0.933$ & $-0.019$ & $-0.952$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The span response is what is sublinear over the reported window, at $\delta^{0.57}$; the mild
+decline of the skew constant contributes $-0.16$, which pushes the slope \emph{toward} $-1$ and
+so cannot explain the shortfall. A decade lower the span exponent has moved to $0.93$ and the
+ratio slope to $-0.95$, which is the predicted convergence. Slopes are ensemble-dependent at
+about the $0.02$ level: an independently drawn pair of marginals gives $-0.756$ where the run
+above gives $-0.732$.
+
+The value $6.585$ should therefore be reported as the sampled ensemble's ratio at its own
+separation, not as a constant. It grows without bound as the marginals merge.
+\end{item12}
+
+% =================================================================
+\begin{item12}{5. The full first-order perturbation derivation}
+\ask{Insert the full derivation, including the $t(1-t)$ suppression, the interpolant-variance
+separation factor, the homogeneous-marginal first-order limit, and the closed-form arctangent
+skew response.}
+
+\resp All four are in \texttt{ratio.tex}, attached. In outline.
+
+The response operator is $\mathcal D(E)=M_0\int_0^1\Phi^{-1}K_E\Phi\,dt$ with $K_E$ as in the
+first-order proposition. The single identity that makes everything computable is that for any
+symmetric expansion point, $G_0=\tfrac12 V_0'$.
+
+\emph{Homogeneous marginals.} With $\Sigma_0=\Sigma_1=\Sigma$ and $C_0=\kappa\Sigma$, the clean
+generator is a scalar multiple of the identity, so $M_0=I$ and the conjugation cancels. Every
+symmetric direction then gives an integrand that is odd under $t\mapsto1-t$ against an even
+weight, so $\mathcal D(S_E)=0$ \emph{exactly}, in or out of the span. Every skew direction gives
+$\mathcal D(N_E)=-I_\kappa N_E\Sigma^{-1}$ with
+$I_\kappa=\int_0^1 dt/\omega_\kappa(t)$, $\omega_\kappa=1-2(1-\kappa)t(1-t)$, which integrates to
+$\tfrac{4}{\sqrt{\mu(4-\mu)}}\arctan\sqrt{\mu/(4-\mu)}\ge1$ for $\mu=2(1-\kappa)$. So at equal
+marginals the ratio is infinite.
+
+\emph{The two suppression factors.} In the commuting model the response acts pairwise, with the
+skew part weighted by $\mathcal B_{ij}=\int_0^1 dt/\sqrt{v_iv_j}$, a strictly positive kernel
+admitting no cancellation, and the symmetric part weighted by
+$\mathcal A_{ij}=-\tfrac12\int_0^1 t(1-t)\,(\log v_i/v_j)'\,dt/\sqrt{v_iv_j}$. The symmetric
+weight is the skew weight multiplied by the window $t(1-t)\le\tfrac14$, which vanishes at both
+endpoints, and by the rate at which the two interpolant variances separate, which vanishes
+identically when the marginals are homogeneous. Hence
+$\mathcal B_{ij}/|\mathcal A_{ij}|\ge 8/\sup_t|(\log v_i/v_j)'|$.
+
+A skew violation perturbs the drift directly; a symmetric violation reaches the endpoint map only
+through the variance channel, which the parity of the clean flow cancels except to the extent
+that coordinates traverse different variance profiles. That is the whole mechanism.
+
+Verification: six numerical checks in \texttt{notebooks/ratio\_proof.py}, all holding. The
+pairwise formulas match a finite-differenced endpoint map to $1.3\times10^{-6}$ over $33$
+perturbations; the two forms of $\mathcal A_{ij}$ agree to $2.8\times10^{-17}$; on pairs with
+proportional variance profiles the symmetric response measures below $9.1\times10^{-9}$; and with
+homogeneous marginals the symmetric response is $3.5\times10^{-10}$ against a skew response of
+$1.54$ matching the closed form to $3.2\times10^{-9}$.
+\end{item12}
+
+% =================================================================
+\begin{item12}{6. Whether $\Delta$ can have a root when $A\ge\cos\jmath$
+\;---\; \textcolor{red}{this is a correction}}
+\ask{The endpoint signs give sufficiency only. Can you prove $\Delta$ has no root in $(0,1)$ when
+$A\ge\cos\jmath$?}
+
+\resp No, because it is false. $\Delta$ always has a root. The stated equivalence should be
+withdrawn and replaced; the corrected statement is stronger, and it recovers three grid cells the
+sweep had been discarding. Full proof in \texttt{threshold.tex}, attached; every step verified
+numerically over $120$ cells with no exceptions.
+
+Substituting $\beta=\sin\varphi$ and writing $\psi(\varphi)=\arccos(A\cos\varphi)$ turns both
+reference levels into cosines of angle differences:
+\[
+\Delta/A=\cos\!\big(\psi(\varphi)-\varphi\big)-\cos(\varphi-\jmath),
+\]
+an identity holding to $7\times10^{-15}$. At $\varphi=\jmath$ the comparison term is $\cos 0=1$,
+its maximum, while $\psi(\jmath)>\jmath$ strictly for any $A<1$. Hence
+\[
+\Delta(\sin\jmath)<0\quad\text{for every }A\in(0,1),\ \jmath\in(0,\pi/2),
+\]
+irrespective of $A$. Since $\Delta(1)=A(1-\sin\jmath)>0$, a transition above $\sin\jmath$ exists
+unconditionally.
+
+Uniqueness is what $A<\cos\jmath$ governs. Above $\sin\jmath$ the sign of $\Delta$ is the sign of
+$h(\varphi)=2\varphi-\jmath-\psi(\varphi)$, and since $\psi'=A\sin\varphi/\sin\psi\le A$ we have
+$h'\ge 2-A>1$, so $h$ is strictly increasing and crosses zero exactly once. Below $\sin\jmath$
+the condition reduces to $A\cos\varphi>\cos\jmath$, strictly decreasing in $\varphi$, so a second
+root appears exactly when $A>\cos\jmath$. Therefore
+\[
+A<\cos\jmath\iff\Delta\text{ has a single sign change on }(0,1),
+\]
+and when $A>\cos\jmath$ the flow wins on $(0,r_1)$, loses on $(r_1,r_2)$ and wins again on
+$(r_2,1)$, with $r_1<\sin\jmath<r_2$.
+
+The consequence for the table is that the three cells marked ``--'' are not empty. The sweep
+already measured their upper roots, and those measurements are as accurate as the ones reported:
+
+\begin{center}
+\small
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+$A$ & $\jmath$ & $\sin\jmath$ & analytic $r_2$ & measured\\
+\midrule
+$0.70$ & $0.80$ & $0.7174$ & $0.8347$ & $0.8286$\\
+$0.90$ & $0.50$ & $0.4794$ & $0.5869$ & $0.5600$\\
+$0.90$ & $0.80$ & $0.7174$ & $0.7708$ & $0.7586$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The comparison therefore covers $30$ cells, not $27$, and the registered entry recording three
+failures of the existence criterion should be withdrawn: the criterion was wrong, the measurement
+was right.
+\end{item12}
+
+% =================================================================
+\begin{item12}{7. What ``$4\times$ training'' means}
+\ask{Specify precisely what $4\times$ training means, and confirm all remaining settings are
+unchanged.}
+
+\resp Optimisation steps: $3{,}000$ against $12{,}000$, exactly four times as many. Everything
+else is held fixed --- batch $256$, AdamW at $3\times10^{-4}$ under maximal-update
+parameterisation, gradient clipping at $1.0$, the same checkpoint-selection rule, and the same
+evaluation protocol and seeds. The long run differs from the short one in the step-count argument
+alone.
+\end{item12}
+
+% =================================================================
+\begin{item12}{8. The capacity sweep at a second learning rate}
+\ask{Confirm whether the capacity sweep has been repeated at a second learning rate.}
+
+\resp It has been run at three: $\eta\in\{10^{-4},3\times10^{-4},10^{-3}\}$ across four widths
+with five seeds each, $120$ trainings under the same protocol. The gap $\M_1-\M_2$:
+
+\begin{center}
+\small
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+$\eta$ & width $256$ & width $512$ & width $1024$ & width $2048$\\
+\midrule
+$10^{-4}$        & $0.0419$ & $0.0524$ & $0.0558$ & $0.0612$\\
+$3\times10^{-4}$ & $0.0835$ & $0.0938$ & $0.0873$ & $0.0767$\\
+$10^{-3}$        & $0.0892$ & $0.1158$ & $0.1020$ & $0.1018$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The sign is the same in all twelve cells, at a minimum of $16.2$ standard errors. The mean gap
+grows monotonically with the learning rate at every width ($0.0528$, $0.0853$, $0.1022$; Spearman
+$0.90$). Raising the step size from $10^{-4}$ to $10^{-3}$ costs the marginal model $1$--$7\%$ of
+its terminal fidelity and the source-conditioned model $19$--$27\%$: the source-conditioned arm
+is four to sixteen times more sensitive to step size at matched architecture and objective, which
+is what an amplification near the initial time predicts and a generic optimisation failure does
+not.
+
+Two things to report rather than round away. At no learning rate does the widest model close the
+gap at the two-standard-error level, but at $3\times10^{-4}$ the gap does narrow with width,
+$0.0835\to0.0767$, reaching $1.9$ standard errors; the claim should be ``does not close'', not
+``widens''. And the diversity collapse is universal across all twelve cells and worsens with
+capacity: the source-conditioned pairwise cosine runs $0.344\to0.506$ from width $256$ to $2048$
+at $\eta=10^{-4}$, against a marginal-model mean of $0.225$ and a true-posterior reference of
+$0.050$.
+\end{item12}
+
+% =================================================================
+\begin{item12}{9. The output-variety metric, the step sweep, and the integration scheme}
+\ask{Provide the exact definition of the output-variety metric, its values over the complete
+integration-step sweep, the tested step counts, and the numerical integration scheme. Confirm the
+one-shot regression uses the same evaluation set and target-alignment definition.}
+
+\resp Variety is measured as the mean pairwise cosine among the six samples generated for one
+condition, averaged over conditions. The direction matters: this number \emph{decreases} as
+variety increases. The solver is Heun's method, second order, intrinsic to the sphere, on a
+uniform time grid, with $32$ steps by default. Step counts tested: $K\in\{1,2,4,8,16,32,64\}$.
+
+\begin{center}
+\small
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+$K$ & target cosine & pairwise cosine & polar $W_1$\\
+\midrule
+$1$  & $0.3541$ & $0.5299$ & $0.4623$\\
+$2$  & $0.3524$ & $0.3897$ & $0.3286$\\
+$4$  & $0.3389$ & $0.2593$ & $0.1632$\\
+$8$  & $0.3254$ & $0.2030$ & $0.0611$\\
+$16$ & $0.3197$ & $0.1858$ & $0.0360$\\
+$32$ & $0.3175$ & $0.1838$ & $0.0327$\\
+$64$ & $0.3172$ & $0.1829$ & $0.0321$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A single integration step attains the highest target cosine and the worst distributional fit, by
+a factor of fourteen in $W_1$; sixty-four steps invert both. Selecting the integration budget by
+single-target cosine alone therefore selects the coarsest possible rollout.
+
+Confirmed: the one-shot regression baseline is scored by the identical routine on the identical
+task, $768$ conditions with $6$ samples each, and the identical target-alignment definition.
+\end{item12}
+
+% =================================================================
+\begin{item12}{10. The classifier-free-guidance setup}
+\ask{Provide the exact formulation, all tested guidance weights, the definition and tested values
+of $\lambda$, the underlying terminal-cosine values, and the unguided reference used for the
+reported $+0.157$ and $-0.505$.}
+
+\resp The guided velocity is
+$v_w=v_{\mathrm{uncond}}+w\,(v_{\mathrm{cond}}-v_{\mathrm{uncond}})$, tangent-projected to the
+sphere. The unconditional branch is the same network with its condition replaced by a learned
+null token, trained with $10\%$ condition dropout. Weights tested: $w\in\{1,2,3\}$.
+
+\emph{The unguided reference is $w=1$}, where the formula returns the conditional field
+unchanged. Every reported change is measured against it, and the $w=1$ column below is flat at
+zero to within $0.0014$, which is the internal consistency check.
+
+$\lambda$ interpolates the initial state from noise toward the informative source,
+$z_0\leftarrow\mathrm{slerp}(u,z_0,\lambda)$ with $u$ uniform on the sphere: $\lambda=0$ starts
+from noise, $\lambda=1$ from the fully informative source. Tested at
+$\lambda\in\{0,0.25,0.5,0.75,1\}$, two seeds per cell. Change in terminal target cosine relative
+to $w=1$:
+
+\begin{center}
+\small
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+$\lambda$ & $w=1$ & $w=2$ & $w=3$\\
+\midrule
+$0.00$ & $+0.0001\pm0.0012$ & $+0.0424\pm0.0002$ & $+0.0770\pm0.0004$\\
+$0.25$ & $-0.0000\pm0.0012$ & $-0.0325\pm0.0003$ & $-0.0673\pm0.0007$\\
+$0.50$ & $+0.0001\pm0.0014$ & $-0.1271\pm0.0003$ & $-0.2244\pm0.0001$\\
+$0.75$ & $+0.0002\pm0.0014$ & $-0.2430\pm0.0138$ & $-0.3346\pm0.0065$\\
+$1.00$ & $+0.0007\pm0.0011$ & $-0.3721\pm0.0173$ & $-0.4905\pm0.0039$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+On the reported values: $+0.157$ and $-0.505$ come from an earlier run. The current values, with
+seed error bars, are $+0.0770\pm0.0004$ and $-0.4905\pm0.0039$, and the draft should use these.
+The sign changes at $\lambda_0=0.13$, not near $\lambda=1$: guidance calibrated for a noise start
+begins to hurt as soon as the initialisation carries even slight target information, which is a
+sharper statement than the one currently in the text.
+\end{item12}
+
+% =================================================================
+\begin{item12}{11. The OpenCLIP protocol, and the factorization discrepancy $0.62$
+\;---\; \textcolor{red}{contains a correction}}
+\ask{Provide the architecture and checkpoint, the CIFAR-10 split and image count, preprocessing
+and blur construction, embedding normalisation, the target-alignment metric, the class prototype,
+and the precise definition and computation of the factorization discrepancy $0.62$.}
+
+\resp OpenCLIP ViT-B-32, checkpoint \texttt{laion2b\_s34b\_b79k}. CIFAR-10 \emph{train} split,
+$6{,}000$ images drawn with a fixed generator seed. Preprocessing is the transform shipped with
+that checkpoint. Image embeddings are $L_2$-normalised. The source is the embedding of a
+Gaussian-blurred image, kernel size $9$, with $\sigma$ drawn uniformly from $[0.8,3.0]$ per call.
+The condition is the $L_2$-normalised mean of the clean embeddings of the image's own class.
+Split $80/20$; the flow has width $512$ and three blocks, trained $3{,}000$ steps at
+$\eta=10^{-4}$ with batch $256$, sampled with $32$ Heun steps. Target alignment is the mean
+cosine between the output embedding and the clean embedding of the same image, on the held-out
+$20\%$.
+
+Measured levels: random pair $0.4815$, blurred source $0.5517$, marginal model $0.7586$,
+source-conditioned $0.7507$, class prototype $0.7930$. The estimated parameters are
+$\hat A=0.7923$, $\hat\beta=0.6010$, $\hat\jmath=0.2817$, giving a predicted threshold of
+$0.5291$, below $\hat\beta$; the prediction that the flow beats the source was therefore made in
+advance and holds, at $89\%$ of the range between the random-pair floor and the prototype. The
+model ordering also transfers.
+
+\emph{On the $0.62$.} No quantity of that name is computed anywhere in the pipeline. The stage
+was re-run to check, and its output contains no column equal to $0.62$; the closest value is
+$\hat\beta=0.6010$, which already appears in the paper under its own name and role. The sentence
+should be removed unless it can be traced to a specific quantity.
+
+A related item worth recording: the label probe in this section is now trained and scored on
+disjoint $80/20$ splits and reaches $0.058$ held-out accuracy against a chance level of $0.10$,
+so it does not extract label information from the private residual. An earlier version was
+trained and scored on the same $6{,}000$ embeddings and was withdrawn as instrumentation; the
+current one restores the result properly.
+\end{item12}
+
+% =================================================================
+\begin{item12}{12. The completed super-resolution dimensionality experiment}
+\ask{Insert the completed experiment, including the three resolutions, the theoretical
+dimensional bounds, the measured source and target dimensions, and sufficient detail of the
+estimation procedure to reproduce it.}
+
+\resp STL-10, $5{,}000$ training and $1{,}024$ test images, resized and centre-cropped to each
+resolution and normalised to $[-1,1]$. The condition $c$ is the class label; the source is
+$z_0=\mathsf{UD}z_1$, average pooling by $f=4$ followed by nearest-neighbour upsampling, so that
+conditioned on $c$ the source is a deterministic function of the target and the endpoints are
+maximally dependent. $\mathsf P=\mathsf{UD}$ is an exact projection: the identity arm carries
+relative null-space energy $7.5\times10^{-15}$.
+
+\emph{Estimation procedure.} Rank is read from the eigenvalues of the Gram matrix of the
+mean-centred sample, computed in float64, with a relative cutoff of $10^{-10}$ against the
+largest eigenvalue. The sample size is chosen as $\min(5000,\,4r+256,\,3072)$ where $r$ is the
+predicted bound, so that the number of samples strictly exceeds the bound at every resolution and
+no figure is sample-limited from below. That gives $1{,}024$, $1{,}984$ and $3{,}072$ samples at
+the three resolutions respectively.
+
+\begin{center}
+\small
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+resolution & ambient & bound $r=3(\mathrm{res}/f)^2$ & measured rank $z_0$ &
+measured rank $z_1$ & samples\\
+\midrule
+$32$ & $3072$  & $192$  & $192$  & $1023$ & $1024$\\
+$48$ & $6912$  & $432$  & $432$  & $1983$ & $1984$\\
+$96$ & $27648$ & $1728$ & $1728$ & $3071$ & $3072$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The measured source rank equals the predicted bound exactly at all three resolutions. The target
+ranks are one below the sample count, that is they are limited by the number of samples and not
+by the data; what the table establishes is the strict inequality
+$\dim\mathrm{supp}(z_0)\le 192 < 1023 \le \dim\mathrm{supp}(z_1)$ and its analogues, which is
+what the obstruction argument requires. It does not establish the true target dimension, and the
+claim should be stated in that form.
+
+The same measurement was repeated at fixed resolution $48$ across six downsampling factors, and
+is exact at every one:
+
+\begin{center}
+\small
+\begin{tabular}{@{}rrrrrrr@{}}
+\toprule
+factor & $2$ & $3$ & $4$ & $6$ & $8$ & $12$\\
+\midrule
+predicted bound & $1728$ & $768$ & $432$ & $192$ & $108$ & $48$\\
+measured rank   & $1728$ & $768$ & $432$ & $192$ & $108$ & $48$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Nine exact agreements in total. One qualification to state plainly: the bound is an upper bound
+by construction, since $z_0$ lies in the range of a fixed rank-deficient operator, so what is
+being confirmed is that natural images saturate it rather than that a non-trivial prediction was
+risked.
+
+At those six factors the trained flow beats returning the source at every level, with the gain
+falling as the source degrades --- $3.81$, $2.26$, $1.97$, $1.29$, $1.02$, $0.59$ PSNR. This is
+the opposite direction from the pretrained image-to-image experiment of item~2, and the contrast
+is the useful part: a flow trained for its exact degradation beats doing nothing everywhere we
+tested, while a pretrained flow applied off the shelf is worse than doing nothing at $2\times$,
+$4\times$ and $8\times$. The do-nothing regime lives in the mismatch, not in the task. At the
+harshest factor the least-squares regression arm does fall below the baseline, at $-0.32$ PSNR.
+\end{item12}
+
+\end{document}
