@@ -1,31 +1,17 @@
 \documentclass[11pt]{article}
 \usepackage[margin=0.9in]{geometry}
-\usepackage{amsmath,amssymb,booktabs,longtable,array,xcolor}
+\usepackage{amsmath,amssymb,booktabs,array}
 \usepackage[colorlinks,linkcolor=blue!45!black,urlcolor=blue!45!black]{hyperref}
 
 \newcommand{\M}{\mathcal M}
-\newcommand{\T}{\mathsf{T}}
-\definecolor{good}{RGB}{20,110,60}
-\definecolor{bad}{RGB}{160,30,25}
-\definecolor{neut}{RGB}{95,95,110}
-\definecolor{corr}{RGB}{150,95,10}
-
-\newcommand{\POS}{\textcolor{good}{\textbf{Positive}}}
-\newcommand{\NEG}{\textcolor{bad}{\textbf{Negative}}}
-\newcommand{\NEU}{\textcolor{neut}{\textbf{Neutral}}}
-\newcommand{\COR}{\textcolor{corr}{\textbf{Correction}}}
-\newcommand{\FIN}{\textcolor{good}{Final}}
-\newcommand{\RUN}{\textcolor{corr}{Still on the cluster}}
 
 \newenvironment{todoitem}[2]{%
   \par\medskip\noindent\rule{\textwidth}{0.7pt}\par\nobreak\smallskip
   \noindent\textbf{\large TODO #1}\quad\textnormal{\small(draft #2)}\par\nobreak\smallskip
 }{\par\medskip}
 
-\newcommand{\ask}[1]{\noindent\textbf{Asked.}\ #1\par\smallskip}
-\newcommand{\resp}[1]{\noindent\textbf{Response.}\ #1\par\smallskip}
-\newcommand{\interp}[1]{\noindent\textbf{Interpretation.}\ #1\par\smallskip}
-\newcommand{\verdict}[2]{\noindent\textbf{Sign.}\ #1\hfill\textbf{Status.}\ #2\par}
+\newcommand{\ask}[1]{\noindent\textbf{What is asked.}\ #1\par\smallskip}
+\newcommand{\resp}[1]{\noindent\textbf{Response.}\ #1\par}
 
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{4pt}
@@ -37,81 +23,39 @@
 \begin{document}
 \maketitle
 
-\section*{Summary}
-
-Fifteen red items, which collapse to eleven distinct requests; four are the same
-question asked once in the main text and once in the appendix. Nine are answered from data
-already in hand, two require a change to a claim currently in the draft, and two numbers quoted
-in the draft cannot be traced to any run and should be removed.
-
-\begin{center}
-\small
-\begin{longtable}{@{}clll@{}}
-\toprule
-\# & Item & Sign & Status\\
-\midrule
-\endhead
-1 & Three-panel figure, publication quality & \COR & \FIN\\
-2 & Output-variety metric, integrator & \POS & \FIN\\
-3 & ``Off-trajectory departure $0.26$'' & \NEG & \FIN\\
-4 & Meaning of ``$4\times$ training'' & \NEU & \FIN\\
-5 & Guidance formulation, weights, $\lambda$ & \POS & \FIN\\
-6 & OpenCLIP / CIFAR-10 protocol & \NEU & \FIN\\
-7 & The 27 empirical thresholds & \POS & \FIN\\
-8 & ``$4\times$ training'' (appendix duplicate of 4) & \NEU & \FIN\\
-9 & Capacity sweep at a second learning rate & \POS & \FIN\\
-10 & Truncation sweep, $\varepsilon$ values and integral & \COR & \FIN\\
-11 & Auxiliary-source perturbation sweep & \POS & \FIN\\
-12 & Output variety (appendix duplicate of 2) & \POS & \FIN\\
-13 & Guidance (appendix duplicate of 5) & \POS & \FIN\\
-14 & OpenCLIP (appendix duplicate of 6) & \NEU & \FIN\\
-15 & Super-resolution experiment & \POS & \RUN\\
-\bottomrule
-\end{longtable}
-\end{center}
-
-Two items need a decision from you rather than a number: item~3 and the
-``factorization discrepancy $0.62$'' inside item~6/14. Item~10 obliges a rewrite of the
-mechanism paragraph. Everything else can be pasted in.
+Fifteen red items; four are the same question asked once in the main text and once in the
+appendix, so they are merged below.
 
 % ------------------------------------------------------------------
 \begin{todoitem}{1}{lines 38--41, Figure 1}
-\ask{The publication-quality version of the three-panel coupling-ledger figure, together with
-the underlying data.}
+\ask{The publication-quality version of the three-panel figure, with the underlying data.}
 
-\resp{Attached as \texttt{fig1\_main.pdf} (vector), with \texttt{answers.json} carrying every
-number behind it. Panels: (a) the flow-versus-do-nothing crossing at the operating point,
-(b) the gap against width at each learning rate, (c) the guidance sign reversal against source
-informativeness.}
-
-\interp{The figure that existed in the notebook was \emph{not} the figure the caption describes.
-The saved panel was a map of $\beta^\star(A)$ over six values of $j$: no crossing, no baseline,
-no measured points. Panel~(a) as captioned did not exist and has now been built from
-\texttt{beta\_star.csv} at $A=0.37$, $j=0.15$, plotting the analytic population landing law and
-the analytic do-nothing level against the two measured curves. They cross at
-$\beta^\star=0.6589$ (analytic) against $0.6778$ (measured). All output is now written as PDF as
-well as PNG; the previous figures were $150$~dpi raster only.}
-
-\verdict{\COR}{\FIN}
+\resp{Attached: \texttt{fig1\_main.pdf}, vector, with \texttt{answers.json} carrying every number
+behind it. Panel (a) shows the flow-versus-do-nothing crossing at the operating point: the
+analytic landing law and the analytic do-nothing level, with the measured points on top of them,
+crossing at $\beta^\star=0.659$ (measured $0.678$). Panel (b) shows the gap between the two
+models against width, one line per learning rate. Panel (c) shows the guidance gain against
+source informativeness $\lambda$, with the sign change marked at $\lambda_0=0.13$. The raw data
+for each panel is in \texttt{beta\_star.csv}, \texttt{lr2\_scaling.csv} /
+\texttt{lr3\_scaling.csv}, and \texttt{guidance.csv}.}
 \end{todoitem}
 
 % ------------------------------------------------------------------
 \begin{todoitem}{2 and 12}{lines 47--48 and 265--268}
-\ask{The definition of the output-variety metric, its values over the complete
-integration-step sweep, the tested step counts, the integration scheme, and confirmation that
-the one-shot regression baseline uses the same evaluation set and target-alignment definition.}
+\ask{The definition of the output-variety metric, its values over the full integration-step
+sweep, and the integration scheme; confirmation that the one-shot regression result uses the same
+evaluation set and alignment definition.}
 
-\resp{Variety is the \textbf{mean off-diagonal pairwise cosine among the six samples drawn for a
-single condition}. Note the direction: the statistic \emph{decreases} as variety increases.
-The solver is intrinsic Heun, second order, on a uniform grid, default $K=32$, swept over
-$K\in\{1,2,4,8,16,32,64\}$. The one-shot regression baseline is scored by the identical routine
-on the identical task, $768$ conditions $\times\,6$ samples --- confirmed.
+\resp{Output variety is measured as the mean pairwise cosine among the six samples generated for
+the same condition. Note the direction: this number goes \emph{down} when variety goes up. The
+integrator is Heun's method on the sphere, second order, uniform time grid, $32$ steps by
+default. The step sweep covers $K\in\{1,2,4,8,16,32,64\}$:
 
 \begin{center}
 \small
 \begin{tabular}{@{}rrrr@{}}
 \toprule
-$K$ & target cosine $\uparrow$ & pairwise cosine $\downarrow$ & polar $W_1$ $\downarrow$\\
+$K$ & target cosine & pairwise cosine & polar $W_1$\\
 \midrule
 $1$  & $0.3541$ & $0.5299$ & $0.4623$\\
 $2$  & $0.3524$ & $0.3897$ & $0.3286$\\
@@ -122,72 +66,58 @@ $32$ & $0.3175$ & $0.1838$ & $0.0327$\\
 $64$ & $0.3172$ & $0.1829$ & $0.0321$\\
 \bottomrule
 \end{tabular}
-\end{center}}
+\end{center}
 
-\interp{This is the cleanest demonstration of the metric inversion in the whole study. A single
-integration step attains the \emph{highest} target cosine and the \emph{worst} distributional
-fit, by a factor of $14$ in $W_1$. Choosing the integration budget by single-target cosine alone
-selects the coarsest possible rollout. The effect should be attributed to Blau and Michaeli's
-perception--distortion tradeoff, with our contribution being the closed-form quantification, not
-the phenomenon.}
-
-\verdict{\POS}{\FIN}
+One integration step gives the highest target cosine and the worst distributional fit; sixty-four
+steps give the opposite. The one-shot regression baseline is scored by the identical evaluation
+routine on the identical task, $768$ conditions with $6$ samples each --- confirmed.}
 \end{todoitem}
 
 % ------------------------------------------------------------------
 \begin{todoitem}{3}{lines 81--82}
 \ask{How the ``off-trajectory departure of $0.26$'' is defined and computed.}
 
-\resp{No quantity by that name exists. A search of the sweep notebook, both retest notebooks, the
-cluster script and the experiments source returns nothing that computes a trajectory departure,
-and no logged register entry carries the value in that role.}
+\resp{No quantity with this name is computed anywhere: not in the sweep notebook, the two retest
+notebooks, the cluster script, the theory documents, or any earlier version in the repository
+history. The sentence should not stand as written.
 
-\interp{The nearest quantities in the same table are the source-conditioned in-plane energy
-$0.367$ and its pairwise cosine $0.6559$; the analytic do-nothing ladder level is $0.26374$,
-which is numerically closest to $0.26$ but is the \emph{source baseline}, not a departure, and
-already appears elsewhere in the paper under its own name. My recommendation is to delete the
-sentence rather than reverse-engineer a definition that fits the number. If you would prefer to
-keep a statement of that kind, the defensible version is the in-plane energy: azimuth
-conservation is exact for the population field ($1.000$), broken by training to $0.858$ for
-$\M_1$ and to $0.367$ for $\M_2$.}
+Where the number comes from: $0.26$ matches the do-nothing baseline at the operating point,
+$\mathbb E\langle z_0,z_1\rangle = A(s\cos j+\beta\sin j)=0.2637$ analytically, $0.2624$
+measured --- the same value that already appears in Table~1 as ``Do nothing''. So the sentence
+repeats the baseline under a different name and can simply be deleted.
 
-\verdict{\NEG}{\FIN}
+If a statement about trajectories leaving their plane is wanted there, the correct one is: the
+population field keeps every trajectory exactly in the plane spanned by $c$ and $\xi_s$
+(in-plane energy $1.000$); training breaks this --- the marginal model keeps $0.858$ of its
+endpoint energy in that plane and the source-augmented model only $0.367$. Those are the honest
+numbers for that idea, and neither of them is $0.26$.}
 \end{todoitem}
 
 % ------------------------------------------------------------------
 \begin{todoitem}{4 and 8}{lines 91--93 and 185--187}
-\ask{What ``$4\times$ training'' means, and confirmation that all remaining training and
-evaluation settings are unchanged.}
+\ask{What ``$4\times$ training'' means, and confirmation that all other settings are unchanged.}
 
-\resp{It is optimisation steps: $3{,}000\rightarrow12{,}000$, exactly four times. Everything else
-is held fixed --- batch $256$, AdamW at $3\times10^{-4}$ under maximal-update parameterisation,
-gradient clipping at $1.0$, the same checkpoint-selection criterion, the same evaluation
-protocol and the same evaluation seeds. Confirmed by inspection of the training entry point:
-the long run differs from the short one in the step count argument alone.}
-
-\interp{Bookkeeping. It makes the comparison legitimate, which is the point of the question.}
-
-\verdict{\NEU}{\FIN}
+\resp{Optimisation steps: $3{,}000$ against $12{,}000$, exactly four times as many. Nothing else
+changes: batch $256$, AdamW at $3\times10^{-4}$ under maximal-update parameterisation, gradient
+clipping at $1.0$, the same checkpoint-selection rule, the same evaluation protocol and seeds.}
 \end{todoitem}
 
 % ------------------------------------------------------------------
 \begin{todoitem}{5 and 13}{lines 102--103 and 289--293}
 \ask{The exact classifier-free-guidance formulation, the guidance weights, the definition and
-tested values of the source-informativeness parameter $\lambda$, the underlying terminal-cosine
-values, and the unguided reference against which the reported changes are measured.}
+tested values of $\lambda$, the unguided reference, and the underlying values for the full sweep.}
 
-\resp{The guided velocity is
-$v_w=v_{\text{uncond}}+w\,(v_{\text{cond}}-v_{\text{uncond}})$, tangent-projected to the sphere,
-with the unconditional branch obtained from the same network under the condition-dropout flag and
-training carried out at $10\%$ condition dropout. \textbf{$w=1$ is the unguided reference}: the
-implementation returns the conditional field unchanged at that value, so every reported change is
-measured against it. Weights tested: $w\in\{1,2,3\}$.
+\resp{The guided velocity is $v_w=v_{\text{uncond}}+w\,(v_{\text{cond}}-v_{\text{uncond}})$,
+projected to the sphere's tangent space. The unconditional branch is the same network with its
+condition input replaced by a learned null token; training uses $10\%$ condition dropout.
+The unguided reference is $w=1$, where the formula returns the conditional field unchanged; all
+reported changes are measured against it. Weights tested: $w\in\{1,2,3\}$.
 
-$\lambda$ interpolates the initial state from pure noise toward the informative source,
-$z_0\leftarrow\mathrm{slerp}(u,\,z_0,\,\lambda)$ with $u$ uniform on the sphere, so $\lambda=0$ is
-a noise start and $\lambda=1$ a fully informative one; tested at
-$\lambda\in\{0,0.25,0.5,0.75,1\}$, two seeds per cell. Change in terminal target cosine relative
-to $w=1$:
+$\lambda$ moves the starting point from pure noise to the informative source:
+$z_0\leftarrow\mathrm{slerp}(u,z_0,\lambda)$ with $u$ uniform on the sphere, so $\lambda=0$ starts
+from noise and $\lambda=1$ from the informative source. Tested at
+$\lambda\in\{0,0.25,0.5,0.75,1\}$, two seeds each. Change in terminal target cosine relative to
+$w=1$:
 
 \begin{center}
 \small
@@ -202,84 +132,54 @@ $0.75$ & $+0.0002\pm0.0014$ & $-0.2430\pm0.0138$ & $-0.3346\pm0.0065$\\
 $1.00$ & $+0.0007\pm0.0011$ & $-0.3721\pm0.0173$ & $-0.4905\pm0.0039$\\
 \bottomrule
 \end{tabular}
-\end{center}}
+\end{center}
 
-\interp{Two things worth putting in the text. First, the $w=1$ column is flat at zero to within
-$0.0014$, which is the internal consistency check and should be labelled as the reference rather
-than plotted as data. Second, and stronger than the current claim: the sign flips at
-$\lambda_0=0.133$, not near $\lambda=1$. Guidance calibrated for a noise start begins to
-\emph{hurt} as soon as the initialisation carries even slight target information. That is a
-sharper and more useful statement than ``it reverses for informative sources''.
-
-Note also that the draft quotes $+0.157$ and $-0.505$; the current run gives $+0.0770$ and
-$-0.4905$ with seed error bars. The draft numbers are from an earlier pass. The newer values are
-smaller on the positive side but carry standard errors of $4\times10^{-4}$, which is the more
-defensible pair.}
-
-\verdict{\POS}{\FIN}
+The sign flips at $\lambda_0=0.13$: guidance calibrated for a noise start begins to hurt as soon
+as the start carries even slight target information. The draft's $+0.157$ and $-0.505$ are from
+an earlier run; the current values, with seed error bars, are $+0.0770\pm0.0004$ and
+$-0.4905\pm0.0039$.}
 \end{todoitem}
 
 % ------------------------------------------------------------------
 \begin{todoitem}{6 and 14}{lines 121--123 and 308--311}
-\ask{The OpenCLIP architecture and checkpoint, the CIFAR-10 split and number of evaluated
-images, the preprocessing and blur construction, the embedding normalisation, the definition of
-the target-alignment metric, the construction of the class prototype, and the definition of the
-reported factorization discrepancy $0.62$.}
+\ask{The OpenCLIP architecture and checkpoint, the CIFAR-10 split and image count, preprocessing
+and blur construction, embedding normalisation, the target-alignment metric, the class prototype,
+and the definition of the factorization discrepancy $0.62$.}
 
-\resp{OpenCLIP \textbf{ViT-B-32}, checkpoint \texttt{laion2b\_s34b\_b79k}. CIFAR-10
-\textbf{train} split, $6{,}000$ images drawn with a fixed generator seed. Preprocessing is
-OpenCLIP's own transform for that checkpoint; image embeddings are $L_2$-normalised. The source
-is the embedding of a Gaussian-blurred image, kernel size $9$, $\sigma$ drawn uniformly from
-$[0.8,3.0]$ per call. The condition is the $L_2$-normalised mean of the clean embeddings of the
-image's own class. Split $80/20$; the flow is width $512$, three blocks, $\eta=10^{-4}$,
-$3{,}000$ steps, batch $256$, sampled with $32$ Heun steps. Target alignment is the mean cosine
-between the output embedding and the clean target embedding, evaluated on the held-out $20\%$.}
+\resp{OpenCLIP ViT-B-32, checkpoint \texttt{laion2b\_s34b\_b79k}. CIFAR-10 train split,
+$6{,}000$ images drawn with a fixed seed. Preprocessing is OpenCLIP's own transform; embeddings
+are $L_2$-normalised. The source is the embedding of a Gaussian-blurred image, kernel $9$,
+$\sigma$ uniform in $[0.8,3.0]$. The condition is the normalised mean of the clean embeddings of
+the image's own class. Split $80/20$; flow of width $512$ trained $3{,}000$ steps at
+$\eta=10^{-4}$, sampled with $32$ Heun steps. Target alignment is the mean cosine between the
+output embedding and the clean embedding of the same image, on the held-out $20\%$.
 
-\interp{Everything except the last item is settled. \textbf{The $0.62$ is the second untraceable
-number}: no quantity in the code is named a factorization discrepancy. The nearest candidate is
-the estimated off-condition component $\hat\beta=0.6010$, which is close but not equal, and which
-already appears in the paper under its own name and role. The value should either be identified
-against a named column of the run that produced it, or the sentence removed. The re-run of this
-stage has just completed on the cluster and I will check its output before we decide.
-
-One further point that belongs in this section: an earlier version of the label probe was trained
-and scored on the same $6{,}000$ embeddings, which with a $512$-dimensional feature and ten
-classes is roughly one parameter per sample. That entry was withdrawn as instrumentation rather
-than a finding. The current implementation uses a disjoint $80/20$ split and reports the held-out
-accuracy alongside the in-sample one.}
-
-\verdict{\NEU}{\FIN}
+The ``factorization discrepancy $0.62$'' is not computed anywhere under that name. The closest
+value is the estimated off-condition component $\hat\beta=0.6010$, which already appears in the
+paper under its own name. Unless a rechecked run output identifies a column reading $0.62$, the
+sentence should be removed. The label probe in this section is trained and scored on disjoint
+splits ($80/20$); an earlier in-sample version was withdrawn.}
 \end{todoitem}
 
 % ------------------------------------------------------------------
 \begin{todoitem}{7}{lines 162--164}
-\ask{The 27 empirical threshold estimates $\widehat\beta^\star(A,j)$, or the underlying measured
-$\Delta(\beta)$ values over the tested $\beta$-grid.}
+\ask{The 27 empirical threshold estimates, or the underlying measured $\Delta(\beta)$ values.}
 
-\resp{Both are attached. The sweep covers $A\in\{0.15,0.25,0.37,0.50,0.70,0.90\}$ and
-$j\in\{0,0.05,0.15,0.30,0.50,0.80\}$, that is $36$ cells, of which $27$ have a threshold defined
-under the existence criterion; each cell is measured over
-$\beta\in\{0,0.2,0.4,0.6,0.7,0.8,0.9,0.95\}$ and $\widehat\beta^\star$ obtained by linear
-interpolation at the sign change of $\Delta(\beta)$. The per-cell table is printed in
-\texttt{answers.json} under \texttt{threshold\_grid}; \texttt{beta\_star.csv} carries the raw
-$\Delta(\beta)$ in its \texttt{delta} column, so the full comparison can be rebuilt directly.
-
-Maximum absolute error over the $27$ cells: $\mathbf{0.0334}$.}
-
-\interp{This reproduces the $3.3\times10^{-2}$ quoted in the draft to three decimals from the raw
-data, independently of the original analysis path. It is one of the two least contested results
-in the document.}
-
-\verdict{\POS}{\FIN}
+\resp{Both attached. The grid is $A\in\{0.15,0.25,0.37,0.50,0.70,0.90\}$ times
+$j\in\{0,0.05,0.15,0.30,0.50,0.80\}$; $27$ of the $36$ cells have a threshold defined. Each cell
+is measured over $\beta\in\{0,0.2,0.4,0.6,0.7,0.8,0.9,0.95\}$, with $\widehat\beta^\star$ read
+off by linear interpolation at the sign change of $\Delta(\beta)$. The per-cell table
+(predicted, measured, error) is in \texttt{answers.json} under \texttt{threshold\_grid}, and
+\texttt{beta\_star.csv} carries every raw $\Delta(\beta)$ in its \texttt{delta} column. Maximum
+absolute error over the $27$ cells: $0.0334$.}
 \end{todoitem}
 
 % ------------------------------------------------------------------
 \begin{todoitem}{9}{lines 188--191}
-\ask{Whether the capacity sweep has now been repeated at a second learning rate.}
+\ask{Whether the capacity sweep has been repeated at a second learning rate.}
 
-\resp{It has been repeated at a \textbf{third}. The grid is now
-$\eta\in\{10^{-4},3\times10^{-4},10^{-3}\}$ $\times$ four widths $\times$ five seeds, $120$
-trainings, identical protocol. All four registered predictions hold.
+\resp{It has now been run at three: $\eta\in\{10^{-4},\,3\times10^{-4},\,10^{-3}\}$, four widths,
+five seeds each --- $120$ trainings under the identical protocol. The gap ($\M_1$ minus $\M_2$):
 
 \begin{center}
 \small
@@ -294,44 +194,27 @@ $10^{-3}$          & $0.0892$ & $0.1158$ & $0.1020$ & $0.1018$\\
 \end{tabular}
 \end{center}
 
-The sign holds in all twelve cells, at a minimum of $16.2$ standard errors. The mean gap grows
-monotonically with the learning rate at \emph{every} width: $0.0528$, $0.0853$, $0.1022$,
-Spearman $0.90$.}
-
-\interp{This repairs the weakest entry in the register. The previous prediction ``the gap is
-learning-rate independent'' was contradicted and stood as a bare falsification; it is now
-replaced by a characterised monotone trend, which is what an initial-time amplification predicts
-and a generic optimisation failure does not.
-
-The differential is the substantive part and should be stated explicitly. Raising the step size
-from $10^{-4}$ to $10^{-3}$ costs $\M_1$ between $1\%$ and $7\%$ of its terminal fidelity and
-costs $\M_2$ between $19\%$ and $27\%$: the source-conditioned arm is \textbf{four to sixteen
-times more sensitive to step size} than the marginal one, at matched architecture and objective.
-
-One caveat to report rather than round away: at $\eta=3\times10^{-4}$ the gap does narrow with
-width, $0.0835\rightarrow0.0767$, which is $1.9$ standard errors --- just inside our two-sigma
-bar, so the registered claim passed, but a reader who recomputes will find it. The text should
-say ``at no learning rate does the widest model close the gap at the two-standard-error level''.
-
-Finally, the diversity collapse is universal across all twelve cells and \emph{worsens} with
-capacity: the source-conditioned pairwise cosine runs $0.344\rightarrow0.506$ from width $256$ to
-$2048$ at $\eta=10^{-4}$, against a true-posterior reference of $0.050$ and a marginal-model mean
-of $0.225$.}
-
-\verdict{\POS}{\FIN}
+The sign is the same in all twelve cells, at $16$ standard errors or more. The mean gap grows
+with the learning rate at every width ($0.0528$, $0.0853$, $0.1022$; Spearman $0.90$). Raising
+the step size from $10^{-4}$ to $10^{-3}$ costs the marginal model $1$--$7\%$ of its terminal
+fidelity and the source-conditioned model $19$--$27\%$: the source-conditioned arm is four to
+sixteen times more sensitive to the step size at matched architecture and objective. At no
+learning rate does the widest model close the gap at the two-standard-error level; the closest
+case is $3\times10^{-4}$, where the narrowing from width $256$ to $2048$ reaches $1.9$ standard
+errors. The earlier statement that the gap is learning-rate independent is withdrawn and
+replaced by the monotone trend above.}
 \end{todoitem}
 
 % ------------------------------------------------------------------
 \begin{todoitem}{10}{lines 224--226}
-\ask{The full terminal-fidelity values for each $\varepsilon$, together with the definition and
-numerical values of the amplification integral used in the Spearman calculation.}
+\ask{The terminal-fidelity values for each $\varepsilon$, and the definition and numerical values
+of $\int_\varepsilon^1 t^{-1}dt$ used in the Spearman correlation.}
 
 \resp{\begin{center}
 \small
 \begin{tabular}{@{}rrrrr@{}}
 \toprule
-$\varepsilon$ & $\int_\varepsilon^1 t^{-1}dt$ & cosine $\uparrow$ & polar $W_1$ $\downarrow$ &
-pairwise cosine $\downarrow$\\
+$\varepsilon$ & $\int_\varepsilon^1 t^{-1}dt$ & cosine & polar $W_1$ & pairwise cosine\\
 \midrule
 $0.00$ & $7.304$ & $0.2166$ & $0.0367$ & $0.6561$\\
 $0.01$ & $4.610$ & $0.2227$ & $0.0459$ & $0.6574$\\
@@ -344,44 +227,33 @@ $0.35$ & $1.050$ & $0.2945$ & $0.6939$ & $0.9028$\\
 \end{tabular}
 \end{center}
 
-Spearman between the integral and the negated cosine: $\mathbf{0.9643}$. The integral diverges at
+Spearman between the integral and the negated cosine: $0.9643$. The integral diverges at
 $\varepsilon=0$; that point is included by flooring the lower limit at $10^{-3}$ and evaluating a
-$400$-point trapezoid on a uniform grid, which returns $7.304$ rather than the analytic
-$\ln 10^{3}=6.908$ because $1/t$ is steep near the floor. Since Spearman is rank-based, any floor
-below the smallest positive tested $\varepsilon$ leaves the ranking unchanged.}
+$400$-point trapezoid, which returns $7.304$ rather than the analytic $\ln 10^{3}=6.908$ because
+$1/t$ is steep near the floor. Spearman is rank-based, so any floor below the smallest positive
+tested $\varepsilon$ leaves the correlation unchanged.
 
-\interp{\textbf{This obliges a change to the draft.} The current text reads ``truncating the
-integration recovers most of it, $0.2166\rightarrow0.2997$''. That is true in terminal cosine and
-false on both distributional instruments: over the same sweep $W_1$ rises from $0.0367$ to
-$0.6939$, a factor of nineteen, and pairwise cosine from $0.656$ to $0.903$. For reference, doing
-nothing scores $W_1=0.7667$ and pairwise $0.978$, so truncating to $\varepsilon=0.35$ carries the
-model \textbf{ninety per cent of the way back to the do-nothing baseline} while the cosine
-improves.
-
-Truncation is therefore a \emph{probe}, not a remedy. It confirms the diagnosis --- the damage is
-concentrated near $t=0$, and the recovery in cosine tracks the amplification integral at
-$0.964$ --- but the word ``recovers'' has to go. This is the same mean-seeking inversion as
-item~2, appearing for the third time, and reporting it strengthens the paper's own thesis rather
-than weakening it.}
-
-\verdict{\COR}{\FIN}
+The full table also shows that truncation is a probe, not a remedy: over the same sweep the
+cosine improves while $W_1$ rises from $0.0367$ to $0.6939$ and the pairwise cosine from $0.656$
+to $0.903$ --- most of the way back to the do-nothing baseline ($0.7667$ and $0.978$). The word
+``recovers'' in the current text should be softened accordingly; the genuine remedy is item~11.}
 \end{todoitem}
 
 % ------------------------------------------------------------------
 \begin{todoitem}{11}{lines 227--229}
-\ask{The complete auxiliary-source perturbation sweep, all tested values of $\sigma_{\mathrm{aux}}$,
-and the exact construction of the tangential perturbation used during training and sampling.}
+\ask{The complete auxiliary-source perturbation sweep, all tested $\sigma_{\mathrm{aux}}$, and
+the exact construction of the perturbation in training and sampling.}
 
-\resp{The auxiliary input is $a=\exp_{z_0}(\sigma_{\mathrm{aux}}\,u)$ with $u$ a uniformly
-distributed unit tangent vector at $z_0$: a random tangent direction, scaled, then carried back to
-the sphere by the exponential map. \textbf{The same law is applied during training and during
-sampling}, which is the point of the question; the sampler is started at $z_0$ in every case.
+\resp{The auxiliary input is $a=\exp_{z_0}(\sigma_{\mathrm{aux}}\,u)$: draw a uniform unit
+tangent direction $u$ at $z_0$, scale it by $\sigma_{\mathrm{aux}}$, and map back to the sphere
+with the exponential map. The same law is used during training and during sampling, and the
+sampler always starts at $z_0$ itself.
 
 \begin{center}
 \small
 \begin{tabular}{@{}rrrr@{}}
 \toprule
-$\sigma_{\mathrm{aux}}$ & cosine $\uparrow$ & polar $W_1$ $\downarrow$ & pairwise cosine $\downarrow$\\
+$\sigma_{\mathrm{aux}}$ & cosine & polar $W_1$ & pairwise cosine\\
 \midrule
 $0.00$ & $0.2149$ & $0.0367$ & $0.6577$\\
 $0.10$ & $0.2435$ & $0.0425$ & $0.3563$\\
@@ -392,35 +264,23 @@ $1.00$ & $0.3105$ & $0.0354$ & $0.2076$\\
 \end{tabular}
 \end{center}
 
-One caution for reproducibility: the constant at the head of the notebook lists eight values of
-$\sigma_{\mathrm{aux}}$, but the stage that produced this table iterates over the five listed
-above. The five are what should be reported.}
-
-\interp{This is the constructive result of the paper and it is currently understated.
-Auxiliary noise improves \emph{all three} instruments simultaneously: cosine rises to $0.3105$
-against the marginal model's $\approx0.318$, $W_1$ falls to $0.0354$, and pairwise cosine falls
-from $0.658$ to $0.208$ against the marginal model's $0.183$. Where truncation buys cosine by
-destroying the distribution, noising the auxiliary input recovers the marginal model on every
-axis at once.
-
-Together with item~10 the section becomes \emph{one diagnosis, two probes, one remedy}, and the
-remedy is a deployable recipe: if the source must be supplied to the field, supply a noised
-version of it.}
-
-\verdict{\POS}{\FIN}
+These five values are the ones the run used; a constant listing eight values at the head of the
+notebook was not the list this stage iterated over. Unlike truncation, this intervention improves
+all three columns at once, reaching the marginal model on every axis: cosine $0.3105$ against
+$\approx0.318$, $W_1$ $0.0354$ against $0.0327$, pairwise $0.208$ against $0.183$.}
 \end{todoitem}
 
 % ------------------------------------------------------------------
 \begin{todoitem}{15}{lines 319--322}
-\ask{The completed super-resolution experiment: the three tested resolutions, the corresponding
-theoretical dimensional bounds, the measured source and target dimensions, and the dimensionality
-estimation procedure.}
+\ask{The completed super-resolution experiment: three resolutions, theoretical dimensional
+bounds, measured source and target dimensions, and the estimation procedure.}
 
 \resp{STL-10, $5{,}000$ training and $1{,}024$ test images, resized and centre-cropped to each
-resolution. The source is $z_0=\mathsf{UD}z_1$, average pooling by $f=4$ followed by
-nearest-neighbour upsampling; the condition $c$ is the class label. Conditioned on $c$ the source
-is a deterministic function of the target, so the endpoints are maximally dependent. Rank is
-estimated from the Gram matrix in float64 with strictly more samples than the bound.
+resolution, normalised to $[-1,1]$. The condition $c$ is the class label; the source is
+$z_0=\mathsf{UD}z_1$, average pooling by $f=4$ followed by nearest-neighbour upsampling.
+Conditioned on $c$ the source is a deterministic function of the target. Rank is estimated from
+the eigenvalues of the Gram matrix in float64, using strictly more samples than the bound, with a
+relative eigenvalue cutoff of $10^{-10}$.
 
 \begin{center}
 \small
@@ -435,19 +295,19 @@ $96$ & $27648$ & $1728$ & $1728$ & $3071$\\
 \end{tabular}
 \end{center}
 
-The measured source rank equals the predicted bound exactly at all three resolutions, against
-target ranks that are sample-limited full.
+The measured source rank equals the predicted bound exactly at all three resolutions; the target
+ranks are limited only by the sample count.
 
-Additionally, the distributional comparison that the draft records as not run has now been
-carried out, at two resolutions so far:
+The distributional comparison the draft records as not run has now been run. At two resolutions
+so far (resolution $96$ is finishing on the cluster, as is the six-setting source-informativeness
+sweep):
 
 \begin{center}
 \small
 \begin{tabular}{@{}lrrrrrr@{}}
 \toprule
 & \multicolumn{3}{c}{resolution $32$} & \multicolumn{3}{c}{resolution $48$}\\
-Arm & PSNR $\uparrow$ & energy $\downarrow$ & $W_1^{\mathrm{hf}}$ $\downarrow$
-    & PSNR $\uparrow$ & energy $\downarrow$ & $W_1^{\mathrm{hf}}$ $\downarrow$\\
+Arm & PSNR & energy & $W_1^{\mathrm{hf}}$ & PSNR & energy & $W_1^{\mathrm{hf}}$\\
 \midrule
 identity & $19.74$ & $6.743$ & $154.0$ & $20.77$ & $8.942$ & $270.1$\\
 $\M_1$   & $21.49$ & $0.734$ & $92.8$  & $22.99$ & $0.826$ & $154.9$\\
@@ -458,51 +318,53 @@ null floor & --- & $-0.003$ & $7.0$ & --- & $0.001$ & $12.3$\\
 \end{tabular}
 \end{center}
 
-Here ``energy'' is the energy distance between the distribution of null-space residuals of the
-outputs and of the targets, and $W_1^{\mathrm{hf}}$ the one-dimensional Wasserstein distance
-between their high-frequency energy distributions; the null floor is a second independent draw
-from the target set.}
-
-\interp{Two separate results. The rank measurement is the strongest single number in the paper:
-an exact hit on a predicted bound, three times, with no trained model involved. It establishes
-that the source support has strictly smaller dimension than the target support, which is what
-forbids a Lipschitz transport between them.
-
-The distributional table settles the model ordering that the draft leaves open. At both
-resolutions $\M_2$ attains the higher PSNR while fitting the distribution of restored detail
-worse on \emph{both} instruments, consistently across all three seeds. The reversal in the
-restoration setting is therefore the mean-seeking inversion again, measured rather than inferred,
-and should be reported as a third instance of it and not as support for the ordering.
-
-Scope caution: the claim should be drawn only between $\M_1$ and $\M_2$, which are matched in
-capacity and training. The regression arm records the best energy distance of all learned arms
-together with the worst PSNR, so the statistic is not a collapse index on its own.}
-
-\verdict{\POS}{\RUN{} --- resolutions $32$ and $48$ complete; $96$ is running now, as is the
-six-setting source-informativeness sweep}
+``Energy'' is the energy distance between the outputs' and the targets' null-space residuals ---
+the detail the source does not determine; $W_1^{\mathrm{hf}}$ is the Wasserstein distance between
+their high-frequency energy distributions; the null floor comes from splitting the target set in
+half. At both resolutions $\M_2$ has the higher PSNR and the worse fit on both distributional
+columns, in every seed. The comparison is drawn between $\M_1$ and $\M_2$ only, which are matched
+in capacity and training.}
 \end{todoitem}
 
 % ------------------------------------------------------------------
-\section*{Two results not requested in the red items}
+\section*{Answers to the questions in the chat, 5:50\,pm}
 
-\paragraph{The $6.6\times$ ratio is now derived.} It was recorded as measured, not predicted. The
-span response carries two suppression factors the skew response does not --- a window $t(1-t)$
-vanishing at both endpoints, and the rate at which the two interpolant variances separate. With
-homogeneous marginals every symmetric response is exactly zero at first order, while the skew
-response has a closed form. The ratio is consequently \emph{not} a universal constant: it
-diverges as the marginals homogenise, running from $76.8$ to $7.8$ as we interpolate one marginal
-toward the other, so $6.585$ is the sampled ensemble's value at its own separation. This also
-explains the registered contradiction ``skew and span equally fragile''. Full note attached
-(\texttt{ratio.tex}), with six numerical checks against the same integrator.
+\textbf{The power law.} The $x$-axis is the relative Frobenius size of the violation: for the
+span condition, $\|P_\perp(C+C^{\T})\|_F/\|C+C^{\T}\|_F$ with $P_\perp$ removing the components
+along $\Sigma_0$ and $\Sigma_1$; for the skew condition, $\|\mathrm{skew}(C)\|_F/\|C\|_F$. The
+$y$-axis is the relative displacement of the endpoint map,
+$\|M(C)-M_0\|_F/\|M_0\|_F$. Fitted exponents over $180$ points per family: $0.983$
+(rms residual $0.035$) for span and $0.942$ (rms $0.056$) for skew --- both unity within the
+fit.
 
-\paragraph{The criterion holds on a model we did not train.} Stable Diffusion v1.5 image-to-image,
-STL-10 photographs degraded by downsample--upsample, scored by CLIP alignment to the clean image:
+\textbf{The $6.6\times$, now derived.} The ratio is the quotient of two response constants, and
+the mechanism is: the span response carries two suppression factors the skew response does not
+--- a window $t(1-t)$ vanishing at both endpoints, and the rate at which the two interpolant
+variances separate. With equal marginals every symmetric perturbation produces exactly zero
+first-order response while the skew response has a closed form. The ratio is therefore
+approximately constant across violation sizes (both responses are linear) but is \emph{not} a
+universal constant across settings: it grows as the marginals become similar, running from $76.8$
+to $7.8$ as one marginal is interpolated toward the other, so $6.585$ is the sampled ensemble's
+value at its own separation. Full note with proofs and six numerical checks attached
+(\texttt{ratio.tex}).
+
+\textbf{The loss floor.} It is the Markovization gap
+$\int_0^1\mathbb E[\operatorname{Tr}\operatorname{Var}(U_t\mid X_t)]\,dt$, the irreducible floor
+of the flow-matching loss. Invariance of the endpoint map under the stated conditions is proved
+(the pencil criterion); the floor's failure to track the map is both proved and measured: on
+couplings provably equivalent at the endpoint the floor spans a median factor $2.23$, while on
+couplings that move the map by a median $63\%$ it spans only $1.23$. Endpoint differences are
+relative Frobenius norms.
+
+\textbf{New since yesterday.} The criterion also holds on a pretrained image-to-image model we
+did not train. Stable Diffusion v1.5, STL-10 photographs degraded by downsample--upsample,
+scored by CLIP alignment to the clean image, seven transport strengths, three seeds:
 
 \begin{center}
 \small
 \begin{tabular}{@{}rrr@{}}
 \toprule
-degradation factor & source alignment & best achievable gain from transporting\\
+degradation factor & source alignment & best gain from transporting\\
 \midrule
 $2$  & $0.997$ & $-0.189$\\
 $4$  & $0.853$ & $-0.061$\\
@@ -512,14 +374,9 @@ $16$ & $0.430$ & $+0.115$\\
 \end{tabular}
 \end{center}
 
-Monotone in degradation, crossing zero between $8\times$ and $16\times$: transport begins to pay
-once the source's alignment to the target falls below roughly $0.64$. At $2\times$ no tested
-strength beats leaving the image alone, the worst case losing $0.403$. The do-nothing regime is
-therefore reachable in a deployed system and not an artefact of the synthetic model. The
-non-obvious cases are $4\times$ and $8\times$, where the source is visibly degraded, a
-practitioner would run the model without hesitating, and running it still makes the result worse.
-
-This experiment is $64$ images, one checkpoint and one degradation family; it is a targeted test,
-not a broad validation, and should be described as such.
+Transporting hurts at $2\times$, $4\times$ and $8\times$ degradation and starts to pay only
+between $8\times$ and $16\times$, i.e.\ once the source's alignment with the target falls below
+roughly $0.64$. This is $64$ images, one checkpoint and one degradation family --- a targeted
+test rather than a broad validation.
 
 \end{document}
