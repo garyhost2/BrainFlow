@@ -1,0 +1,187 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,booktabs}
+\usepackage{xcolor}
+
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{corollary}{Corollary}
+\theoremstyle{definition}
+\newtheorem{measurement}{Measurement}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+
+\begin{document}
+
+\section*{The threshold: existence, uniqueness, and a correction}
+
+This note answers the question of whether $\Delta(\beta)$ can have a root when
+$A\ge\cos\jmath$. It cannot be ruled out --- it \emph{always} happens. The claim
+``$\beta^\star$ exists $\iff A<\cos\jmath$'' is false in the direction ``$\Longleftarrow$'' is
+used: a transition exists for every admissible $(A,\jmath)$, and $A<\cos\jmath$ is exactly the
+condition for that transition to be \emph{unique}. The corrected statement is stronger than the
+one it replaces, and it recovers three grid cells the sweep had been discarding.
+
+Throughout $A\in(0,1)$, $\jmath\in(0,\pi/2)$, $\beta\in[0,1]$ and $s=\sqrt{1-\beta^2}$, with
+\[
+L(\beta)=A\big(As^{2}+\beta\sqrt{1-A^{2}s^{2}}\big),\qquad
+S(\beta)=A\big(s\cos\jmath+\beta\sin\jmath\big),\qquad
+\Delta=L-S,
+\]
+$L$ the population landing law and $S$ the do-nothing level.
+
+\subsection*{The gap is a difference of two cosines}
+
+\begin{lemma}\label{lem:angle}
+Substitute $\beta=\sin\varphi$ with $\varphi\in[0,\pi/2]$, and set
+$\psi(\varphi)=\arccos\!\big(A\cos\varphi\big)\in[0,\pi/2]$. Then
+\[
+\frac{\Delta}{A}\;=\;\cos\!\big(\psi(\varphi)-\varphi\big)\;-\;\cos(\varphi-\jmath).
+\]
+\end{lemma}
+
+\begin{proof}
+$s=\cos\varphi$, so $S/A=\cos\varphi\cos\jmath+\sin\varphi\sin\jmath=\cos(\varphi-\jmath)$.
+For the landing term, $A\cos\varphi\in[0,A]\subset[0,1)$, so writing $A\cos\varphi=\cos\psi$ is
+legitimate and gives $\sqrt{1-A^{2}\cos^{2}\varphi}=\sin\psi$; hence
+$L/A=\cos\varphi\cos\psi+\sin\varphi\sin\psi=\cos(\psi-\varphi)$.
+\end{proof}
+
+\begin{lemma}\label{lem:psi}
+$\psi(\varphi)\ge\varphi$ on $[0,\pi/2]$, with equality only at $\varphi=\pi/2$; and
+\[
+\psi'(\varphi)=\frac{A\sin\varphi}{\sin\psi(\varphi)}\;\le\;A .
+\]
+\end{lemma}
+
+\begin{proof}
+$A<1$ and $\cos\varphi\ge0$ give $A\cos\varphi\le\cos\varphi$, and $\arccos$ is decreasing, so
+$\psi\ge\varphi$; equality forces $\cos\varphi=0$. Differentiating
+$\cos\psi=A\cos\varphi$ gives $-\sin\psi\,\psi'=-A\sin\varphi$. Since $\psi\ge\varphi$ and both
+lie in $[0,\pi/2]$ where $\sin$ is increasing, $\sin\psi\ge\sin\varphi$, so $\psi'\le A$.
+\end{proof}
+
+Because $\psi\ge\varphi$, both $\psi-\varphi$ and $|\varphi-\jmath|$ lie in $[0,\pi]$, where
+$\cos$ is strictly decreasing. Lemma~\ref{lem:angle} therefore says
+\begin{equation}\label{eq:equiv}
+\Delta(\varphi)>0\quad\Longleftrightarrow\quad \psi(\varphi)-\varphi\;<\;|\varphi-\jmath| .
+\end{equation}
+
+\subsection*{Three exact values, one of which settles the question}
+
+\begin{proposition}\label{prop:values}
+$\dfrac{\Delta(0)}{A}=A-\cos\jmath$, \quad
+$\dfrac{\Delta(\sin\jmath)}{A}=\cos\!\big(\psi(\jmath)-\jmath\big)-1$, \quad
+$\dfrac{\Delta(1)}{A}=1-\sin\jmath$.
+
+In particular $\Delta(1)>0$ always, and
+\[
+\boxed{\;\Delta(\sin\jmath)<0\quad\text{for every }A\in(0,1),\ \jmath\in(0,\pi/2).\;}
+\]
+\end{proposition}
+
+\begin{proof}
+The three values are Lemma~\ref{lem:angle} at $\varphi=0,\jmath,\pi/2$. At $\varphi=\jmath$ the
+comparison term is $\cos 0=1$, its maximum over all $\varphi$, while
+$\psi(\jmath)>\jmath$ strictly by Lemma~\ref{lem:psi} (as $\jmath<\pi/2$), so
+$\cos(\psi(\jmath)-\jmath)<1$.
+\end{proof}
+
+This is the fact the existence claim overlooked. At $\beta=\sin\jmath$ the source sits exactly on
+the geodesic through the condition, the comparison cosine is maximal, and the source strictly
+wins --- \emph{whatever} $A$ is. Existence of a transition above $\sin\jmath$ is then immediate
+from $\Delta(1)>0$ and continuity, with no hypothesis on $A$ at all.
+
+\subsection*{The complete root structure}
+
+\begin{theorem}\label{thm:roots}
+For every $A\in(0,1)$ and $\jmath\in(0,\pi/2)$, $\Delta$ has \emph{exactly one} root in
+$(\sin\jmath,1)$. On $(0,\sin\jmath)$ it has exactly one root if $A>\cos\jmath$ and none if
+$A\le\cos\jmath$. Consequently
+\[
+A<\cos\jmath\quad\Longleftrightarrow\quad
+\Delta \text{ has a single sign change on }(0,1),
+\]
+and the transition itself exists unconditionally.
+\end{theorem}
+
+\begin{proof}
+\emph{Above $\sin\jmath$.} For $\varphi\ge\jmath$, $|\varphi-\jmath|=\varphi-\jmath$, so by
+\eqref{eq:equiv} the sign of $\Delta$ is the sign of
+\[
+h(\varphi):=2\varphi-\jmath-\psi(\varphi).
+\]
+By Lemma~\ref{lem:psi}, $h'=2-\psi'\ge 2-A>1>0$, so $h$ is strictly increasing and has at most
+one zero. It has at least one: $h(\jmath)=\jmath-\psi(\jmath)<0$ and
+$h(\pi/2)=\pi/2-\jmath>0$. Hence exactly one root, and $\Delta$ crosses upwards there.
+
+\emph{Below $\sin\jmath$.} For $\varphi<\jmath$, $|\varphi-\jmath|=\jmath-\varphi$, and
+\eqref{eq:equiv} reduces to $\psi(\varphi)<\jmath$, i.e.\ to
+\[
+k(\varphi):=A\cos\varphi-\cos\jmath>0 .
+\]
+$k$ is strictly decreasing on $(0,\jmath)$ with $k(\jmath)=(A-1)\cos\jmath<0$ and
+$k(0)=A-\cos\jmath$. If $A\le\cos\jmath$ then $k\le0$ throughout and there is no root; if
+$A>\cos\jmath$ then $k$ changes sign exactly once.
+\end{proof}
+
+\begin{corollary}
+When $A>\cos\jmath$ the flow beats the source on $(0,r_1)$, loses on $(r_1,r_2)$, and wins again
+on $(r_2,1)$, where $r_1<\sin\jmath<r_2$. The quantity the sweep measures --- the upward crossing
+--- is $r_2$ in every case, including the cells previously reported as empty.
+\end{corollary}
+
+\begin{remark}
+The mechanism is transparent in the angle variables. $\varphi$ is the polar angle of the target
+law and $\jmath$ that of the source; $\psi-\varphi$ measures how far the population flow lands
+from the condition direction. The source is best exactly when its angle matches the target's,
+$\varphi=\jmath$, and there it cannot be beaten by a flow whose landing angle is displaced by
+$\psi-\varphi>0$. Away from that match the source degrades like $\cos(\varphi-\jmath)$ while the
+flow degrades only through $\psi-\varphi$, whose growth rate is capped at $A<1$ by
+Lemma~\ref{lem:psi}; that gap in rates is what forces the upper crossing.
+\end{remark}
+
+\subsection*{Verification}
+
+\begin{measurement}
+All checks in \texttt{notebooks/threshold\_proof.py}, register in
+\texttt{runs/threshold/results}; eight of eight hold. Lemma~\ref{lem:angle} reproduces
+$\Delta/A$ to $7.1\times10^{-15}$ over $48{,}000$ points; $\psi'$ matches its closed form to
+$4.3\times10^{-9}$ and the slope of $h$ never falls below $1.01$; the three closed forms of
+Proposition~\ref{prop:values} are exact to $4\times10^{-16}$, and
+$\max_{(A,\jmath)}\Delta(\sin\jmath)=-2.5\times10^{-7}<0$ over a $12\times10$ grid.
+Theorem~\ref{thm:roots} is confirmed on all $120$ cells with no exceptions: one root above
+$\sin\jmath$ everywhere, and one below exactly when $A>\cos\jmath$.
+\end{measurement}
+
+\begin{measurement}\label{meas:recovered}
+The three cells the sweep measured and the criterion declared empty are not artefacts. Their
+measured crossings agree with the analytic upper root to the accuracy of the reported cells:
+\begin{center}
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+$A$ & $\jmath$ & $\sin\jmath$ & analytic $r_2$ & measured\\
+\midrule
+$0.70$ & $0.80$ & $0.7174$ & $0.8347$ & $0.8286$\\
+$0.90$ & $0.50$ & $0.4794$ & $0.5869$ & $0.5600$\\
+$0.90$ & $0.80$ & $0.7174$ & $0.7708$ & $0.7586$\\
+\bottomrule
+\end{tabular}
+\end{center}
+They should be added to the comparison, taking it from $27$ cells to $30$.
+\end{measurement}
+
+\begin{remark}[what to change in the draft]
+Three edits. First, the registered entry ``$\beta^\star$ exists iff $A<\cos\jmath$, $27$ of
+$30$'' should be withdrawn: the three ``failures'' were the criterion being wrong, not the
+bisection. Second, Proposition~6.3 should state Theorem~\ref{thm:roots}: existence is
+unconditional, $A<\cos\jmath$ characterises uniqueness. Third, the threshold table's dashes at
+$(0.70,0.80)$, $(0.90,0.50)$ and $(0.90,0.80)$ should be replaced by the upper roots above,
+which the sweep already measured.
+\end{remark}
+
+\end{document}
