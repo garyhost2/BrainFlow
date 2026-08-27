@@ -35,7 +35,8 @@ $\mathcal D(E)=M_0\int_0^1\Phi(t)^{-1}K_E(t)\Phi(t)\,dt$ is the first-order resp
 Proposition~4.28, with
 $K_E(t)=[(1-t)E^{\T}-tE]V_0(t)^{-1}-G_0(t)V_0(t)^{-1}[t(1-t)(E+E^{\T})]V_0(t)^{-1}$.
 Write $E=S_E+N_E$ for the symmetric and skew parts. The expansion point is any admissible
-symmetric coupling; hypotheses (i)--(ii) of Theorem~4.11 are not needed for the response formula.
+symmetric coupling, which is hypothesis (i) of Theorem~4.11; hypothesis (ii) is not needed for
+the response formula.
 
 \begin{lemma}\label{lem:gv}
 For any symmetric coupling $C_0$, $\,G_0(t)=\tfrac12 V_0'(t)$.
@@ -58,7 +59,7 @@ I_\kappa=\int_0^1\frac{dt}{\omega_\kappa(t)},
 \quad
 \omega_\kappa(t)=1-2(1-\kappa)t(1-t),
 \]
-and for $\kappa<1$, with $\mu=2(1-\kappa)$,
+and for $\kappa\in(-1,1)$, with $\mu=2(1-\kappa)\in(0,4)$,
 $I_\kappa=\tfrac{4}{\sqrt{\mu(4-\mu)}}\arctan\sqrt{\tfrac{\mu}{4-\mu}}\ \ge1$.
 In particular the symmetric response vanishes for \emph{every} symmetric direction, in or out of
 $\spn\{\Sigma_0,\Sigma_1\}$, while every skew direction responds at a rate bounded below by
@@ -152,8 +153,9 @@ All checks in float64 against the same second-order integrator as Measurement~4.
 map over $33$ random pair perturbations to maximum relative error $1.3\times10^{-6}$; the two
 forms of $\mathcal A_{ij}$ agree to $2.8\times10^{-17}$. (2)~On engineered pairs with
 proportional variance profiles the measured symmetric response is below $9.1\times10^{-9}$, as
-Corollary~\ref{cor:supp} requires, including off-span directions. (3)~With homogeneous
-non-commuting marginals the response to a random symmetric perturbation is $3.5\times10^{-10}$
+Corollary~\ref{cor:supp} requires, including off-span directions. (3)~With homogeneous marginals
+and $\Sigma$ non-diagonal, so that the diagonal framework of Proposition~\ref{prop:pair} does not
+apply, the response to a random symmetric perturbation is $3.5\times10^{-10}$
 while the skew response in the same setup is $1.54$, matching
 $-I_\kappa N\Sigma^{-1}$ to relative error $3.2\times10^{-9}$ ($\kappa=0.85$,
 $I_\kappa=1.0532$). (4)~Interpolating the second marginal toward the first,
@@ -168,10 +170,32 @@ skew/span ratio & $76.8$ & $42.0$ & $24.2$ & $14.6$ & $10.1$ & $7.8$\\
 \bottomrule
 \end{tabular}
 \end{center}
-The fitted log-log slope is $-0.756$ with rms residual $0.017$; the first-order prediction for
-the $\delta\to0$ limit is slope $-1$ (span response linear in $\delta$, skew response $O(1)$),
-and the milder measured slope over this window reflects the slow decline of the skew constant
-itself with separation ($1.37$ at $\delta=0.05$ to $0.82$ at $\delta=1$). At the ensemble's own
+The fitted log--log slope is $-0.756$ with rms residual $0.017$. The first-order prediction for
+the $\delta\to0$ limit is slope $-1$: by Corollary~\ref{cor:supp} the span response carries a
+factor $\sup_t|(\log v_i/v_j)'|$, which is $O(\delta)$ when the marginals differ by $\delta$,
+while Proposition~\ref{prop:homog} makes the skew response $O(1)$ in that limit.
+
+The measured slope over the reported window is milder than $-1$, and it is worth being exact
+about why, since the ratio slope is identically the skew slope minus the span slope (verified to
+$10^{-15}$). Fitting the two responses separately, and extending the sweep a decade below the
+window above:
+\begin{center}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+window & span exponent & skew exponent & ratio slope\\
+\midrule
+$\delta\in[0.05,1]$    & $0.573$ & $-0.159$ & $-0.732$\\
+$\delta\in[0.005,0.05]$ & $0.933$ & $-0.019$ & $-0.952$\\
+\bottomrule
+\end{tabular}
+\end{center}
+The discrepancy is therefore \emph{not} attributable to the decline of the skew constant: that
+decline contributes $-0.16$, which pushes the ratio slope toward $-1$, not away from it. It is
+the span response scaling sublinearly, as $\delta^{0.57}$, over a window that is not yet
+asymptotic. A decade lower the span exponent has moved to $0.93$ and the ratio slope to $-0.95$,
+which is the convergence the first-order argument predicts. Slopes are ensemble-dependent at the
+$0.02$ level: the same fit on an independently drawn pair of marginals gives $-0.756$ against
+$-0.732$ here. At the ensemble's own
 separation ($\delta=1$) the sweep gives $7.8$, against $6.585$ from the regression-intercept
 estimator of Measurement~4.30 at dimensions $2$--$64$.
 \end{measurement}
