@@ -51,6 +51,7 @@ P.add_argument("--os_steps", type=int, default=30)
 P.add_argument("--os_batch", type=int, default=16)
 P.add_argument("--os_res", type=int, default=512)
 P.add_argument("--os_seeds", default="0,1,2")
+P.add_argument("--os_k", type=int, default=4)
 ARGS = P.parse_args() if len(sys.argv) > 1 else P.parse_args([])
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -876,36 +877,84 @@ if ARGS.part == "offshelf":
         pipe = pipe.to(DEV)
         pipe.set_progress_bar_config(disable=True)
 
+        # a single-target cosine is exactly the family of metric this work argues should not
+        # decide the question on its own, so every setting is also scored distributionally:
+        # k samples per image give a diversity statistic, and the energy distance between the
+        # returned set and the clean set gives a distributional one, each against its own null.
+        K = ARGS.os_k
+        N = len(clean)
+        g_half = torch.Generator().manual_seed(0)
+        perm = torch.randperm(N, generator=g_half)
+        ha, hb = perm[: N // 2].to(DEV), perm[N // 2:].to(DEV)
+        E_NULL = energy_dist(Zc[ha].double(), Zc[hb].double())
+
+        def boot_se(vals, reps=400):
+            v = np.asarray(vals, float)
+            gg = np.random.default_rng(0)
+            idx = gg.integers(0, len(v), size=(reps, len(v)))
+            return float(np.std(v[idx].mean(1)))
+
         rows = []
         for f in FACS:
             src = [degrade(p, f) for p in clean]
-            base = float((emb(src) * Zc).sum(-1).mean())
-            log(factor=f, do_nothing=base, retained=1.0 / (f * f))
-            rows.append(dict(factor=f, strength=0.0, seed=-1, arm="do_nothing",
-                             align=base, do_nothing=base, gain=0.0))
+            Zs = emb(src)
+            base_per = (Zs * Zc).sum(-1)
+            base = float(base_per.mean())
+            base_se = boot_se([float(x) for x in base_per.cpu()])
+            e_base = energy_dist(Zs.double(), Zc.double())
+            # the retained source is deterministic, so its diversity statistic is exactly one
+            log(factor=f, do_nothing=base, do_nothing_energy=e_base, energy_null=E_NULL,
+                retained=1.0 / (f * f))
+            rows.append(dict(factor=f, strength=0.0, arm="do_nothing", align=base,
+                             align_se=base_se, do_nothing=base, gain=0.0,
+                             paircos=1.0, energy=e_base, energy_null=E_NULL,
+                             energy_gain=0.0, k=1))
             for s in STR:
-                for sd in SEEDS:
-                    outs = []
-                    for i in range(0, len(src), ARGS.os_batch):
-                        g = torch.Generator(device=DEV).manual_seed(1000 * sd + i)
-                        outs += pipe(prompt=prompts[i:i + ARGS.os_batch],
-                                     image=src[i:i + ARGS.os_batch],
-                                     strength=s, guidance_scale=7.5,
-                                     num_inference_steps=ARGS.os_steps,
-                                     generator=g).images
-                    a = float((emb(outs) * Zc).sum(-1).mean())
-                    rows.append(dict(factor=f, strength=s, seed=sd, arm="sdedit",
-                                     align=a, do_nothing=base, gain=a - base))
-                    log(factor=f, strength=s, seed=sd, align=a, gain=a - base)
+                # k independent samples per image, so that diversity is measurable at all
+                per_img = [[] for _ in range(N)]
+                for kk in range(K):
+                    for i in range(0, N, ARGS.os_batch):
+                        gg = torch.Generator(device=DEV).manual_seed(9871 * kk + i)
+                        out = pipe(prompt=prompts[i:i + ARGS.os_batch],
+                                   image=src[i:i + ARGS.os_batch],
+                                   strength=s, guidance_scale=7.5,
+                                   num_inference_steps=ARGS.os_steps,
+                                   generator=gg).images
+                        for b, im in enumerate(out):
+                            per_img[i + b].append(im)
+                flat = [im for lst in per_img for im in lst]
+                Zg = emb(flat).view(N, K, -1)
+
+                a_per = (Zg * Zc[:, None, :]).sum(-1).mean(1)
+                a = float(a_per.mean())
+                # mean off-diagonal pairwise cosine among the k samples of one image
+                pw = torch.einsum("nkd,nld->nkl", Zg, Zg)
+                pc_per = (pw.sum((1, 2)) - K) / (K * (K - 1))
+                # matched-size distributional score: one sample per image against the clean set
+                e_all = energy_dist(Zg.reshape(N * K, -1).double(), Zc.double())
+                e_one = energy_dist(Zg[:, 0].double(), Zc.double())
+                # the two scores are paired image by image, so the gain's error bar comes from
+                # bootstrapping the per-image difference, not from the two means separately
+                gain_se = boot_se([float(x) for x in (a_per - base_per).cpu()])
+                rows.append(dict(factor=f, strength=s, arm="sdedit", align=a,
+                                 align_se=boot_se([float(x) for x in a_per.cpu()]),
+                                 do_nothing=base, gain=a - base, gain_se=gain_se,
+                                 paircos=float(pc_per.mean()),
+                                 paircos_se=boot_se([float(x) for x in pc_per.cpu()]),
+                                 energy=e_all, energy_matched=e_one, energy_null=E_NULL,
+                                 energy_gain=e_base - e_all, k=K))
+                log(factor=f, strength=s, align=a, gain=a - base,
+                    paircos=float(pc_per.mean()), energy=e_all,
+                    energy_gain=e_base - e_all)
                 save_csv("offshelf.csv", rows)
                 flush_reg()
         save_csv("offshelf.csv", rows)
 
         def oagg(f, s):
-            v = [r["gain"] for r in rows if r["factor"] == f and r["strength"] == s
+            # one row per setting now; its error bar is the paired image bootstrap stored above
+            m = [r for r in rows if r["factor"] == f and r["strength"] == s
                  and r["arm"] == "sdedit"]
-            return (float(np.mean(v)), float(np.std(v)) / math.sqrt(max(len(v), 1))) if v \
-                else (float("nan"), float("nan"))
+            return (m[0]["gain"], m[0]["gain_se"]) if m else (float("nan"), float("nan"))
 
         cross = {}
         for f in FACS:
@@ -920,14 +969,17 @@ if ARGS.part == "offshelf":
             log(factor=f, crossing_strength=c,
                 best_gain=max(oagg(f, s)[0] for s in STR))
 
+        def row(f, s):
+            m = [r for r in rows if r["factor"] == f and r["strength"] == s]
+            return m[0] if m else None
+
         for f in FACS:
             g_hi, se_hi = oagg(f, STR[-1])
             reg(f"offshelf_transport_helps_at_f{f}", g_hi > 2 * max(se_hi, 1e-9),
                 "on a pretrained image-to-image system we did not train, running the transport "
                 "beats returning the degraded source once the source is uninformative enough",
                 factor=f, gain=g_hi, gain_se=se_hi, strength=STR[-1],
-                do_nothing=[r for r in rows if r["factor"] == f
-                            and r["arm"] == "do_nothing"][0]["align"])
+                do_nothing=row(f, 0.0)["align"])
 
         mild, harsh = FACS[0], FACS[-1]
         gm = max(oagg(mild, s)[0] for s in STR)
@@ -937,6 +989,40 @@ if ARGS.part == "offshelf":
             "alone, so the do-nothing regime is reachable in a deployed system and not an "
             "artefact of the synthetic model",
             factor=mild, best_gain=gm, best_gain_se=sem)
+
+        # the same question, asked with an instrument the metric section accepts
+        eg_mild = max(row(mild, s)["energy_gain"] for s in STR)
+        reg("offshelf_do_nothing_regime_holds_distributionally", eg_mild < 0,
+            "at the mildest degradation no tested strength brings the returned set closer to "
+            "the clean set in energy distance either, so the do-nothing regime is not an "
+            "artefact of scoring by a single-target cosine",
+            factor=mild, best_energy_gain=eg_mild,
+            do_nothing_energy=row(mild, 0.0)["energy"], energy_null=E_NULL)
+
+        eg_harsh = max(row(harsh, s)["energy_gain"] for s in STR)
+        reg("offshelf_transport_helps_distributionally_when_degraded", eg_harsh > 0,
+            "at the harshest degradation transport does improve the distributional match, so "
+            "the two instruments agree on the sign at both ends and the reversal is a property "
+            "of the setting rather than of the metric",
+            factor=harsh, best_energy_gain=eg_harsh,
+            do_nothing_energy=row(harsh, 0.0)["energy"], energy_null=E_NULL)
+
+        # diversity: the retained source is one deterministic image, so it has none at all
+        pc_hi = row(harsh, STR[-1])["paircos"]
+        reg("offshelf_transport_restores_diversity", pc_hi < 0.98,
+            "the retained source is a single deterministic image and has pairwise cosine one by "
+            "construction; transport produces genuinely different samples for one input, which "
+            "is the property a single-target score cannot see",
+            factor=harsh, paircos_at_max_strength=pc_hi,
+            paircos_do_nothing=1.0, k=ARGS.os_k)
+
+        agree = [f for f in FACS
+                 if np.sign(max(oagg(f, s)[0] for s in STR))
+                 == np.sign(max(row(f, s)["energy_gain"] for s in STR))]
+        reg("offshelf_two_instruments_agree_on_sign", len(agree) == len(FACS),
+            "the cosine and the energy distance agree on whether transport helps at every "
+            "tested degradation, so the reported crossing does not depend on the choice",
+            n_agree=len(agree), n_total=len(FACS), factors_agreeing=str(agree))
 
         fin = [(f, cross[f]) for f in FACS if np.isfinite(cross[f])]
         mono = all(fin[i][1] >= fin[i + 1][1] for i in range(len(fin) - 1))

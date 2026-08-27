@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J offshelf
+#SBATCH -J offshelf_k
 #SBATCH -o logs/%x_%j.out
 #SBATCH -e logs/%x_%j.err
 #SBATCH -p gpu-A100
@@ -41,12 +41,12 @@ python -c "import diffusers, transformers, accelerate; print('diffusers', diffus
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 
 python scripts/cluster_job.py --part offshelf \
-    --out runs/offshelf \
+    --out runs/offshelf_k4 \
     --sr_root data \
     --os_n 64 --os_factors 2,4,8,16 \
     --os_strengths 0.1,0.2,0.3,0.4,0.5,0.6,0.8 \
-    --os_steps 30 --os_batch 16 --os_seeds 0,1,2 \
+    --os_steps 30 --os_batch 16 --os_k 4 \
     --wandb 1 --wandb_project coupling-ledger
 
-echo "offshelf done. results in runs/offshelf/results"
-grep -h '^reg=\|^factor=\|model_' logs/offshelf_${SLURM_JOB_ID}.out || true
+echo "offshelf done. results in runs/offshelf_k4/results"
+grep -h '^reg=\|^factor=\|model_' logs/offshelf_k_${SLURM_JOB_ID}.out || true
