@@ -615,6 +615,32 @@ if ARGS.part in ("sr", "both"):
                     w1_hf=rows[-1]["w1_hf"])
             save_csv("sr.csv", rows)
             flush_reg()
+            # the central claim of this section is that M2 scores higher while restoring less
+            # detail, which is a visible property; save the panel to disk rather than only to
+            # a logging service that may not be reachable from the node
+            if HAVE_MPL and seed == SEEDS[0]:
+                NS = min(6, Xte.shape[0])
+                panels = [("degraded input", Z0te), ("regression", outs["reg"]),
+                          ("$\\mathcal{M}_1$ marginal", outs["m1"]),
+                          ("$\\mathcal{M}_2$ source-conditioned", outs["m2"]),
+                          ("target", Xte)]
+                fig, ax = plt.subplots(len(panels), NS,
+                                       figsize=(1.5 * NS, 1.55 * len(panels)))
+                ax = np.atleast_2d(ax)
+                for r, (ttl, batch) in enumerate(panels):
+                    for c in range(NS):
+                        a = ax[r][c]
+                        a.set_xticks([])
+                        a.set_yticks([])
+                        im = (batch[c].clamp(-1, 1) * 0.5 + 0.5).permute(1, 2, 0).float().cpu()
+                        a.imshow(im.numpy())
+                        if c == 0:
+                            a.set_ylabel(ttl, fontsize=7.5)
+                fig.suptitle(f"Super-resolution at ${res}\\times{res}$, factor {f}: "
+                             "the source-conditioned arm scores higher and restores less detail",
+                             fontsize=9)
+                fig.tight_layout()
+                save_fig(f"C6_sr_examples_res{res}.png")
             if WB is not None:
                 try:
                     grid = torch.cat([Xte[:8], Z0te[:8], outs["reg"][:8],
@@ -894,9 +920,16 @@ if ARGS.part == "offshelf":
             idx = gg.integers(0, len(v), size=(reps, len(v)))
             return float(np.std(v[idx].mean(1)))
 
+        # keep a few examples for a qualitative panel; the numbers say the transport hurts at
+        # mild degradation, and a reader should be able to see it
+        EX = list(range(min(4, N)))
+        gallery = {}
+
         rows = []
         for f in FACS:
             src = [degrade(p, f) for p in clean]
+            for e in EX:
+                gallery[("source", f, e)] = src[e]
             Zs = emb(src)
             base_per = (Zs * Zc).sum(-1)
             base = float(base_per.mean())
@@ -922,6 +955,8 @@ if ARGS.part == "offshelf":
                                    generator=gg).images
                         for b, im in enumerate(out):
                             per_img[i + b].append(im)
+                            if kk == 0 and (i + b) in EX:
+                                gallery[("out", f, s, i + b)] = im
                 flat = [im for lst in per_img for im in lst]
                 Zg = emb(flat).view(N, K, -1)
 
@@ -1031,6 +1066,35 @@ if ARGS.part == "offshelf":
             "of the target, which is the direction the threshold predicts",
             crossings=str({k: round(v, 3) for k, v in cross.items()}),
             n_finite=len(fin))
+
+        # qualitative panel: one row per degradation, clean and retained against the transports
+        if HAVE_MPL and gallery:
+            SHOW = [s for s in STR if s in (0.2, 0.5, 0.8)] or STR[::max(1, len(STR) // 3)]
+            for e in EX:
+                cols = 2 + len(SHOW)
+                fig, ax = plt.subplots(len(FACS), cols,
+                                       figsize=(1.75 * cols, 1.8 * len(FACS)))
+                ax = np.atleast_2d(ax)
+                for r, f in enumerate(FACS):
+                    panels = [("clean", clean[e]), (f"retained ${f}\\times$",
+                                                    gallery[("source", f, e)])]
+                    panels += [(f"$s={s}$", gallery.get(("out", f, s, e))) for s in SHOW]
+                    for c, (ttl, im) in enumerate(panels):
+                        a = ax[r][c]
+                        a.set_xticks([])
+                        a.set_yticks([])
+                        if im is not None:
+                            a.imshow(im)
+                        if r == 0:
+                            a.set_title(ttl, fontsize=8)
+                        if c == 1:
+                            a.set_ylabel(f"align {[x for x in rows if x['factor'] == f and x['arm'] == 'do_nothing'][0]['align']:.2f}",
+                                         fontsize=7)
+                fig.suptitle("Transporting an already-informative source destroys it; "
+                             "the gain only turns positive once the source is far degraded",
+                             fontsize=9)
+                fig.tight_layout()
+                save_fig(f"C5_offshelf_examples_{e}.png")
 
         if HAVE_MPL:
             fig, ax = plt.subplots(1, 2, figsize=(11.0, 4.0))
