@@ -1,0 +1,427 @@
+\documentclass[11pt]{article}
+\usepackage[margin=0.85in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,longtable,array,xcolor}
+\usepackage[colorlinks,linkcolor=blue!45!black,urlcolor=blue!45!black]{hyperref}
+
+\newcommand{\M}{\mathcal M}
+\definecolor{cut}{RGB}{150,25,20}
+\definecolor{put}{RGB}{20,100,55}
+\definecolor{hd}{RGB}{45,45,65}
+
+\newcommand{\LOC}[2]{\medskip\noindent\textcolor{hd}{\rule{\textwidth}{0.6pt}}\par
+  \noindent\textbf{p.#1, line #2}\par\smallskip}
+\newcommand{\NEW}[1]{\medskip\noindent\textcolor{hd}{\rule{\textwidth}{0.6pt}}\par
+  \noindent\textbf{#1}\par\smallskip}
+\newcommand{\OLD}[1]{\noindent\textcolor{cut}{\textbf{Now:}}\ \begingroup\itshape #1\endgroup\par\smallskip}
+\newcommand{\FIX}[1]{\noindent\textcolor{put}{\textbf{Change to:}}\ \begingroup\itshape #1\endgroup\par\smallskip}
+\newcommand{\NOTE}[1]{\noindent\textbf{Reason:}\ #1\par}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+
+\title{Revision plan}
+\author{}
+\date{28 August 2026}
+
+\begin{document}
+\maketitle
+
+This covers everything: the story, the title, the new results, the citations, the figures, and
+the line edits. Page and line numbers are the margin numbers of the 28 August draft.
+
+% ==================================================================
+\section{The story to tell}
+
+The paper currently argues that transport can be harmful and that conditioning on the source
+makes things worse. Both are true, but as a framing this has three problems. It reads as a
+warning rather than a finding. It contradicts two methods that work, one of which was written by
+an invited speaker at the venue. And it measures a single axis, cosine similarity, which the
+paper itself spends a section explaining you should not trust.
+
+There is a better story available, and it needs no new experiments.
+
+Two things can happen when you transport an informative source. You can trade: give up pointwise
+closeness to the particular target and gain distributional realism. This is the
+distortion-perception tradeoff, and it has been known since 2018. Or you can lose on both axes at
+once, which is not a trade and has no reason to happen unless something is structurally wrong.
+
+The paper's own numbers separate these two cases cleanly, and nobody has separated them before.
+Increasing integration accuracy trades: cosine falls from $0.3541$ to $0.3172$ while polar $W_1$
+falls from $0.4623$ to $0.0321$. Stable Diffusion at $8\times$ degradation trades: cosine gain
+$-0.055$, energy gain $+0.054$. Truncating the early interval trades, badly: cosine rises to
+$0.2997$ while $W_1$ rises to $0.6939$, which is ninety per cent of the way back to doing nothing.
+
+Source conditioning does not trade. $\M_2$ is worse than $\M_1$ on cosine, worse on pairwise
+cosine, and worse on $W_1$, in all twelve learning-rate by width cells, at both resolutions of
+the super-resolution experiment, and under both the velocity and the endpoint parameterisation.
+That is the finding.
+
+And it explains two methods rather than contradicting them. PMRF starts from the posterior mean,
+the most informative source available, and transports it, and it wins. It wins because its
+velocity field is not conditioned on the source: the source only sets the initial condition. In
+this paper's terms PMRF is $\M_1$. Augmented Bridge Matching supplies the initial sample to the
+velocity field, explicitly trading the Markov property to recover the training coupling, and it
+wins on that objective. In this paper's terms it is $\M_2$. The $\M_1$ against $\M_2$ comparison
+is the controlled measurement of exactly the choice that separates them.
+
+So the paper is not saying do not transport. It is saying that where the source enters matters,
+that the cost of getting it wrong is measurable, and that in one setting the boundary can be
+computed in closed form.
+
+% ==================================================================
+\section{Title and abstract}
+
+\NEW{Title, p.1}
+\OLD{When Conditional Flow Matching Should Do Nothing: Informative Endpoint Coupling and
+Source-Conditioning Failure}
+\FIX{Transport Moves You Along the Curve; Conditioning Moves You Off It}
+\NOTE{The proposed title is good and I would use it. One caveat so you use it knowingly. The
+second half is exactly right: $\M_2$ is worse on every axis measured, which is off the curve. The
+first half is right for how \emph{much} transport you apply (integration steps, SDEdit strength),
+where cosine and distribution genuinely move in opposite directions. It is not right for
+\emph{whether} to transport at all: above $\beta^\star$ the flow beats doing nothing on cosine
+\emph{and} on $W_1$ ($0.048$ against $0.767$), which is strictly better, not a trade. If you want
+the title to be literally defensible everywhere, add a subtitle that scopes it, for example
+``Transport Moves You Along the Curve; Conditioning Moves You Off It: Informative Sources in
+Conditional Flow Matching''. If you are comfortable with a title that is a slogan rather than a
+theorem, use it as is. Most people will.}
+
+\NEW{Abstract, p.1, lines 1--21}
+\OLD{The current abstract leads with ``Conditional flow matching typically treats the source as
+generic initialization'' and ends with ``informative sources change both when conditional flow
+matching should transport and how source information should be supplied to the dynamics''.}
+\FIX{Draft replacement, to be tightened for length:
+
+``When the source of a conditional flow is already informative about the target, two questions
+separate that coincide under noise initialization: whether to transport it, and whether to tell
+the velocity field what it was. We study both in a spherical model where the endpoint coupling
+can be varied at fixed conditional marginals, and we give a closed-form landing law and an
+explicit threshold locating the first question. For the second we show that supplying the source
+to the field makes the flow-matching target exactly recoverable along training trajectories, at
+the cost of a recovery map whose sensitivity diverges as $1/t$; the same divergence holds on the
+geodesic interpolant actually used. Empirically the two questions behave differently. Applying
+more transport trades pointwise alignment for distributional fidelity, the tradeoff of Blau and
+Michaeli, and we locate it exactly. Conditioning the field on the source does not trade: it is
+worse on target alignment, on conditional diversity, and on distributional distance
+simultaneously, across twelve learning-rate and width settings, at three super-resolution
+resolutions, and under both velocity and endpoint parameterization. This distinction explains why
+posterior-mean rectified flow, which transports a maximally informative source without
+conditioning on it, succeeds, while augmentation that conditions on the source succeeds only for
+objectives that reward coupling recovery. Experiments with OpenCLIP embeddings, super-resolution,
+a masked-diffusion analogue, and a pretrained Stable Diffusion image-to-image model test the
+picture beyond the controlled setting.''}
+\NOTE{The current abstract contains no word that connects to the venue's framing and no
+acknowledgement of the literature it sits in. This version names the tradeoff, names the two
+methods it reconciles, and reports both axes.}
+
+% ==================================================================
+\section{New results to insert}
+
+Six completed experiments are absent from the draft. Two of them change what the paper can claim.
+
+\NEW{New subsection in Appendix B: the parameterisation control}
+\FIX{Insert the text of \texttt{param\_section.tex}, first block.}
+\NOTE{This is the answer to the first question anyone will ask, and it was open until this week.
+The gap survives endpoint prediction: at $\eta=10^{-4}$ it retains $96\%$ of its size at $80$
+standard errors, at $\eta=10^{-3}$ it retains $70\%$, and averaged over rates $78\%$. The
+diversity collapse survives, and $\M_2$ still attains the lower training loss under endpoint
+prediction. Report the qualification too: roughly $30\%$ of the extra gap induced by the larger
+step size is parameterisation-specific, even though the gap itself is not.}
+
+\NEW{Section 8 Limitations, p.8, lines 303--305, and a new appendix subsection}
+\FIX{A discrete masked-diffusion analogue was run over six source-informativeness levels with
+four arms. Conditioning on the source while starting from it \emph{helps} there, by $+0.0107$ on
+average and at five of six levels, where in the continuous model it costs about $0.10$.}
+\NOTE{The limitation paragraph currently says whether the mechanism persists under stochastic
+dynamics ``remains open''. It is not open. It was tested and the sign reversed. Reporting a
+boundary you found yourself is much better than having a reviewer find it. Full table in
+\texttt{review\_aug28}, section 4.3.}
+
+\NEW{Appendix A.2.1, after p.11 line 391}
+\FIX{Add the criterion verified across dimensions $2$ to $64$: systems satisfying both hypotheses
+have worst ninetieth-percentile drift $4.06\times10^{-8}$, systems violating a hypothesis at
+relative size $0.1$ have smallest median drift $9.78\times10^{-3}$, a separation of
+$2.41\times10^{5}$.}
+\NOTE{The paper currently supports Proposition 1 with a $180$-point power-law fit. This is a much
+stronger statement and it costs two sentences.}
+
+\NEW{After Proposition 1, p.3, lines 119--123}
+\FIX{Add the four-arm test isolating the two hypotheses. Symmetric and in span, commuting
+marginals: $6.34\times10^{-5}$. Symmetric and in span, non-commuting: $6.34\times10^{-5}$.
+Symmetric and off span: $7.62\times10^{-3}$. Skew and in span: $9.52\times10^{-1}$.}
+\NOTE{Two things the paper asserts without evidence follow immediately. The remark at p.11 lines
+381--383, that invariance does not need commuting marginals, is confirmed to five digits by the
+first two rows. And the $6.585$ asymmetry appears here directly as a factor of $125$.}
+
+\NEW{Appendix B.2, near p.17 line 585}
+\FIX{Add the standard-parameterisation control: at width $2048$ the gap is $0.0998$ under
+standard parameterisation and $0.0988$ under maximal-update.}
+\NOTE{The capacity conclusion currently rests on one parameterisation. This is the obvious
+question and the answer is already computed.}
+
+\NEW{Appendix B.3, near p.20 lines 658--664}
+\FIX{Add the integrator anchor test. At $\alpha=0$ and $\sigma_{\mathrm{aux}}=0$ both auxiliary
+families use the same trained model, terminal losses $4.9116\times10^{-4}$ and
+$4.9046\times10^{-4}$, yet reported distributional errors of $0.0782$ and $0.0367$ when sampled
+with different integrators. Under one integrator the anchor agrees and the families trace one
+curve, cross-to-within ratio $1.40$ against $3.44$.}
+\NOTE{Without this, a reader comparing the two families is comparing two integrators.}
+
+\NEW{Appendix B.8 and the transfer paragraph, p.28 lines 930--941}
+\FIX{Add the six-factor super-resolution sweep and the Stable Diffusion distributional rescore.
+The rank bound is hit exactly at all six factors, taking the total to nine exact agreements. The
+trained flow beats doing nothing at every factor with the gain \emph{falling} as the source
+degrades: $3.81$, $2.26$, $1.97$, $1.29$, $1.02$, $0.59$ PSNR. The rescore of the pretrained
+model, four samples per image:
+
+\begin{center}
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+degradation & source align & best cosine gain & best energy gain & pairwise cosine at $s=0.8$\\
+\midrule
+$2\times$  & $0.997$ & $-0.189$ & $-0.174$ & $0.742$\\
+$4\times$  & $0.853$ & $-0.061$ & $+0.008$ & $0.736$\\
+$8\times$  & $0.733$ & $-0.055$ & $+0.054$ & $0.719$\\
+$16\times$ & $0.430$ & $+0.120$ & $+0.392$ & $0.706$\\
+\bottomrule
+\end{tabular}
+\end{center}
+Energy null floor $0.011$; the retained source has pairwise cosine $1.000$ by construction.}
+\NOTE{Three things follow. At $2\times$ the do-nothing regime holds on both instruments, so the
+headline no longer rests on the metric you disclaim. At $4\times$ the energy gain of $+0.008$ is
+below the null floor and must not be read as a reversal. At $8\times$ the two instruments
+genuinely invert, which is a fourth instance of the paper's own tradeoff, in a production model.
+The contrast with the factor sweep is the useful part: a flow trained for its exact degradation
+beats doing nothing everywhere, a pretrained one applied off the shelf does not.}
+
+\NEW{Appendix B.7, near p.27 lines 885--893}
+\FIX{Add the held-out label probe: $0.058$ accuracy against a chance level of $0.10$ on a
+disjoint split, so the component of the source orthogonal to the condition carries no label
+information.}
+\NOTE{Phrase it as ``does not extract label information'', not as an accuracy figure. The value
+sits about five standard errors below chance, which means the probe anti-generalises rather than
+that it is informative.}
+
+% ==================================================================
+\section{Mathematics to insert}
+
+\NEW{Theorem 2 and its proof, p.4 lines 153--157 and p.14 lines 494--502}
+\OLD{Therefore, $A<\cos\jmath$ is a sufficient condition for the existence of an interior
+flow-versus-do-nothing threshold. \emph{Plus the TODO asking for the converse.}}
+\FIX{A transition exists for every $A\in(0,1)$ and $\jmath\in(0,\pi/2)$. Substituting
+$\beta=\sin\varphi$ and $\psi=\arccos(A\cos\varphi)$ gives
+$\Delta/A=\cos(\psi-\varphi)-\cos(\varphi-\jmath)$. At $\varphi=\jmath$ the second term is
+$\cos 0=1$, its maximum, while $\psi(\jmath)>\jmath$ strictly for $A<1$, so
+$\Delta(\sin\jmath)<0$ always and a root lies in $(\sin\jmath,1)$ unconditionally. What
+$A<\cos\jmath$ characterises is uniqueness: $\psi'\le A$ makes $h=2\varphi-\jmath-\psi$ strictly
+increasing, so there is exactly one root above $\sin\jmath$, and below it the condition reduces
+to $A\cos\varphi>\cos\jmath$, monotone, so a second root appears exactly when $A>\cos\jmath$.}
+\NOTE{Verified on $120$ cells with no exceptions. Full proof in \texttt{threshold.tex}. This also
+fills three cells of Table B1 and takes the comparison from $27$ to $30$.}
+
+\NEW{Appendix A.6, p.15 lines 521--545}
+\FIX{Add the geodesic version. On the interpolant actually used, the recovery determinant
+collapses to $-\sin((1-\alpha)t\theta)/\sin\theta$ and the sensitivity is
+$\sin((1-\alpha t)\theta)/\sin((1-\alpha)t\theta)$, which diverges as $1/t$ exactly as in the
+flat case, differing by the bounded factor $\sin\theta/\theta$.}
+\NOTE{Propositions 2 and 3 are derived for the linear interpolant while every experiment uses the
+geodesic, and Section 8 flags this as open. It is not. Verified against finite differences in
+dimension $64$ to $2.7\times10^{-10}$.}
+
+\NEW{Appendix A.2.1, p.12 lines 426--435}
+\FIX{Delete the three TODO blocks. Insert the first-order derivation from \texttt{ratio.tex}, and
+correct the explanation of the slope: the ratio slope is identically the skew slope minus the
+span slope. Over the reported window the span exponent is $0.573$ and the skew exponent $-0.159$,
+giving $-0.732$; a decade lower they are $0.933$ and $-0.019$, giving $-0.952$.}
+\NOTE{The shortfall from $-1$ is the span response being sublinear over a window that is not yet
+asymptotic. It is not the decline of the skew constant, which pushes the slope toward $-1$, not
+away from it. If the paper says otherwise the arithmetic contradicts it.}
+
+% ==================================================================
+\section{Citations}
+
+The draft cites nine works. Your own prior-art audit covers sixteen, and five of those are
+missing, including one the audit marks ``Same'' with the action written as ``Cite''. Four more
+came out of the literature check. Adding these fixes the thin reference list in one pass.
+
+\begin{longtable}{@{}p{0.30\textwidth}p{0.64\textwidth}@{}}
+\toprule
+Work & Where it goes and what to say\\
+\midrule
+\endhead
+Blau and Michaeli, CVPR 2018 &
+Section 2 and the reference-ladder discussion at p.6 lines 207--214. Table C1's ordering, with a
+perfect sampler at $0.137$ scoring below doing nothing at $0.264$, is their theorem reproduced on
+a sphere. Claim the closed-form quantification, not the phenomenon. Your audit already lists this
+as ``Same''.\\
+\addlinespace
+Ohayon, Michaeli, Elad, PMRF, arXiv:2410.00418 &
+Section 2 and Appendix B.3. PMRF is $\M_1$ with a noised initialization. It also adds Gaussian
+noise to the posterior mean and gives the reason: source and target lie on manifolds of different
+dimension and the noise alleviates the singularity of a deterministic map between them. That is
+your Corollary 4.21 and your rank table. Cite it as convergent evidence, and state that your
+$\sigma_{\mathrm{aux}}$ perturbs the auxiliary input while the sampler still starts at the
+unperturbed source, which is a different intervention.\\
+\addlinespace
+Freirich et al., distortion-perception function &
+Section 2, alongside Blau and Michaeli, for the closed-form treatment.\\
+\addlinespace
+Kim et al., Better Source Better Flow, arXiv:2602.05951 &
+Section 2. They learn a condition-dependent source distribution and identify distributional
+collapse plus a variance-regularization fix. Distinguish in one sentence: they regularize the
+source distribution, you noise the auxiliary input with the source held fixed.\\
+\addlinespace
+Albergo et al., stochastic interpolants &
+Appendix A.6, as the reference PMRF uses for the low-dimensional-manifold singularity.\\
+\addlinespace
+Delbracio and Milanfar, InDI &
+Section 2, for iterative restoration from a degraded observation. Already in your audit.\\
+\addlinespace
+Tsimpos et al. &
+Section 2 and Appendix A.2. Already in your audit, and their open problem about intermediate
+regimes between independence and determinism is the one Theorem 4.11 answers a case of.\\
+\addlinespace
+Zhang et al., Bridge Graphical Models &
+Appendix on the loss floor. They study the same Markovization gap and report the coupling moving
+it by two orders of magnitude. Your addition is that the gap is decoupled from, and ordered
+against, the endpoint map. State this explicitly or a reader will take their result as a
+contradiction.\\
+\addlinespace
+Pooladian et al., Multisample Flow Matching &
+Section 2, coupling design.\\
+\bottomrule
+\end{longtable}
+
+\textbf{One warning.} Nine sources in your audit are marked as unverified secondary summaries,
+with a standing note that each must be confirmed before submission. The load-bearing one is Wang
+et al., the prior for the $1/t$ mechanism in Section 6 and Appendix A.6. If it proves more than
+the summary suggests, that section narrows. This is an hour of reading, not an experiment.
+
+% ==================================================================
+\section{Figures}
+
+The paper has no images despite two image experiments. Both panels now exist.
+
+\begin{longtable}{@{}p{0.22\textwidth}p{0.72\textwidth}@{}}
+\toprule
+Figure & Action\\
+\midrule
+\endhead
+Figure 1, p.6 line 206 &
+Unreadable at three-across. Use the three separate panels, or give the composite full page width.
+Panel (a) must label the green points ``population field (measured)'', not ``flow'': they come
+from the fitted oracle, which is why they sit near $0.335$ rather than $\M_1$'s $0.3184$.\\
+\addlinespace
+Figure 2, p.17 line 574 &
+Plots the $j=0$ points that Table B1's own caption calls formal only, and the three cells with
+$A\ge\cos\jmath$, which is why isolated points appear at $A=0.9$ with no curve. Adopt the
+corrected Theorem 2 and plot all $30$ with their analytic upper roots, so every point has a
+curve.\\
+\addlinespace
+Figure 3, p.18 line 591 &
+Legend entries are malformed, reading ``source-conditioned $\eta$:0.000 1''. Regenerate.\\
+\addlinespace
+Figures 1 and 5 &
+The same figure appears twice, p.6 and p.24. Fixed by deleting Appendix C.\\
+\addlinespace
+New: super-resolution panel &
+Rows are degraded input, regression, $\M_1$, $\M_2$, target. $\M_2$ is visibly smoother than
+$\M_1$ while scoring higher, and the regression row is sharpest of all while scoring worst. This
+makes the central claim visible instead of asserted. Put it in the main text if space allows.\\
+\addlinespace
+New: image-to-image panel &
+Rows are degradation levels, columns are clean target, retained source, and outputs at three
+strengths. At $2\times$ and strength $0.8$ the model has replaced the input with a different
+image, which is why alignment collapses. Caption should note that at $16\times$ the output is a
+plausible image but not a recovery of the original, so both metrics may be rewarding realism.\\
+\addlinespace
+New: two-metric panel &
+Cosine gain and energy gain side by side across strengths, with the null floor shaded. This is
+the figure that carries the two-axis story.\\
+\bottomrule
+\end{longtable}
+
+% ==================================================================
+\section{Line edits}
+
+These are corrections to text that is already there. The full list with exact replacement wording
+is in \texttt{errata.tex}; the ones that change a claim are repeated here.
+
+\begin{longtable}{@{}p{0.14\textwidth}p{0.38\textwidth}p{0.42\textwidth}@{}}
+\toprule
+Location & Now & Change to\\
+\midrule
+\endhead
+p.7, 242--243 & cosine from $0.350$ to $0.319$ & $0.3541$ to $0.3172$\\
+p.7, 252--253 & alignment $0.50$ to $0.69$, prototype $0.79$ & $0.5517$ to $0.7586$, prototype
+$0.7930$, random-pair floor $0.4815$\\
+p.7, 264 and p.28, 922 & At both completed resolutions & At all three resolutions. At
+$96\times96$ the two models score $23.1984$ and $23.1984$, identical, while energy is $1.888$
+against $2.222$\\
+p.7, 227--228 & gap $0.0985$ at width 256 and $0.1040$ at 2048 & positive in all twelve cells,
+$0.0419$ to $0.1158$, minimum $16$ standard errors (Table B2)\\
+p.22, 719--721 & $+0.157$ and $-0.505$ & $+0.0770_{\pm0.0004}$ and $-0.4905_{\pm0.0039}$\\
+p.22, 722 & a stray \texttt{:contentReference[\ldots]} string & delete\\
+p.22, 749--751 & factorization discrepancy is $0.62$ & delete. No such quantity is computed; the
+stage was re-run and no column equals $0.62$. Nearest is $\hat\beta=0.6010$, already named\\
+p.24, 790--791 & $0.350$ and $0.319$ & $0.3541$ and $0.3172$\\
+p.27, 881--882 & $0.2195\to0.3122$, $\M_1=0.3195$ & $0.2149\to0.3105$, $\M_1=0.3180$\\
+p.16, 571--573 & maximum absolute error $3.3\times10^{-2}$ & add: the error is one-sided,
+measured exceeds analytic in $22$ of $27$ cells, mean signed error $+0.0099$, sign test
+$p=1.5\times10^{-3}$\\
+p.6, 207--209 & $0.322$ (learned flow) & $0.3184$, matching line 217 and Table C4\\
+p.6, 209 & $0.137$ (perfect sampler) & say which reference: $A^2=0.1369$ for a draw sharing the
+posterior mean, against $0.0500$ for a draw given the condition alone\\
+p.18, Table B3 & the earlier width sweep & delete; fold its loss and distributional trend into
+Table B2's discussion\\
+\bottomrule
+\end{longtable}
+
+\textbf{Add to the evaluation protocol.} The distributional report fixes its evaluation seed and
+the fidelity report does not, so scoring one identical trained network twice gives cosines
+differing by about $0.002$. State this once. It sets a floor below which differences are not
+meaningful, and it resolves several places where the same model appears with slightly different
+numbers without editing any of them. All gaps claimed in the paper are between $0.04$ and $0.12$.
+
+% ==================================================================
+\section{Structure}
+
+\NEW{Delete Appendix C, p.24 lines 769--959}
+\NOTE{Appendix C repeats Appendix B in full. The threshold, the reference ladder, guidance,
+capacity, CLIP and super-resolution each appear twice with different numbers, and the note at
+p.24 lines 770--773 already says C should go. Move Tables C1 to C9 and Figure 5 into Appendix B,
+keeping the C version where it is newer: C6 supersedes the guidance text in B.6, C7 and C8 fill
+B.8, C1 belongs in B.4. This removes most of the internal contradictions on its own, and it is
+the largest single reduction in similarity-check exposure, since the tool compares the document
+against itself.}
+
+\NEW{Nine TODO blocks}
+\NOTE{p.12 lines 427--435, p.14 lines 498--502, p.19 lines 610--616, p.22 lines 711--714, p.22
+lines 735--739, p.23 lines 754--757, p.23 lines 765--768, p.28 lines 927--929, p.29 lines
+942--944. All nine are answered in \texttt{todo12.tex}. None needs new computation.}
+
+\NEW{NeurIPS checklist, p.30 to p.36}
+\NOTE{All sixteen answers are \texttt{[TODO]} and the instruction block that the template says to
+delete is still at p.30 lines 960--988. The checklist states that papers without it are desk
+rejected. Answers with justifications are in \texttt{checklist.tex}. Read item 16 on LLM usage
+before pasting it; that one is a judgment call and it is yours to make.}
+
+% ==================================================================
+\section{Order of work}
+
+\begin{enumerate}
+\item Delete Appendix C and merge its tables into B. Most of the contradictions go with it.
+\item Add the ten citations and write the two positioning paragraphs, PMRF and ABM. This is the
+highest-value day in the whole plan: it is what makes the paper look like it knows its field.
+\item Retitle, rewrite the abstract, and rewrite Section 5 and Section 7.1 around the two axes.
+\item Apply the line edits and fill the nine TODOs.
+\item Insert the new results: parameterisation control, masked diffusion, criterion at scale,
+four-arm test, six-factor sweep, image-to-image rescore, resolution $96$.
+\item Insert the three new figures and regenerate Figures 1, 2 and 3.
+\item Complete the checklist.
+\item Verify the nine unread secondary sources, Wang et al. first.
+\end{enumerate}
+
+Nothing above needs a GPU. Every experiment is finished.
+
+\end{document}
