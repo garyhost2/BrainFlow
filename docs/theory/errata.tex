@@ -1,0 +1,372 @@
+\documentclass[11pt]{article}
+\usepackage[margin=0.8in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,xcolor,framed}
+\usepackage[colorlinks,linkcolor=blue!45!black]{hyperref}
+
+
+\newcommand{\M}{\mathcal M}
+\definecolor{bad}{RGB}{150,25,20}
+\definecolor{good}{RGB}{20,100,55}
+\definecolor{hd}{RGB}{40,40,60}
+
+\newcommand{\LOC}[2]{\medskip\noindent\textcolor{hd}{\rule{\textwidth}{0.6pt}}\par
+  \noindent\textbf{\large p.#1 \quad line #2}\par\smallskip}
+\newcommand{\WRONG}[1]{\noindent\textcolor{bad}{\textbf{Currently reads:}}\par
+  \noindent\begingroup\itshape #1\endgroup\par\smallskip}
+\newcommand{\RIGHT}[1]{\noindent\textcolor{good}{\textbf{Replace with:}}\par
+  \noindent\begingroup\itshape #1\endgroup\par\smallskip}
+\newcommand{\WHY}[1]{\noindent\textbf{Why:}\ #1\par}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{3pt}
+
+\title{Errata: line-by-line corrections\\\large \texttt{draft\_close\_to\_final\_aug28}}
+\author{}
+\date{28 August 2026}
+
+\begin{document}
+\maketitle
+
+Every item below is: where it is, what it says now, what it should say. Line numbers are the
+margin numbers of the reviewed PDF. Sorted by page.
+
+Items marked \textbf{[DELETE]} require removing text, not replacing it.
+
+% =====================================================================
+\section*{Main paper}
+
+\LOC{4}{155--157}
+\WRONG{Therefore, $A<\cos\jmath$ is a sufficient condition for the existence of an interior
+flow-versus-do-nothing threshold.}
+\RIGHT{An interior threshold exists for every $A\in(0,1)$ and $\jmath\in(0,\pi/2)$: since
+$\Delta(\sin\jmath)<0$ and $\Delta(1)>0$, a root always lies in $(\sin\jmath,1)$. The condition
+$A<\cos\jmath$ characterises \emph{uniqueness} of the transition: it holds if and only if
+$\Delta$ has a single sign change on $(0,1)$.}
+\WHY{The stronger statement is proved in \texttt{threshold.tex} and verified on 120 cells with no
+exceptions. Theorem~2's statement should be updated to match.}
+
+\LOC{6}{207--209}
+\WRONG{\dots\ 0.338 (predicted flow), 0.322 (learned flow), 0.264 (do nothing) \dots}
+\RIGHT{\dots\ 0.338 (predicted flow), 0.3184 (learned flow), 0.264 (do nothing) \dots}
+\WHY{Line 217 of the same section, Table~C4 and Table~B3 all give $\M_1=0.3184$. The value
+$0.322$ appears only here and in Table~C1. Make one choice and use it everywhere.}
+
+\LOC{6}{209}
+\WRONG{\dots\ and 0.137 (perfect sampler).}
+\RIGHT{\dots\ and 0.137 (perfect sampler, an independent draw sharing the posterior mean; a draw
+conditioned on $\bm c$ alone scores 0.0500).}
+\WHY{Two distinct reference quantities exist, $A^2=0.1369$ and $(As)^2=0.0493$; the measured
+true-posterior row is $0.0500$. As written the reader cannot tell which is meant.}
+
+\LOC{7}{227--228}
+\WRONG{\dots\ the gap is 0.0985 at width 256 and 0.1040 at width 2048.}
+\RIGHT{\dots\ the gap remains positive in all twelve learning-rate by width cells, from 0.0419 to
+0.1158, with the same sign in every cell at a minimum of 16 standard errors (Table~B2).}
+\WHY{$0.0985/0.1040$ come from the earlier single-learning-rate sweep (Table~B3), which is a
+different experiment from the three-rate grid in Table~B2. The two tables are not reconcilable;
+keep B2 and delete B3.}
+
+\LOC{7}{242--243}
+\WRONG{Increasing integration steps from one to sixty-four lowers terminal cosine from 0.350 to
+0.319, while mean pairwise cosine decreases from 0.5299 to 0.1829 \dots}
+\RIGHT{Increasing integration steps from one to sixty-four lowers terminal cosine from 0.3541 to
+0.3172, while mean pairwise cosine decreases from 0.5299 to 0.1829 \dots}
+\WHY{The pairwise-cosine values are from the current run; the cosine values are from an earlier
+one. Table~B6 gives 0.3541 and 0.3172.}
+
+\LOC{7}{252--253}
+\WRONG{\dots\ the flow increases target alignment from 0.50 to 0.69, compared with 0.79 for the
+corresponding class prototype.}
+\RIGHT{\dots\ the flow increases target alignment from 0.5517 to 0.7586, compared with 0.7930 for
+the corresponding class prototype and a random-pair floor of 0.4815.}
+\WHY{Two independent runs, the sweep and the probe rerun, both give these values. The $0.50/0.69$
+pair is from an early pass. Adding the floor is what makes the gain interpretable.}
+
+\LOC{7}{264}
+\WRONG{At both completed resolutions, the source-conditioned model $\M_2$ achieves slightly
+higher PSNR \dots}
+\RIGHT{At all three resolutions, the source-conditioned model $\M_2$ achieves equal or slightly
+higher PSNR \dots}
+\WHY{$96\times96$ is complete. There $\M_1$ and $\M_2$ score 23.1984 and 23.1984 --- identical to
+four decimals --- so ``slightly higher'' is wrong at that resolution. Equal score with an
+18\% worse energy distance is the strongest form of the claim; it should be stated, not dropped.}
+
+\LOC{8}{303--305}
+\WRONG{Finally, the $1/t$ source-recovery singularity is specific to the interpolation analyzed
+here; whether the same mechanism persists under alternative paths, stochastic dynamics, and
+high-dimensional image-space flow matching remains open.}
+\RIGHT{The $1/t$ source-recovery singularity is derived for the linear interpolant; it carries
+over to the geodesic interpolant used in the experiments, where the recovery sensitivity is
+$\sin((1-\alpha t)\theta)/\sin((1-\alpha)t\theta)$ and diverges at the same rate, differing only
+by the bounded factor $\sin\theta/\theta$ (Appendix~A.6). A discrete masked-diffusion analogue,
+reported in Appendix~B, does \emph{not} reproduce the source-conditioning penalty: there,
+conditioning on the source while starting from it helps by $+0.0107$ on average. The mechanism is
+therefore specific to the continuous deterministic setting.}
+\WHY{Both facts are established and currently absent. Leaving the question ``open'' when it was
+tested and the sign reversed is the weaker and riskier option.}
+
+% =====================================================================
+\section*{Appendix A}
+
+\LOC{12}{427--435}
+\WRONG{Three \texttt{[TODO---Yassine]} blocks requesting the marginal-similarity parameter, the
+regression, the asymptotic-slope derivation, and the first-order perturbation derivation.}
+\RIGHT{[DELETE the three blocks.] Insert the content of \texttt{ratio.tex}: the sweep parameter
+is $\delta$ in $\Sigma_1(\delta)=\Sigma_0+\delta(\Sigma_1-\Sigma_0)$ with tested values
+$0.05, 0.1, 0.2, 0.4, 0.7, 1.0$ and corresponding relative marginal separations
+$0.043, 0.087, 0.173, 0.347, 0.607, 0.867$; the regression is ordinary least squares of
+$\log_{10}$ ratio on $\log_{10}\delta$ over those six points, slope $-0.756$, rms residual
+$0.0166$; the asymptotic slope $-1$ follows because the span response carries a factor that is
+$O(\delta)$ while the skew response is $O(1)$.}
+\WHY{All answered. See also the next item, which corrects the explanation currently given for the
+shortfall.}
+
+\LOC{12}{426}
+\WRONG{Across these marginal configurations, the fitted log--log slope is $-0.756$, rather than
+the reported asymptotic prediction $-1$.}
+\RIGHT{Across these marginal configurations the fitted log--log slope is $-0.756$. The ratio
+slope is identically the skew slope minus the span slope. Over this window the span exponent is
+$0.573$ and the skew exponent $-0.159$; a decade lower they are $0.933$ and $-0.019$, giving a
+ratio slope of $-0.952$. The shortfall from $-1$ is therefore the span response being sublinear
+over a pre-asymptotic window, not the decline of the skew constant, which pushes the slope
+\emph{toward} $-1$.}
+\WHY{If the paper attributes the shortfall to the skew constant, the arithmetic contradicts it:
+that term contributes $-0.16$ in the opposite direction.}
+
+\LOC{14}{498--502}
+\WRONG{\texttt{[TODO---Yassine]} asking for a proof that $\Delta$ has no root in $(0,1)$ when
+$A\ge\cos\jmath$.}
+\RIGHT{[DELETE the block.] Insert \texttt{threshold.tex}. There is no such proof because the
+statement is false: $\Delta(\sin\jmath)<0$ for every $A<1$, so a root always exists in
+$(\sin\jmath,1)$. What $A<\cos\jmath$ characterises is uniqueness.}
+\WHY{See p.4 l.155 above. This also fills three cells of Table~B1.}
+
+\LOC{15}{521--545}
+\WRONG{Section A.6 derives the recovery relation and the $1/t$ sensitivity for
+$z_t=(1-t)z_0+tz_1$ only.}
+\RIGHT{[ADD after A.6.8] On the geodesic interpolant used in all experiments, $z_t$ and the
+auxiliary state both lie in $\mathrm{span}\{z_0,z_1\}$; the $2\times2$ recovery determinant
+collapses to $-\sin((1-\alpha)t\theta)/\sin\theta$ and the sensitivity is
+$\sin((1-\alpha t)\theta)/\sin((1-\alpha)t\theta)$, which diverges as $1/t$ exactly as in the
+flat case, differing by the bounded factor $\sin\theta/\theta\in(0,1]$; the remainder is second
+order in $t$ when $\alpha=0$.}
+\WHY{Every experiment uses the geodesic while every proposition in \S6 assumes the linear
+interpolant. Verified against finite differences in dimension 64 to $2.7\times10^{-10}$.}
+
+% =====================================================================
+\section*{Appendix B}
+
+\LOC{16}{571--573}
+\WRONG{\dots\ the measured threshold agrees with the analytic prediction to a maximum absolute
+error of $3.3\times10^{-2}$.}
+\RIGHT{\dots\ the measured threshold agrees with the analytic prediction to a maximum absolute
+error of $3.3\times10^{-2}$. The discrepancy is one-sided: the measured value exceeds the
+analytic one in 22 of the 27 cells, with mean signed error $+0.0099$ (sign test
+$p=1.5\times10^{-3}$), consistent with the finite fitting accuracy of the oracle used to
+integrate the population field.}
+\WHY{A reader who plots the comparison sees the bias immediately. Reporting only the maximum
+absolute error looks like it was not noticed.}
+
+\LOC{16}{Table B1}
+\WRONG{Entries ``--'' at $(A,\jmath)=(0.70,0.80)$, $(0.90,0.50)$ and $(0.90,0.80)$.}
+\RIGHT{$0.8347$, $0.5869$ and $0.7708$ respectively, with measured values $0.8286$, $0.5600$ and
+$0.7586$.}
+\WHY{These cells have two roots, not none; the sweep already measured the upper one, and it
+agrees with the analytic value to $\le0.027$. The comparison becomes 30 cells rather than 27,
+and the sentence at l.571 should be updated accordingly.}
+
+\LOC{18}{Table B3}
+\WRONG{Width / $\M_1$ / $\M_2$ / Gap table with 0.3138, 0.2153, 0.0985 and 0.2904, 0.1864,
+0.1040.}
+\RIGHT{[DELETE the table.] Fold its training-loss and distributional-error trend (l.598--603)
+into the discussion of Table~B2.}
+\WHY{Table~B3 is the earlier single-learning-rate sweep and Table~B2 is the three-rate grid.
+Keeping both invites the question of why the same gap has two values.}
+
+\LOC{19}{610--616}
+\WRONG{Two \texttt{[TODO---Yassine]} blocks on the meaning of ``$4\times$ training'' and on
+whether the capacity sweep was repeated at a second learning rate.}
+\RIGHT{[DELETE both blocks.] $4\times$ means optimisation steps, $3{,}000$ against $12{,}000$,
+with batch size, optimizer, learning rate, parameterisation, gradient clipping, checkpoint
+selection, evaluation protocol and seeds all unchanged. The sweep has been repeated at three
+learning rates, $10^{-4}$, $3\times10^{-4}$ and $10^{-3}$; see Table~B2.}
+
+\LOC{20}{658--664}
+\WRONG{The two interventions are compared without stating that they were originally sampled with
+different integrators.}
+\RIGHT{[ADD] At $\alpha=0$ and $\sigma_{\mathrm{aux}}=0$ both auxiliary families use the same
+trained model (terminal losses $4.9116\times10^{-4}$ and $4.9046\times10^{-4}$). Sampled with
+different integrators they reported distributional errors of $0.0782$ and $0.0367$; re-run under
+a single integrator the anchor agrees and the two families trace one curve, with a
+cross-to-within ratio of $1.40$ against $3.44$ under mismatched integrators.}
+\WHY{Without this, a reader comparing the two families is comparing two integrators.}
+
+\LOC{21}{Evaluation protocol, B.5}
+\WRONG{No statement of evaluation noise.}
+\RIGHT{[ADD] The distributional report fixes its evaluation seed; the fidelity report does not.
+Scoring one identical trained network twice therefore yields cosines differing by about $0.002$,
+which sets a floor below which differences in any reported cosine or pairwise cosine are not
+meaningful. All gaps reported in this work are between $0.04$ and $0.12$.}
+\WHY{This resolves the several places where the same model appears with slightly different
+cosines, without editing any of them.}
+
+\LOC{22}{719--721}
+\WRONG{\dots\ increasing the guidance weight changes terminal target cosine by $+0.157$ under
+noise initialization, but by $-0.505$ under informative initialization.}
+\RIGHT{\dots\ increasing the guidance weight changes terminal target cosine by
+$+0.0770_{\pm0.0004}$ under noise initialization, but by $-0.4905_{\pm0.0039}$ under informative
+initialization.}
+\WHY{The main text at l.234 and Table~C6 already use the corrected values; only this paragraph
+still carries the old pair.}
+
+\LOC{22}{722}
+\WRONG{\dots\ present in the initialization. \texttt{:contentReference[oaicite:0]index=0}}
+\RIGHT{\dots\ present in the initialization.}
+\WHY{[DELETE] Paste artefact.}
+
+\LOC{22}{735--739}
+\WRONG{\texttt{[TODO---Yassine]} asking for the guidance formulation, weights, $\lambda$, the
+terminal-cosine values and the unguided reference.}
+\RIGHT{[DELETE the block.] The formulation is
+$\bm v_w=\bm v_{\mathrm{uncond}}+w(\bm v_{\mathrm{cond}}-\bm v_{\mathrm{uncond}})$ with tangent
+projection, $w\in\{1,2,3\}$, $10\%$ condition dropout, and $w=1$ as the unguided reference;
+$\lambda$ interpolates the start via $\mathrm{slerp}(\bm u,\bm z_0,\lambda)$ with tested values
+$0,0.25,0.5,0.75,1$; the full table is Table~C6.}
+
+\LOC{22}{746--748}
+\WRONG{The blurred-source embedding has target alignment 0.50, while applying the flow increases
+the alignment to 0.69. For comparison, the corresponding class prototype attains 0.79.}
+\RIGHT{The blurred-source embedding has target alignment 0.5517, while applying the flow
+increases the alignment to 0.7586. For comparison, the corresponding class prototype attains
+0.7930 and a random pair of embeddings scores 0.4815, so the flow recovers 89\% of the available
+range.}
+
+\LOC{22}{749--751}
+\WRONG{The measured factorization discrepancy is 0.62, indicating substantial departure from the
+decomposition assumed in the synthetic analysis.}
+\RIGHT{The estimated parameters are $\hat A=0.7923$, $\hat\beta=0.6010$ and
+$\hat\jmath=0.2817$, giving a predicted threshold of $0.5291$; $\hat\beta$ lies above it, so the
+prediction that the flow beats the source was made in advance and holds.}
+\WHY{No quantity named a factorization discrepancy is computed anywhere. The stage was re-run to
+check and no output column equals $0.62$; the nearest value is $\hat\beta=0.6010$, which already
+appears under its own name. The sentence cannot be sourced.}
+
+\LOC{23}{Table B7}
+\WRONG{Blurred source 0.50 \quad Flow output 0.69 \quad Class prototype 0.79}
+\RIGHT{Random pair 0.4815 \quad Blurred source 0.5517 \quad Flow output 0.7586 \quad
+Source-conditioned 0.7507 \quad Class prototype 0.7930}
+\WHY{Adding the floor and the source-conditioned column shows that the model ordering also
+transfers to the real embedding space, which is a result the table currently omits.}
+
+\LOC{23}{754--757}
+\WRONG{\texttt{[TODO---Yassine]} asking for the OpenCLIP architecture, split, preprocessing, blur,
+normalisation, metric, prototype and the $0.62$.}
+\RIGHT{[DELETE the block.] OpenCLIP ViT-B-32, checkpoint \texttt{laion2b\_s34b\_b79k}; CIFAR-10
+train split, 6{,}000 images at a fixed seed; the checkpoint's own preprocessing; $L_2$-normalised
+embeddings; Gaussian blur with kernel 9 and $\sigma\sim\mathrm{Unif}[0.8,3.0]$; condition is the
+normalised class-mean of clean embeddings; $80/20$ split; width 512, 3{,}000 steps at
+$\eta=10^{-4}$, 32 Heun steps; target alignment is the mean cosine to the clean embedding of the
+same image on the held-out 20\%. On the $0.62$, see p.22 l.749 above.}
+
+\LOC{23}{765--768}
+\WRONG{\texttt{[TODO---Yassine]} asking for the completed super-resolution experiment.}
+\RIGHT{[DELETE the block.] The experiment is complete at all three resolutions; the content is in
+Table~C7 and Table~C8, which move here when Appendix~C is merged.}
+
+% =====================================================================
+\section*{Appendix C --- to be deleted}
+
+\LOC{24}{769--959}
+\WRONG{Appendix~C repeats Appendix~B: threshold, reference ladder, guidance, capacity, CLIP and
+super-resolution each appear twice, with different numbers.}
+\RIGHT{[DELETE Appendix~C.] Move Tables C1--C9 and Figure~5 into Appendix~B, replacing the
+corresponding B-tables where C is the newer version. Specifically: C6 (guidance) supersedes the
+B.6 text; C7 and C8 (super-resolution) fill B.8; C1 (reference ladder) belongs in B.4.}
+\WHY{This is the single largest source of internal contradiction, and iThenticate compares the
+document against itself, so duplicated appendices raise the similarity score directly.}
+
+\LOC{24}{790--791}
+\WRONG{Using one integration step gives terminal cosine similarity 0.350, whereas using sixty-four
+steps gives 0.319 \dots}
+\RIGHT{Using one integration step gives terminal cosine similarity 0.3541, whereas using
+sixty-four steps gives 0.3172 \dots}
+\WHY{Table~B6 in the same document gives the corrected values.}
+
+\LOC{27}{881--882}
+\WRONG{\dots\ terminal fidelity increases from 0.2195 at zero perturbation to 0.3122 at the
+strongest tested perturbation, compared with 0.3195 for $\M_1$.}
+\RIGHT{\dots\ terminal fidelity increases from 0.2149 at zero perturbation to 0.3105 at the
+strongest tested perturbation, compared with 0.3180 for $\M_1$.}
+\WHY{Table~B5 in the same document gives 0.2149 and 0.3105.}
+
+\LOC{27}{885--893}
+\WRONG{The CLIP paragraph does not report the label probe.}
+\RIGHT{[ADD] A linear probe trained on the component of the source embedding orthogonal to the
+condition reaches 0.058 accuracy on the held-out split, against a chance level of 0.10, and
+therefore does not extract label information from that component.}
+\WHY{An earlier in-sample version of this probe was withdrawn as instrumentation; the held-out
+version restores the result and should be reported as such.}
+
+\LOC{28}{894--895}
+\WRONG{\dots\ the flow increases target alignment from 0.50 to 0.69, compared with 0.79 \dots}
+\RIGHT{\dots\ the flow increases target alignment from 0.5517 to 0.7586, compared with 0.7930
+\dots}
+
+\LOC{28}{922}
+\WRONG{At both completed resolutions \dots}
+\RIGHT{At all three resolutions \dots}
+
+\LOC{28}{Table C8}
+\WRONG{Two resolution blocks, $32\times32$ and $48\times48$.}
+\RIGHT{[ADD a third block] Resolution $96\times96$: identity PSNR 21.0806, energy 17.1672,
+$W_1^{\mathrm{hf}}$ 998.74; $\M_1$ 23.1984, 1.8884, 623.56; $\M_2$ 23.1984, 2.2222, 659.37; null
+floor 0.0010 and 17.63.}
+
+\LOC{28}{927--929}
+\WRONG{\texttt{[TODO---Yassine]} asking for the sample count, seeds, preprocessing and the
+$96\times96$ results.}
+\RIGHT{[DELETE the block.] All arms are evaluated on the full STL-10 test split of 1{,}024
+images with three training seeds; the loader is the same function used by the dimensionality
+measurement, so the preprocessing and split are identical by construction; the $96\times96$
+results are above.}
+
+\LOC{29}{942--944}
+\WRONG{\texttt{[TODO---Yassine]} asking how the seven strengths are parameterised and what
+``retaining'' versus ``transporting'' means.}
+\RIGHT{[DELETE the block.] The strength is the image-to-image pipeline's own \texttt{strength}
+argument, taking the seven values 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 and 0.8: the degraded image is
+encoded to a latent, noised to a fraction $s$ along the schedule and denoised from there, so
+$\lceil 30s\rceil$ of 30 steps are executed. Retaining means returning the degraded image
+unchanged, and is the baseline with gain zero by definition; transporting means returning the
+pipeline output at strength $s$. Both are scored by CLIP cosine to the clean original.}
+
+% =====================================================================
+\section*{Figures}
+
+\LOC{6}{Figure 1}
+\WRONG{Three panels at one-third column width; axis labels and legends unreadable at print size.}
+\RIGHT{Use the three panels as separate figures, or give the composite full page width. Panel~(a)
+must label the green points ``population field (measured)'', not ``flow'': they are the fitted
+oracle for the population field, which is why they sit near 0.335 rather than $\M_1$'s 0.3184.}
+
+\LOC{17}{Figure 2}
+\WRONG{Plots the $j=0$ points, which Table~B1's own caption calls formal only, and the three
+$A\ge\cos\jmath$ cells, which is why isolated points appear at $A=0.9$ with no curve through
+them.}
+\RIGHT{Either restrict to the 27 cells with a predicted threshold, or adopt the corrected
+Theorem~2 and plot all 30 with their analytic upper roots, which gives every point a curve.}
+
+\LOC{18}{Figure 3}
+\WRONG{Legend entries are malformed: ``source-conditioned $\eta$:0.000 1''.}
+\RIGHT{Regenerate with the legend labels fixed.}
+
+\LOC{---}{No qualitative figure anywhere}
+\WRONG{The paper contains no images despite two image experiments.}
+\RIGHT{[ADD] Two panels are available. The super-resolution panel (degraded input, regression,
+$\M_1$, $\M_2$, target) shows $\M_2$ visibly smoother than $\M_1$ while scoring higher, and the
+regression arm sharpest of all while scoring worst. The image-to-image panel shows, per
+degradation level, the clean target, the retained source, and the output at three strengths.}
+\WHY{The central claim of the paper --- higher score, less restored detail --- is a visual
+property. A reader currently has to take it on trust.}
+
+\end{document}
