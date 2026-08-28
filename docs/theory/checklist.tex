@@ -1,0 +1,175 @@
+% NeurIPS paper checklist -- answers and justifications only.
+% Paste each Answer/Justification pair into the corresponding item of the template block,
+% keeping the template's own question text and guidelines. Section references assume the
+% reorganisation recommended in review_aug28: one Appendix A (Theory) and one Appendix B
+% (Extended Experiments), with Appendix C merged away.
+
+% ---------------------------------------------------------------- 1
+\item {\bf Claims}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The abstract and introduction claim a population landing law and a
+    flow-versus-do-nothing threshold for an informative source, a distinction between starting
+    from the source and conditioning on it, and experiments testing both. These correspond to
+    Theorem~1, Theorem~2, Propositions~2 and~3, and Sections~7.1--7.3. The abstract states that
+    the real-data experiments test the qualitative picture rather than the numerical transfer of
+    the synthetic law, which is the scope actually supported.
+
+% ---------------------------------------------------------------- 2
+\item {\bf Limitations}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section~8 carries a dedicated Limitations paragraph. It states that
+    the landing law and threshold are derived for the structured spherical model and that the
+    exact factorization does not transfer to OpenCLIP embeddings; that curvature and von
+    Mises--Fisher non-Gaussianity are not separated; that the regularized-source theory
+    characterizes the degenerate limit rather than arbitrary finite regularization; that
+    single-target cosine similarity can favour conditional averaging and is therefore not used as
+    a standalone measure; and that the $1/t$ recovery singularity is specific to the interpolant
+    analysed. The masked-diffusion result reported in the appendix, in which the
+    source-conditioning penalty does not appear, is cited there as an explicit boundary on the
+    claim.
+
+% ---------------------------------------------------------------- 3
+\item {\bf Theory assumptions and proofs}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Every formal statement is numbered and proved. Proposition~1 is proved
+    in Appendix~A.2, Lemma~1 in Appendix~A.3, Theorem~1 in Appendix~A.4, Theorem~2 in
+    Appendix~A.5, and Propositions~2 and~3 with Corollary~1 in Appendix~A.6. Assumptions are
+    stated in the theorem statements: Proposition~1 requires a symmetric cross-covariance lying
+    in the span of the two marginals; Theorem~1 is stated for the regularized-source family and
+    assumes convergence of the terminal trajectories as the regularization vanishes; Theorem~2
+    assumes $A\in(0,1)$ and $\jmath\in(0,\pi/2)$; Lemma~1 requires $d\ge4$. Proof sketches appear
+    with each statement in the main text.
+
+% ---------------------------------------------------------------- 4
+\item {\bf Experimental result reproducibility}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Appendix~B specifies the generative law and its parameters, the
+    operating point, the network architecture and width, the optimizer and learning rates, the
+    parameterisation, batch size and step counts, the integration scheme and step count, the
+    checkpoint-selection criterion with its separate evaluation seed, the number of seeds per
+    configuration, and the evaluation protocol including the number of conditions and samples per
+    condition. The real-data settings give the dataset splits and sizes, the OpenCLIP
+    architecture and checkpoint, the blur construction, the degradation operator, and the
+    pretrained image-to-image checkpoint. Code is released; see item~5.
+
+% ---------------------------------------------------------------- 5
+\item {\bf Open access to data and code}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: An anonymized repository accompanies the submission containing the
+    experiment scripts, the cluster job definitions, the analysis and plotting scripts that
+    regenerate every figure and table from the saved outputs, and the saved result files
+    themselves. All datasets used are public: CIFAR-10 and STL-10 are downloaded by the scripts,
+    and the OpenCLIP and Stable Diffusion checkpoints are public. Each experiment is launched by
+    a single documented command.
+
+% ---------------------------------------------------------------- 6
+\item {\bf Experimental setting/details}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The main text gives the operating point and the settings needed to
+    read the results. Appendix~B gives the full details: training hyperparameters and the exact
+    meaning of the training-budget comparison, the learning-rate and width grids, the integration
+    scheme and step counts, the auxiliary-input constructions, the guidance formulation with its
+    weights and the definition of the unguided reference, the source-informativeness
+    parameterisation, and the dimensionality-estimation procedure with its sample sizes and
+    eigenvalue cutoff.
+
+% ---------------------------------------------------------------- 7
+\item {\bf Experiment statistical significance}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The synthetic sweeps use five seeds per configuration, and the
+    capacity table reports the gap in every learning-rate by width cell together with the
+    smallest separation in standard errors of the mean across cells. The guidance table reports
+    seed standard deviations for every entry. The super-resolution comparison uses three training
+    seeds and states that the ordering holds in each seed separately. The pretrained
+    image-to-image experiment reports standard errors obtained by bootstrapping the per-image
+    paired difference over the evaluated images. The distributional measures are reported against
+    a null floor obtained by splitting the target set in half, so each has its own zero. The
+    evaluation protocol states the evaluation-noise floor of approximately $0.002$ on cosine
+    quantities, measured by scoring one identical trained network twice; all reported gaps are at
+    least an order of magnitude larger. Error bars are standard errors of the mean unless stated
+    as standard deviations in the table caption.
+
+% ---------------------------------------------------------------- 8
+\item {\bf Experiments compute resources}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Appendix~B reports per-stage compute. The synthetic programme runs on
+    a single GPU in approximately nine hours in total. Cluster experiments were run on NVIDIA
+    A100 80GB nodes with PyTorch 2.1.0+cu121: the criterion-at-scale sweep, the three
+    super-resolution resolutions (approximately two, two and four and a half hours), the
+    six-factor sweep (approximately half an hour each), the three-learning-rate width sweep
+    (approximately fifty minutes), the auxiliary-family retest, and the pretrained
+    image-to-image experiment (approximately forty minutes). Total compute for the reported
+    results is on the order of twenty-five GPU-hours. Preliminary and superseded runs, including
+    an earlier single-metric version of the image-to-image experiment and an earlier
+    super-resolution pass without the distributional measures, are not included in that figure
+    and add roughly the same again.
+
+% ---------------------------------------------------------------- 9
+\item {\bf Code of ethics}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The research conforms to the NeurIPS Code of Ethics. It uses only
+    public benchmark datasets and public pretrained checkpoints, involves no human subjects and
+    no personally identifying data, and releases code rather than models. Anonymity is preserved
+    in the submitted repository.
+
+% ---------------------------------------------------------------- 10
+\item {\bf Broader impacts}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The work is analytical and its practical consequence is a criterion
+    for when \emph{not} to apply a generative transport, together with evidence that a pretrained
+    image-to-image model can degrade an input it was applied to. The positive impact is reduced
+    unnecessary generation in inverse problems, and a caution against evaluating restoration by a
+    single-target similarity score, which the paper shows can reward averaged outputs. A negative
+    consideration is that the same analysis identifies settings in which a generative model
+    replaces rather than restores its input; the paper reports this as a failure mode to be
+    avoided. The work introduces no new generative capability.
+
+% ---------------------------------------------------------------- 11
+\item {\bf Safeguards}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: No models, datasets or scraped data are released. The released
+    artefacts are analysis code and numerical result files for a controlled synthetic model and
+    public benchmarks. The pretrained checkpoints used are already publicly available and are not
+    redistributed.
+
+% ---------------------------------------------------------------- 12
+\item {\bf Licenses for existing assets}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: CIFAR-10 and STL-10 are cited and used under their standard research
+    terms. The OpenCLIP implementation is used under its MIT license and the ViT-B-32
+    \texttt{laion2b\_s34b\_b79k} checkpoint under the terms of its release. The Stable Diffusion
+    v1.5 checkpoint is used under the CreativeML OpenRAIL-M license. PyTorch, \texttt{diffusers},
+    \texttt{transformers} and \texttt{torchvision} are used under their respective licenses.
+    Versions are pinned in the repository. Each asset is cited at first use with its source URL.
+
+% ---------------------------------------------------------------- 13
+\item {\bf New assets}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The new asset is the code and the saved numerical outputs, released in
+    the anonymized repository with a README documenting the command for each experiment, the
+    structure of the result files, and the analysis scripts that regenerate each figure and
+    table. No new dataset or model is introduced.
+
+% ---------------------------------------------------------------- 14
+\item {\bf Crowdsourcing and research with human subjects}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: The work involves no crowdsourcing and no human subjects.
+
+% ---------------------------------------------------------------- 15
+\item {\bf Institutional review board (IRB) approvals}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: The work involves no research with human subjects, so no IRB review
+    was required.
+
+% ---------------------------------------------------------------- 16
+\item {\bf Declaration of LLM usage}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Large language models were used as a coding and analysis assistant
+    throughout the experimental work: drafting and revising experiment and analysis scripts,
+    inspecting saved outputs, and assisting with the exposition. They were also used to help
+    derive and check several of the analytical results, each of which is stated as a numbered
+    proposition with a written proof and is independently verified numerically against the same
+    integrator used in the experiments; the verification scripts and their registers are included
+    in the released repository. The research question, the experimental design, and the
+    interpretation of the results are the authors'. No LLM is a component of the method under
+    study.
