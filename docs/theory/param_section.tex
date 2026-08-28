@@ -1,0 +1,106 @@
+% Two insertions. The first is a new subsection for Appendix B (the parameterisation control).
+% The second replaces the Related Work treatment of source conditioning in Section 2.
+
+% =====================================================================
+% INSERT AS A NEW SUBSECTION OF APPENDIX B, after the capacity sweep.
+% =====================================================================
+
+\subsection{The gap is not an artefact of the velocity parameterisation}
+
+$\mathcal M_2$ regresses the velocity. Given $(\bm z_t,\bm z_0)$ the paired target is exactly
+recoverable, and Proposition~3 shows that recovery has a $1/t$ Jacobian. A natural objection is
+that the degradation is therefore an artefact of asking the network to represent a quantity whose
+implicit inversion is ill-conditioned at small $t$, and that predicting the endpoint directly
+would remove it.
+
+We test this. In the endpoint parameterisation the network predicts $\hat{\bm z}_1$ as a residual
+from the current state, $\hat{\bm z}_1=\mathrm{normalize}(\bm z_t+f_\theta(\bm z_t,t,\bm c,\bm a))$,
+is trained against $\bm z_1$ directly, and induces the sampling velocity
+$\log_{\bm z}(\hat{\bm z}_1)/(1-t)$, so that the geodesic reaches the predicted endpoint at
+$t=1$. The residual form is used because a zero-initialised output layer makes
+$\mathrm{normalize}(f_\theta)$ degenerate at initialisation; the remaining time is floored at half
+an integration step so that the terminal Heun evaluation stays finite. Everything else --- the
+architecture, the optimizer, the schedule, the seeds and the evaluation --- is unchanged, and the
+evaluation set is seeded so that the two parameterisations are scored on identical conditions.
+Five seeds per cell.
+
+\begin{center}
+\begin{tabular}{@{}llrrrrrr@{}}
+\toprule
+parameterisation & $\eta$ & $\mathcal M_1$ & $\mathcal M_2$ & gap & gap/se &
+$\mathcal M_1$ pair & $\mathcal M_2$ pair\\
+\midrule
+velocity & $10^{-4}$ & $0.3170$ & $0.2614$ & $+0.0556$ & $48.8$ & $0.202$ & $0.437$\\
+endpoint & $10^{-4}$ & $0.2906$ & $0.2374$ & $+0.0532$ & $80.0$ & $0.264$ & $0.500$\\
+\addlinespace
+velocity & $10^{-3}$ & $0.3149$ & $0.1932$ & $+0.1217$ & $127.7$ & $0.213$ & $0.773$\\
+endpoint & $10^{-3}$ & $0.2844$ & $0.1995$ & $+0.0850$ & $21.5$ & $0.213$ & $0.639$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The gap survives. At $\eta=10^{-4}$ it retains $96\%$ of its size under endpoint prediction, at
+$80$ standard errors; at $\eta=10^{-3}$ it retains $70\%$; averaged over the two rates, $78\%$.
+The conditional-diversity collapse survives as well, with $\mathcal M_2$ roughly twice
+$\mathcal M_1$'s pairwise cosine under either parameterisation. And the inversion that motivates
+the analysis is unchanged: under endpoint prediction $\mathcal M_2$ still attains the
+\emph{lower} training loss at both learning rates ($4.09\times10^{-4}$ against
+$5.78\times10^{-4}$, and $3.69\times10^{-4}$ against $5.61\times10^{-4}$), while producing the
+worse rollout.
+
+We report one qualification. Retention is near-complete at the smaller learning rate and
+incomplete at the larger one, so while the gap itself is structural, roughly $30\%$ of the
+\emph{additional} gap induced by a larger step size is specific to the velocity
+parameterisation. The claim supported by this experiment is that source conditioning degrades the
+rollout under either parameterisation, not that the parameterisation is irrelevant to the
+magnitude.
+
+% =====================================================================
+% REPLACES / EXTENDS THE "RECOVERING COUPLING INFORMATION" PARAGRAPH IN SECTION 2.
+% =====================================================================
+
+\paragraph{Where the source enters, in practice.}
+Two successful methods make opposite choices about the informative source, and the distinction
+this paper isolates is exactly the one that separates them.
+
+Posterior-Mean Rectified Flow \citep{ohayon2024pmrf} predicts the posterior mean and then
+transports it to the target distribution with a rectified flow. Its source is as informative as a
+source can be, and yet the transport improves the result --- because the objective is the
+distribution rather than the pointwise reconstruction, and because the flow's velocity field is
+\emph{not} conditioned on the source: the source only sets the initial condition. In our
+terminology PMRF is $\mathcal M_1$. It also adds Gaussian noise to the posterior mean before
+training, and states the reason directly: the source and target lie on manifolds of different
+dimension, and the noise alleviates the singularity of learning a deterministic map between them.
+That is the same obstruction we formalise in Corollary~\ref{cor:degen} and measure in
+Appendix~\ref{sec:srdim}, and the same remedy we study in Appendix~\ref{sec:remedies}, applied
+there to the initialisation rather than to the auxiliary input.
+
+Augmented Bridge Matching \citep{debortoli2023abm} makes the other choice: it supplies the initial
+sample to the velocity field, explicitly trading the Markov property for the ability to recover
+the training coupling. Its objective is coupling recovery for mixture-of-translation tasks, not
+conditional sample quality, and on that objective it succeeds. In our terminology it is
+$\mathcal M_2$.
+
+Our contribution is not that either is wrong. It is the controlled measurement of what that
+architectural choice costs when the objective is the conditional distribution: at matched
+capacity, training and initialisation, supplying the source to the field lowers the regression
+objective and worsens the rollout, in all twelve learning-rate by width cells, under both the
+velocity and the endpoint parameterisation. Read this way, the result explains why PMRF is built
+the way it is, and delimits the regime in which the augmentation of \citet{debortoli2023abm} is
+the right construction.
+
+% Suggested bibliography entries -----------------------------------------
+% @article{ohayon2024pmrf,
+%   title  = {Posterior-Mean Rectified Flow: Towards Minimum MSE Photo-Realistic
+%             Image Restoration},
+%   author = {Ohayon, Guy and Michaeli, Tomer and Elad, Michael},
+%   journal= {arXiv preprint arXiv:2410.00418}, year = {2024}}
+% @inproceedings{blau2018perception,
+%   title  = {The Perception-Distortion Tradeoff},
+%   author = {Blau, Yochai and Michaeli, Tomer},
+%   booktitle = {CVPR}, year = {2018}}
+% Also add: Freirich et al. (theoretical DP curve / optimal estimator),
+%           Kim et al. 2026 (Better Source Better Flow, arXiv:2602.05951),
+%           Albergo et al. 2023 (stochastic interpolants),
+%           Delbracio & Milanfar (InDI), Tsimpos et al., Zhang et al. (BGM),
+%           Pooladian et al. (Multisample Flow Matching).
