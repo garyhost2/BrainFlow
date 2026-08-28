@@ -1,0 +1,442 @@
+\documentclass[11pt]{article}
+\usepackage[margin=0.85in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,longtable,array,xcolor}
+\usepackage[colorlinks,linkcolor=blue!45!black]{hyperref}
+
+\newcommand{\M}{\mathcal M}
+\definecolor{blk}{RGB}{155,25,20}
+\definecolor{con}{RGB}{150,90,10}
+\definecolor{add}{RGB}{20,105,60}
+\newcommand{\BLOCK}{\textcolor{blk}{\textbf{BLOCKING}}}
+\newcommand{\FIX}{\textcolor{con}{\textbf{FIX}}}
+\newcommand{\ADD}{\textcolor{add}{\textbf{ADD}}}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+\newcommand{\pl}[2]{\textbf{p.#1, l.#2}}
+
+\title{Critical review of \texttt{draft\_close\_to\_final\_aug28}}
+\author{}
+\date{28 August 2026}
+
+\begin{document}
+\maketitle
+
+Page and line numbers refer to the margin numbering of the reviewed PDF. Items are grouped by
+what they require: \BLOCK{} must be resolved before submission, \FIX{} is a correction to
+existing text, \ADD{} is material that exists but is not in the paper.
+
+Every number quoted below as ``verified'' was recomputed from the saved run outputs.
+
+% ==================================================================
+\section{Blocking}
+
+\begin{longtable}{@{}p{0.11\textwidth}p{0.30\textwidth}p{0.53\textwidth}@{}}
+\toprule
+Location & Issue & Action\\
+\midrule
+\endhead
+\pl{30--36}{960--1305} & The entire NeurIPS checklist is \texttt{[TODO]}: all 16 answers and
+all 16 justifications. The instruction block that the template says to delete is still present
+(\pl{30}{960--988}). & The checklist itself states that papers without it are desk rejected. Fill
+all 16, delete the instruction block. A complete draft with section pointers is available.\\
+\addlinespace
+\pl{24--29}{769--959} & Appendix C duplicates Appendix B in full: threshold, reference ladder,
+guidance, capacity, CLIP and super-resolution each appear twice, with \emph{different numbers}.
+The note at \pl{24}{770--773} acknowledges this. & Merge into B and delete C. Beyond reviewer
+confusion, iThenticate compares the document against itself; internal duplication inflates the
+similarity score directly.\\
+\addlinespace
+\pl{12}{427--435}, \pl{14}{498--502}, \pl{19}{610--616}, \pl{22}{711--714}, \pl{22}{735--739},
+\pl{23}{754--757}, \pl{23}{765--768}, \pl{28}{927--929}, \pl{29}{942--944} &
+Nine \texttt{[TODO---Yassine]} blocks remain in the appendices. & All nine are answered in the
+material already prepared. None requires new computation.\\
+\addlinespace
+\pl{22}{722} & A literal \texttt{:contentReference}\discretionary{}{}{}\texttt{[\ldots]}%
+\discretionary{}{}{}\texttt{index=0} string appears in the body text of \S B.6, at the end of the
+paragraph beginning ``Relative to the unguided model''. & Delete. This is a paste artefact.\\
+\bottomrule
+\end{longtable}
+
+% ==================================================================
+\section{The paper contradicts itself}
+
+Each row is the same quantity reported with two different values in the same document.
+
+\begin{longtable}{@{}p{0.20\textwidth}p{0.24\textwidth}p{0.24\textwidth}p{0.26\textwidth}@{}}
+\toprule
+Quantity & States & Also states & Correct value\\
+\midrule
+\endhead
+Guidance gain, $w=3$ &
+$+0.0770$ / $-0.4905$ \pl{7}{234}, Table C6 \pl{27}{} &
+$+0.157$ / $-0.505$ \pl{22}{719--721} &
+$+0.0770_{\pm0.0004}$ / $-0.4905_{\pm0.0039}$\\
+\addlinespace
+Auxiliary-noise sweep &
+$0.2149\!\to\!0.3105$, Table B5 \pl{20}{} &
+$0.2195\!\to\!0.3122$, $\M_1=0.3195$ \pl{27}{881--882} &
+Table B5 is correct\\
+\addlinespace
+Integration $K\!=\!1\!\to\!64$ &
+$0.3541\!\to\!0.3172$, Table B6 \pl{21}{} &
+$0.350\!\to\!0.319$ \pl{7}{242--243}, \pl{24}{790--791} &
+Table B6 is correct\\
+\addlinespace
+Capacity gap &
+$0.0892$ / $0.1018$ at $\eta{=}10^{-3}$, Table B2 \pl{17}{} &
+$0.0985$ / $0.1040$, Table B3 \pl{18}{}, \pl{7}{227}, \pl{26}{851} &
+Different sweeps; see \S3\\
+\addlinespace
+$\M_1$ terminal fidelity &
+$0.3184$ \pl{7}{217} &
+$0.322$ \pl{6}{209}, $0.3138$ Table B3 &
+See the noise floor below\\
+\bottomrule
+\end{longtable}
+
+\textbf{Evaluation-noise floor, and why several of these are not errors.} The evaluation routine
+never fixes its own seed, while the distributional routine does. Two rows of the saved output ---
+the $\varepsilon=0$ row of Table B4 and the $\sigma_{\mathrm{aux}}=0$ row of Table B5 --- are the
+\emph{same trained network} (retraining at $\sigma_{\mathrm{aux}}=0$ with the default seed
+reproduces it, as their byte-identical $W_1=0.036684$ and energy distance $0.537162$ confirm).
+Their cosines nevertheless differ by $0.0016$. \textbf{Differences below roughly $0.002$ in any
+reported cosine are evaluation noise.} Stating this once, in the evaluation protocol, resolves the
+$\M_1$ spread and several smaller discrepancies without further edits. Every gap the paper claims
+is between $0.04$ and $0.12$, forty to seventy times larger.
+
+\textbf{Capacity: the two tables are different experiments.} Table B2 (\pl{17}{}) is the
+three-learning-rate grid, $120$ trainings. Table B3 (\pl{18}{}) is the earlier width sweep at a
+single automatically-selected learning rate. They are not reconcilable as stated because they are
+not the same sweep. Recommendation: keep B2, delete B3, and move the training-loss and
+distributional-error trend (\pl{18}{598--603}) into B2's discussion. The main text at
+\pl{7}{226--229} then quotes B2 rather than B3.
+
+% ==================================================================
+\section{Numbers superseded by verified runs}
+
+\begin{longtable}{@{}p{0.20\textwidth}p{0.30\textwidth}p{0.44\textwidth}@{}}
+\toprule
+Location & Currently & Verified\\
+\midrule
+\endhead
+\pl{7}{252--253}, \pl{22}{746--748}, Table B7 \pl{23}{}, \pl{28}{894--895} &
+CLIP alignment $0.50\to0.69$, prototype $0.79$ &
+$0.5517\to0.7586$, prototype $0.7930$, random-pair floor $0.4815$. Two independent runs (the
+sweep and the probe rerun) agree.\\
+\addlinespace
+\pl{22}{750} & ``the measured factorization discrepancy is $0.62$'' &
+No quantity of that name is computed. The stage was re-run to check: no column equals $0.62$.
+Closest is $\hat\beta=0.6010$, already named. \textbf{Delete the sentence.}\\
+\addlinespace
+\pl{7}{264}, \pl{28}{922} & ``At both completed resolutions'' &
+All three are complete. At $96\times96$: PSNR $23.1984$ vs $23.1984$ --- \emph{identical}, not
+``slightly higher'' --- energy $1.888$ vs $2.222$, $W_1^{\mathrm{hf}}$ $623.6$ vs $659.4$.\\
+\addlinespace
+\pl{16}{571--573}, \pl{25}{810--812} & ``maximum absolute error of $3.3\times10^{-2}$'' &
+Correct, but the error is \emph{one-sided}: measured exceeds analytic in $22$ of $27$ cells, mean
+signed error $+0.0099$, sign test $p=1.5\times10^{-3}$.\\
+\bottomrule
+\end{longtable}
+
+The $96\times96$ row is the strongest single result in the super-resolution section and is
+currently absent: the two models are indistinguishable on the pointwise metric to four decimals
+while the distributional gap persists at $18\%$. Add it to Table C8/B8.
+
+% ==================================================================
+\section{Experiments that were run and are not in the paper}
+
+Six completed experiments do not appear anywhere in the draft. Two of them change what the paper
+can claim.
+
+\subsection*{4.1 The criterion verified at scale (job 381574)}
+
+\ADD{} --- belongs in \S A.2.1, after \pl{11}{388--391}.
+
+The paper currently supports Proposition~1 with a $180$-point power-law fit. A separate run
+tested the criterion directly across dimensions $n\in\{2,4,8,16,32,64\}$:
+
+\begin{center}
+\begin{tabular}{@{}lr@{}}
+\toprule
+Systems satisfying both hypotheses, worst $90$th-percentile drift & $4.06\times10^{-8}$\\
+Systems violating a hypothesis at relative size $0.1$, smallest median drift & $9.78\times10^{-3}$\\
+\textbf{Separation} & $\mathbf{2.41\times10^{5}}$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This is a far stronger statement than the power-law fit alone and costs two sentences.
+
+\subsection*{4.2 The two hypotheses separated numerically}
+
+\ADD{} --- belongs immediately after Proposition~1, \pl{3}{119--123}.
+
+Theorem~4.11 has two hypotheses. A four-arm experiment isolates each:
+
+\begin{center}
+\begin{tabular}{@{}lrl@{}}
+\toprule
+Arm & max relative drift & \\
+\midrule
+symmetric, in span, commuting marginals    & $6.34\times10^{-5}$ & invariant\\
+symmetric, in span, non-commuting marginals& $6.34\times10^{-5}$ & invariant\\
+symmetric, off span                        & $7.62\times10^{-3}$ & moves, $120\times$\\
+skew, in span                              & $9.52\times10^{-1}$ & moves, $15{,}000\times$\\
+skew, off span                             & $1.01$              & moves\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two things the paper asserts but does not evidence follow directly. First, the Remark at
+\pl{11}{381--383} --- that invariance does not require $[\Sigma_0,\Sigma_1]=0$ --- is confirmed
+to five digits by the first two rows. Second, the skew/span asymmetry that \S A.2.1 quantifies as
+$6.585$ is visible here as a $125\times$ ratio between the two single-violation arms.
+
+\subsection*{4.3 A masked-diffusion analogue --- the effect does not transfer}
+
+\ADD{} --- belongs in \S8 Limitations, \pl{8}{297--305}, and as a short appendix subsection.
+
+This is the most consequential omission. A discrete masked-diffusion analogue was run over six
+source-informativeness levels, with four arms crossing ``start from mask or from source'' with
+``label only or sees source'':
+
+\begin{center}
+\small
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+$\beta_d$ & do nothing & mask start, & mask start, & source start, & source start,\\
+          &            & label only  & sees source & label only    & sees source\\
+\midrule
+$0.10$ & $0.612$ & $0.806$ & $0.854$ & $0.852$ & $0.850$\\
+$0.25$ & $0.612$ & $0.713$ & $0.820$ & $0.826$ & $0.830$\\
+$0.40$ & $0.612$ & $0.606$ & $0.819$ & $0.809$ & $0.820$\\
+$0.55$ & $0.613$ & $0.458$ & $0.817$ & $0.803$ & $0.820$\\
+$0.70$ & $0.613$ & $0.355$ & $0.831$ & $0.801$ & $0.821$\\
+$0.85$ & $0.611$ & $0.211$ & $0.844$ & $0.799$ & $0.812$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The comparison that matters is the last two columns: conditioning on the source while starting
+from it. In the continuous spherical model this costs roughly $0.10$ in terminal fidelity. Here
+it \emph{helps}, by $+0.0107$ on average and at five of six levels.
+
+\textbf{The source-conditioning penalty is therefore specific to the continuous deterministic
+setting and does not transfer to a discrete masked model.} The paper's limitation paragraph
+(\pl{8}{303--305}) currently says only that whether the mechanism persists ``under alternative
+paths, stochastic dynamics, and high-dimensional image-space flow matching remains open''. It is
+not open --- it was tested, and in one such setting the sign reverses. Reporting this is
+substantially better than having a reviewer ask.
+
+\subsection*{4.4 The parameterisation control}
+
+\ADD{} --- belongs in \S B.2, near \pl{17}{583--585}.
+
+The capacity conclusion currently rests on maximal-update parameterisation alone. The standard
+parameterisation was also run: at width $2048$ the gap is $0.0998$ under standard and $0.0988$
+under maximal-update. The conclusion is therefore not a parameterisation artefact, which is
+exactly what a reviewer will ask.
+
+\subsection*{4.5 The integrator anchor test}
+
+\ADD{} --- belongs in \S B.3, near \pl{20}{658--664}.
+
+The $\alpha$-family and the auxiliary-noise family were originally sampled with different
+integrators. At $\alpha=0$ and $\sigma_{\mathrm{aux}}=0$ both branches use the same trained model
+(terminal losses $4.9116\times10^{-4}$ and $4.9046\times10^{-4}$), yet reported distributional
+errors of $0.0782$ and $0.0367$. Re-run under one integrator, the anchor agrees and the two
+families trace one curve (cross/within ratio $1.40$ matched against $3.44$ mismatched). If the
+paper reports both families as one comparison, it needs this sentence.
+
+\subsection*{4.6 Six-factor super-resolution sweep, and the Stable Diffusion rescore}
+
+\ADD{} --- \S B.8 and the transfer paragraph at \pl{28}{930--941}.
+
+\emph{Factor sweep.} At fixed resolution $48$, six downsampling factors were run. The source-rank
+bound is hit exactly at every one ($1728, 768, 432, 192, 108, 48$), taking the total to
+\textbf{nine exact agreements}. The trained flow beats doing nothing at every factor, with the
+gain \emph{falling} as the source degrades ($3.81, 2.26, 1.97, 1.29, 1.02, 0.59$ PSNR).
+
+That is the opposite direction from the pretrained model at \pl{28}{930--941}, and the contrast
+is the useful part: \textbf{a flow trained for its exact degradation beats doing nothing
+everywhere tested; a pretrained flow applied off the shelf is worse than doing nothing at
+$2\times$, $4\times$ and $8\times$}. The do-nothing regime lives in the mismatch, not in the task.
+
+\emph{Distributional rescore.} \S8 states that single-target cosine ``should not be interpreted
+as a standalone measure of distributional fidelity'' (\pl{8}{302--303}), yet the Stable Diffusion
+experiment is scored by CLIP cosine alone. It has now been rescored with four samples per image:
+
+\begin{center}
+\small
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+degradation & source align & best cosine gain & best energy gain & pairwise cosine at $s=0.8$\\
+\midrule
+$2\times$  & $0.997$ & $-0.189$ & $-0.174$ & $0.742$\\
+$4\times$  & $0.853$ & $-0.061$ & $+0.008$ & $0.736$\\
+$8\times$  & $0.733$ & $-0.055$ & $+0.054$ & $0.719$\\
+$16\times$ & $0.430$ & $+0.120$ & $+0.392$ & $0.706$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Null floor for the energy distance is $0.011$; the retained source has pairwise cosine $1.000$ by
+construction. Three consequences. At $2\times$ the do-nothing regime holds on \emph{both}
+instruments, so the headline claim no longer depends on the discredited metric. At $4\times$ the
+energy gain of $+0.008$ is below the null floor and should not be read as a reversal. At
+$8\times$ the two instruments genuinely invert --- cosine $-0.055$, energy $+0.054$ --- which is
+a \textbf{fourth instance of the paper's own mean-seeking inversion, in a production model}.
+
+\subsection*{4.7 The held-out label probe}
+
+\ADD{} --- \S B.7, near \pl{27}{885--893}.
+
+The probe reaches $0.058$ held-out accuracy against a chance level of $0.10$, on a disjoint
+$80/20$ split. Phrase it as ``does not extract label information'', not as an accuracy figure:
+the value sits about five standard errors \emph{below} chance, which indicates the probe
+anti-generalises rather than that it is informative.
+
+% ==================================================================
+\section{Mathematics available but not included}
+
+\subsection*{5.1 The threshold criterion is stronger than stated}
+
+\FIX{} --- \pl{4}{153--157}, \pl{14}{494--502}, Table B1 \pl{16}{}, \pl{16}{571}.
+
+The TODO at \pl{14}{498--502} asks whether $\Delta$ can have a root when $A\ge\cos\jmath$. It
+always does. Substituting $\beta=\sin\varphi$ and $\psi(\varphi)=\arccos(A\cos\varphi)$,
+\[
+\Delta/A=\cos(\psi-\varphi)-\cos(\varphi-\jmath),
+\]
+verified to $7\times10^{-15}$. At $\varphi=\jmath$ the second term is $\cos 0=1$, its maximum,
+while $\psi(\jmath)>\jmath$ strictly for $A<1$; hence $\Delta(\sin\jmath)<0$ \emph{for every}
+$A\in(0,1)$, and with $\Delta(1)>0$ a transition above $\sin\jmath$ exists unconditionally.
+Uniqueness is what the criterion governs: $\psi'\le A$ makes
+$h=2\varphi-\jmath-\psi$ strictly increasing, giving exactly one root above $\sin\jmath$; below
+it the condition reduces to $A\cos\varphi>\cos\jmath$, monotone, so a second root appears exactly
+when $A>\cos\jmath$. Confirmed on $120$ cells with no exceptions.
+
+Consequences: Theorem~2 should state existence unconditionally and $A<\cos\jmath$ as the
+uniqueness condition; the three dashes in Table B1 should be replaced by the measured upper roots
+$0.8286$, $0.5600$, $0.7586$, which agree with the analytic values to $\le 0.027$; and the
+comparison becomes \textbf{30 cells rather than 27}.
+
+\subsection*{5.2 The first-order derivation, and the asymptotic slope}
+
+\FIX{} --- \pl{12}{427--435}.
+
+The full derivation exists: the identity $G_0=\tfrac12V_0'$; the homogeneous-marginal limit in
+which every symmetric response vanishes exactly by parity and the skew response has the closed
+form $-I_\kappa N\Sigma^{-1}$ with
+$I_\kappa=\tfrac{4}{\sqrt{\mu(4-\mu)}}\arctan\sqrt{\mu/(4-\mu)}$; and the pairwise commuting model
+giving the suppression bound
+$\mathcal B_{ij}/|\mathcal A_{ij}|\ge 8/\sup_t|(\log v_i/v_j)'|$.
+
+On the asymptotic slope at \pl{12}{426}: the ratio slope is identically the skew slope minus the
+span slope, an identity holding in the data to $10^{-15}$. Over the reported window the span
+exponent is $0.573$ and the skew exponent $-0.159$, giving $-0.732$; a decade lower they are
+$0.933$ and $-0.019$, giving $-0.952$. So $-1$ is asymptotic and the shortfall is the span
+response being sublinear over a pre-asymptotic window --- \emph{not} the skew constant's decline,
+which pushes toward $-1$.
+
+\subsection*{5.3 The $1/t$ mechanism on the geodesic}
+
+\ADD{} --- \pl{15}{521--545}, \pl{8}{303--305}.
+
+Propositions~2 and 3 and \S A.6 are derived for the linear interpolant
+$z_t=(1-t)z_0+tz_1$, while every experiment uses the geodesic of (3.4). \S8 flags this as open.
+It is not: with $z_t$ and the auxiliary state both in $\mathrm{span}\{z_0,z_1\}$, the recovery
+determinant collapses to $-\sin((1-\alpha)t\theta)/\sin\theta$ and the sensitivity is
+\[
+\frac{\partial z_1}{\partial z_t}=\frac{\sin((1-\alpha t)\theta)}{\sin((1-\alpha)t\theta)},
+\]
+which diverges as $1/t$ exactly as in the flat case, differing only by the bounded factor
+$\sin\theta/\theta\in(0,1]$; the remainder is second order in $t$ for $\alpha=0$. Verified against
+finite differences in ambient dimension $64$ to $2.7\times10^{-10}$, and the truncation
+experiment's $\varepsilon$-ordering is identical under both interpolants. This closes the gap
+between \S6 and the retraction of flat-to-sphere transfer elsewhere in the paper.
+
+% ==================================================================
+\section{Figures}
+
+\begin{longtable}{@{}p{0.13\textwidth}p{0.36\textwidth}p{0.45\textwidth}@{}}
+\toprule
+Location & Issue & Action\\
+\midrule
+\endhead
+Figure 1, \pl{6}{206} & Three panels at one-third column width; axis labels and legends are
+unreadable at print size. & Use the three panels as separate figures, or give the composite a
+full page width.\\
+\addlinespace
+Figure 2, \pl{17}{574} & Plots $j=0$ points, which Table B1's own caption calls ``formal only'';
+also plots the three $A\ge\cos\jmath$ cells that have no analytic counterpart, which is why
+points appear at $A=0.9$ with no curve. & Restrict to the $27$ cells with a predicted threshold,
+or --- better --- adopt \S5.1 above and plot all $30$ with their upper roots.\\
+\addlinespace
+Figure 3, \pl{18}{591} & Legend entries are malformed: ``source-conditioned $\eta$:0.000 1''. &
+Regenerate.\\
+\addlinespace
+Figures 1 and 5 & Identical figure appears twice (\pl{6}{206} and \pl{24}{788}). & Consequence of
+the duplicated appendix.\\
+\addlinespace
+--- & \textbf{The paper contains no qualitative figures} despite two image experiments. &
+Two panels are available: super-resolution (degraded / regression / $\M_1$ / $\M_2$ / target) in
+which $\M_2$ is visibly smoother than $\M_1$ while scoring higher, and the regression arm
+sharpest of all while scoring worst; and Stable Diffusion (clean / retained / three strengths per
+degradation). The first makes the central metric argument visible rather than asserted.\\
+\bottomrule
+\end{longtable}
+
+% ==================================================================
+\section{Smaller items}
+
+\begin{longtable}{@{}p{0.15\textwidth}p{0.80\textwidth}@{}}
+\toprule
+Location & Comment\\
+\midrule
+\endhead
+\pl{6}{209}, Table C1 & ``$0.137$ (perfect sampler)''. Two distinct references exist:
+$A^2=0.1369$ for a fresh draw sharing the posterior mean, and $(As)^2=0.0493$ for a fresh draw
+given $c$ alone. The measured true-posterior row is $0.0500$. State which is meant; reporting
+both is clearer, since the gap between them is itself informative about what the metric rewards.\\
+\addlinespace
+\pl{9}{306--332} & Nine references. Thin for the venue, and an Extended Related Work is planned.
+The prior-art audit already covers sixteen items with quoted statements and identified
+differences; condensing it is not new research.\\
+\addlinespace
+--- & Nine sources in the prior-art record are marked as unverified secondary summaries, with a
+standing note that each must be confirmed before submission. The load-bearing one is the prior
+for the $1/t$ mechanism in \S6/\S A.6. If it proves more than the summary suggests, that
+section's contribution narrows. This is an hour of reading, not an experiment.\\
+\addlinespace
+\pl{8}{303--305} & The limitation ``whether the same mechanism persists under \dots\ stochastic
+dynamics \dots\ remains open'' should be revised in light of \S4.3 above.\\
+\addlinespace
+\pl{18}{604--607}, \pl{26}{853--855} & The $4\times$ training result ($0.215\to0.161$) comes from
+the earlier single-learning-rate sweep. State which learning rate, or re-run it inside the
+three-rate grid.\\
+\bottomrule
+\end{longtable}
+
+% ==================================================================
+\section{Suggested order of work}
+
+\begin{enumerate}
+\item Merge Appendix C into B and delete C. This removes most of the self-contradictions in
+\S2 automatically, and is the single largest reduction in similarity-check exposure.
+\item Fill the nine TODOs from the prepared material, and delete the paste artefact at
+\pl{22}{722}.
+\item Apply the superseded numbers in \S3, and add one sentence on the evaluation-noise floor to
+the evaluation protocol.
+\item Adopt the strengthened threshold statement (\S5.1); it fills three table cells and takes
+the comparison to $30$.
+\item Add the two figures and the masked-diffusion limitation (\S4.3) --- the two additions most
+likely to be raised by a reviewer if absent.
+\item Complete the checklist.
+\end{enumerate}
+
+Items 1--3 are corrections to existing text. Items 4--5 add material that is already computed.
+Nothing in this document requires a new experiment.
+
+\end{document}
